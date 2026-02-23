@@ -398,6 +398,22 @@ def SCNR_MTF_MIDTONES_validator(form, field):
         raise ValidationError('Value must be 1.0 or less')
 
 
+def IMAGE_DENOISE_validator(form, field):
+    if field.data not in list(zip(*form.IMAGE_DENOISE_choices))[0]:
+        raise ValidationError('Please select a valid denoise algorithm')
+
+
+def IMAGE_DENOISE_STRENGTH_validator(form, field):
+    if not isinstance(field.data, (int, float)):
+        raise ValidationError('Please enter valid number')
+
+    if field.data < 1:
+        raise ValidationError('Strength must be 1 or more')
+
+    if field.data > 5:
+        raise ValidationError('Strength must be 5 or less')
+
+
 def TEMP_DISPLAY_validator(form, field):
     if field.data not in list(zip(*form.TEMP_DISPLAY_choices))[0]:
         raise ValidationError('Please select the temperature system for display')
@@ -3582,6 +3598,13 @@ class IndiAllskyConfigForm(FlaskForm):
         ('green_mtf', 'Midtone Transfer Function'),
     )
 
+    IMAGE_DENOISE_choices = (
+        ('', 'Disabled'),
+        ('median_blur', 'Median Blur'),
+        ('gaussian_blur', 'Gaussian Blur'),
+        ('nlm', 'Non-Local Means'),
+    )
+
     IMAGE_EXPORT_RAW_choices = (
         ('', 'Disabled'),
         ('png', 'PNG'),
@@ -4293,6 +4316,10 @@ class IndiAllskyConfigForm(FlaskForm):
     SCNR_ALGORITHM_DAY               = SelectField('SCNR (Day)', choices=SCNR_ALGORITHM_choices, validators=[SCNR_ALGORITHM_validator])
     SCNR_MTF_MIDTONES                = FloatField('SCNR MTF Midtones (Night)', validators=[SCNR_MTF_MIDTONES_validator])
     SCNR_MTF_MIDTONES_DAY            = FloatField('SCNR MTF Midtones (Day)', validators=[SCNR_MTF_MIDTONES_validator])
+    IMAGE_DENOISE                    = SelectField('Denoise (Night)', choices=IMAGE_DENOISE_choices, validators=[IMAGE_DENOISE_validator])
+    IMAGE_DENOISE_DAY                = SelectField('Denoise (Day)', choices=IMAGE_DENOISE_choices, validators=[IMAGE_DENOISE_validator])
+    IMAGE_DENOISE_STRENGTH           = IntegerField('Denoise Strength (Night)', validators=[IMAGE_DENOISE_STRENGTH_validator], widget=NumberInput(step=1))
+    IMAGE_DENOISE_STRENGTH_DAY       = IntegerField('Denoise Strength (Day)', validators=[IMAGE_DENOISE_STRENGTH_validator], widget=NumberInput(step=1))
     WBR_FACTOR                       = FloatField('Red Balance Factor (Night)', validators=[WB_FACTOR_validator], widget=NumberInput(step=0.05))
     WBG_FACTOR                       = FloatField('Green Balance Factor', validators=[WB_FACTOR_validator], widget=NumberInput(step=0.05))
     WBB_FACTOR                       = FloatField('Blue Balance Factor', validators=[WB_FACTOR_validator], widget=NumberInput(step=0.05))
@@ -8909,6 +8936,7 @@ class IndiAllskyImageProcessingForm(FlaskForm):
     CFA_PATTERN_choices = IndiAllskyConfigForm.CFA_PATTERN_choices
     IMAGE_COLORMAP_choices = IndiAllskyConfigForm.IMAGE_COLORMAP_choices
     SCNR_ALGORITHM_choices = IndiAllskyConfigForm.SCNR_ALGORITHM_choices
+    IMAGE_DENOISE_choices = IndiAllskyConfigForm.IMAGE_DENOISE_choices
     TEXT_PROPERTIES__PIL_FONT_FILE_choices = IndiAllskyConfigForm.TEXT_PROPERTIES__PIL_FONT_FILE_choices
 
 
@@ -8950,6 +8978,8 @@ class IndiAllskyImageProcessingForm(FlaskForm):
     CFA_PATTERN                      = SelectField('Bayer Pattern', choices=CFA_PATTERN_choices, validators=[CFA_PATTERN_validator])
     SCNR_ALGORITHM                   = SelectField('SCNR (green reduction)', choices=IndiAllskyConfigForm.SCNR_ALGORITHM_choices, validators=[SCNR_ALGORITHM_validator])
     SCNR_MTF_MIDTONES                = FloatField('SCNR MTF Midtones', validators=[SCNR_MTF_MIDTONES_validator])
+    IMAGE_DENOISE                    = SelectField('Denoise', choices=IndiAllskyConfigForm.IMAGE_DENOISE_choices, validators=[IMAGE_DENOISE_validator])
+    IMAGE_DENOISE_STRENGTH           = IntegerField('Denoise Strength', validators=[IMAGE_DENOISE_STRENGTH_validator], widget=NumberInput(step=1))
     WBR_FACTOR                       = FloatField('Red Balance Factor', validators=[WB_FACTOR_validator], widget=NumberInput(step=0.05))
     WBG_FACTOR                       = FloatField('Green Balance Factor', validators=[WB_FACTOR_validator], widget=NumberInput(step=0.05))
     WBB_FACTOR                       = FloatField('Blue Balance Factor', validators=[WB_FACTOR_validator], widget=NumberInput(step=0.05))

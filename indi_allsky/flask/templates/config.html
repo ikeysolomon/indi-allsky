@@ -1730,7 +1730,7 @@ var camera_id = {{ camera_id }};
                 <li>Gaussian Blur &mdash; Kernel smoothing, lowest cost. Softens everything uniformly.</li>
                 <li>Median Blur &mdash; Rank filter, low cost. Eliminates hot pixels without blurring edges.</li>
                 <li>Bilateral &mdash; Edge-aware filter, moderate cost. Smooths sky noise while preserving star edges.</li>
-                <li>PCA-NLM &mdash; Patch-based filter, moderate cost (~1.5-2.5 s). Best texture and star preservation.</li>
+                <li>NLM &mdash; Non-Local Means, luminance-only (~1-2 s). Best texture and star preservation.</li>
               </ul>
             </div>
         </div>

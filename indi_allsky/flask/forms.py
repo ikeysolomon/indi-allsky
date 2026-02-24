@@ -3625,7 +3625,7 @@ class IndiAllskyConfigForm(FlaskForm):
         ('gaussian_blur', 'Gaussian Blur (fast, gentle smoothing)'),
         ('median_blur', 'Median Blur (fast, good for hot pixels)'),
         ('bilateral', 'Bilateral (edge-aware, best quality)'),
-        ('pca_nlm', 'PCA-NLM (patch-based, highest quality, slower)'),
+        ('nlm_luma', 'NLM (patch-based, highest quality, moderate cost)'),
     )
 
     IMAGE_EXPORT_RAW_choices = (

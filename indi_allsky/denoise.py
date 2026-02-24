@@ -55,23 +55,29 @@ class IndiAllskyDenoise(object):
 
 
     # ------------------------------------------------------------------
-    # Algorithm: Median Blur (conditional — hot pixel removal)
+    # Algorithm: Median Blur (adaptive conditional — salt-and-pepper removal)
     # ------------------------------------------------------------------
     def median_blur(self, scidata):
-        """Apply a conditional median filter (hot/cold pixel removal).
+        """Apply an adaptive conditional median filter.
 
-        Computes a local median for each pixel.  Only pixels that differ
-        from their neighbourhood median by more than a threshold are
-        replaced; clean pixels pass through untouched.  This is the same
-        approach used by G'MIC's "Remove Hot Pixels" filter.
+        Targets salt-and-pepper noise — random bright and dark speckles
+        caused by sensor readout noise.  Computes a local median and a
+        local standard deviation for each pixel.  Pixels that deviate
+        from their neighbourhood median by more than ``multiplier ×
+        local_std`` are replaced with the median; the rest pass through
+        untouched, preserving stars and real detail.
+
+        Dark sky regions (low local std) get a tight threshold that
+        catches faint noise speckles.  Bright or textured areas (high
+        local std) get a loose threshold that preserves detail.
 
         The strength parameter controls the kernel size:
           1 → 3×3,  2 → 5×5,  3 → 7×7  (ksize = strength * 2 + 1)
 
-        The threshold is derived from the image dtype:
-          uint8  → 15 counts
-          uint16 → 15 × 257 ≈ 3855 counts   (same proportion of range)
-          float  → 15 / 255 ≈ 0.059
+        The outlier multiplier is fixed at 2.0 (catches typical noise
+        speckles while preserving real structure).
+        A minimum floor prevents false positives in perfectly uniform
+        regions where local std ≈ 0.
 
         Strength range: 1-5.  Higher values use a larger neighbourhood.
         """
@@ -84,30 +90,41 @@ class IndiAllskyDenoise(object):
         strength = max(1, min(strength, 5))
 
         ksize = strength * 2 + 1  # always odd: 3, 5, 7, 9, 11
+        sigma_ksize = max(ksize, 7)  # std-dev window at least 7×7
+        if sigma_ksize % 2 == 0:
+            sigma_ksize += 1
+
+        multiplier = numpy.float32(2.0)  # 2-sigma — catches noise speckles
 
         # Compute local median
         median = cv2.medianBlur(scidata, ksize)
 
-        # Threshold: ~6 % of the dynamic range
-        if scidata.dtype == numpy.uint8:
-            threshold = numpy.uint8(15)
-        elif scidata.dtype == numpy.uint16:
-            threshold = numpy.uint16(3855)
-        elif scidata.dtype == numpy.int16:
-            threshold = numpy.int16(1928)
-        else:
-            # float
-            threshold = numpy.float32(15.0 / 255.0)
+        # Compute local standard deviation via Gaussian-weighted moments
+        scidata_f32 = scidata.astype(numpy.float32)
+        local_mean = cv2.GaussianBlur(scidata_f32, (sigma_ksize, sigma_ksize), 0)
+        local_mean_sq = cv2.GaussianBlur(scidata_f32 * scidata_f32, (sigma_ksize, sigma_ksize), 0)
+        local_var = cv2.max(local_mean_sq - local_mean * local_mean, 0)
+        local_std = cv2.sqrt(local_var)
 
-        # Only replace outlier pixels; leave clean pixels untouched
-        diff = cv2.absdiff(scidata, median)
-        outlier_mask = diff > threshold
+        # Adaptive threshold = multiplier × local_std, with a floor
+        if scidata.dtype == numpy.uint8:
+            floor = numpy.float32(5.0)
+        elif scidata.dtype in (numpy.uint16, numpy.int16):
+            floor = numpy.float32(5.0 * 257.0)  # ~1285
+        else:
+            floor = numpy.float32(5.0 / 255.0)
+
+        threshold_map = cv2.max(multiplier * local_std, floor)
+
+        # Only replace noisy pixels; leave clean pixels untouched
+        diff = cv2.absdiff(scidata, median).astype(numpy.float32)
+        outlier_mask = diff > threshold_map
         result = scidata.copy()
         result[outlier_mask] = median[outlier_mask]
 
         n_replaced = int(numpy.count_nonzero(outlier_mask))
-        logger.info('Applying conditional median denoise, ksize=%d threshold=%s replaced=%d pixels',
-                     ksize, str(threshold), n_replaced)
+        logger.info('Applying adaptive median denoise, ksize=%d multiplier=%.1f replaced=%d pixels',
+                     ksize, float(multiplier), n_replaced)
 
         return result
 

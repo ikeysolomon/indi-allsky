@@ -43,14 +43,14 @@ class IndiAllskyDenoise(object):
     def _get_bilateral_sigma(self):
         """Return (sigmaColor, sigmaSpace) for the bilateral filter."""
         if self.config.get('USE_NIGHT_COLOR', True):
-            sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR', 20))
-            sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE', 35))
+            sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR', 10))
+            sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE', 15))
         elif self.night_av[constants.NIGHT_NIGHT]:
-            sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR', 20))
-            sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE', 35))
+            sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR', 10))
+            sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE', 15))
         else:
-            sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR_DAY', 20))
-            sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE_DAY', 35))
+            sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR_DAY', 10))
+            sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE_DAY', 15))
 
         return max(1, sigma_color), max(1, sigma_space)
 

@@ -3611,9 +3611,9 @@ class IndiAllskyConfigForm(FlaskForm):
 
     IMAGE_DENOISE_choices = (
         ('', 'Disabled'),
-        ('median_blur', 'Median Blur'),
-        ('gaussian_blur', 'Gaussian Blur'),
-        ('nlm', 'Non-Local Means'),
+        ('gaussian_blur', 'Gaussian Blur (fast, gentle smoothing)'),
+        ('median_blur', 'Median Blur (fast, good for hot pixels)'),
+        ('bilateral', 'Bilateral (edge-aware, best quality)'),
     )
 
     IMAGE_EXPORT_RAW_choices = (

@@ -11,10 +11,10 @@ logger = logging.getLogger('indi_allsky')
 class IndiAllskyDenoise(object):
     """Lightweight image denoising for allsky cameras.
 
-    Provides three Pi-friendly denoising algorithms:
-      - median_blur: Fast median filter (removes hot pixels / salt-and-pepper noise)
+    Provides three Pi-friendly denoising algorithms (quality order):
       - gaussian_blur: Fast Gaussian filter (gentle smoothing)
-      - nlm: OpenCV fastNlMeans denoising (best quality, moderate CPU)
+      - median_blur: Fast median filter (removes hot pixels / salt-and-pepper noise)
+      - bilateral: Edge-aware filter (smooths sky while preserving star edges)
 
     Each algorithm respects a configurable strength parameter so users
     can tune the trade-off between noise reduction and star preservation.
@@ -90,17 +90,21 @@ class IndiAllskyDenoise(object):
 
 
     # ------------------------------------------------------------------
-    # Algorithm: Non-Local Means (best quality, heavier CPU)
+    # Algorithm: Bilateral Filter (edge-aware, best quality)
     # ------------------------------------------------------------------
-    def nlm(self, scidata):
-        """Apply OpenCV's fast Non-Local Means denoising.
+    def bilateral(self, scidata):
+        """Apply an edge-aware bilateral filter.
 
-        The strength parameter controls the filter strength (h):
-          - For 8-bit images: h = strength * 3   (range ~3-15)
-          - For 16-bit images: h = strength * 300 (scaled to bit depth)
+        Smooths areas of similar brightness (noisy sky background) while
+        preserving sharp intensity transitions (star edges).  Much faster
+        than Non-Local Means but higher quality than Gaussian/Median for
+        astro images.
+
+        The strength parameter controls the filter size (d) and sigma:
+          d      = strength * 2 + 1   (diameter: 3, 5, 7, 9, 11)
+          sigmaColor = strength * 25  (colour-space influence)
+          sigmaSpace = strength * 25  (spatial influence)
         Strength range: 1-5.
-
-        Works on both grayscale and colour frames.
         """
         strength = self._get_strength()
 
@@ -109,32 +113,20 @@ class IndiAllskyDenoise(object):
 
         strength = max(1, min(strength, 5))
 
+        d = strength * 2 + 1
+        sigma = strength * 25
+
         is_16bit = scidata.dtype in (numpy.uint16, numpy.int16)
-        is_color = len(scidata.shape) == 3
 
         if is_16bit:
-            # fastNlMeans only works on 8-bit; convert, denoise, scale back
+            # bilateralFilter only works on 8-bit; convert, filter, scale back
             max_val = scidata.max() if scidata.max() > 0 else 1
             scidata_8 = (scidata.astype(numpy.float32) / max_val * 255).astype(numpy.uint8)
 
-            h = strength * 3
+            logger.info('Applying bilateral denoise (16-bit via 8-bit), d=%d sigma=%d', d, sigma)
+            denoised_8 = cv2.bilateralFilter(scidata_8, d, sigma, sigma)
 
-            if is_color:
-                logger.info('Applying NLM color denoise (16-bit via 8-bit), h=%d', h)
-                denoised_8 = cv2.fastNlMeansDenoisingColored(scidata_8, None, h, h, 7, 21)
-            else:
-                logger.info('Applying NLM denoise (16-bit via 8-bit), h=%d', h)
-                denoised_8 = cv2.fastNlMeansDenoising(scidata_8, None, h, 7, 21)
-
-            # Scale back to original range
-            denoised = (denoised_8.astype(numpy.float32) / 255.0 * max_val).astype(scidata.dtype)
-            return denoised
+            return (denoised_8.astype(numpy.float32) / 255.0 * max_val).astype(scidata.dtype)
         else:
-            h = strength * 3
-
-            if is_color:
-                logger.info('Applying NLM color denoise, h=%d', h)
-                return cv2.fastNlMeansDenoisingColored(scidata, None, h, h, 7, 21)
-            else:
-                logger.info('Applying NLM denoise, h=%d', h)
-                return cv2.fastNlMeansDenoising(scidata, None, h, 7, 21)
+            logger.info('Applying bilateral denoise, d=%d sigma=%d', d, sigma)
+            return cv2.bilateralFilter(scidata, d, sigma, sigma)

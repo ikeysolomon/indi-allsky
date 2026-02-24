@@ -135,16 +135,23 @@ class IndiAllskyDenoise(object):
         needs_conversion = scidata.dtype not in (numpy.uint8, numpy.float32)
 
         if needs_conversion:
-            # bilateralFilter supports uint8 and float32; scale to float32
-            # in 0-255 range so sigma values behave identically to 8-bit
-            max_val = scidata.max() if scidata.max() > 0 else 1
-            scale = numpy.float32(255.0 / max_val)
-            scidata_f32 = scidata.astype(numpy.float32) * scale
+            # bilateralFilter supports uint8 and float32.
+            # OpenCV float32 bilateral is optimized for 0.0-1.0 range.
+            # Normalize data to 0-1, scale sigmaColor to match (divide
+            # by 255 since user-facing sigma is calibrated for 0-255).
+            # sigmaSpace is in pixel units and needs no adjustment.
+            if numpy.issubdtype(scidata.dtype, numpy.integer):
+                dtype_max = numpy.float32(numpy.iinfo(scidata.dtype).max)
+            else:
+                dtype_max = numpy.float32(1.0)
 
-            logger.info('Applying bilateral denoise (float32), d=%d sigmaColor=%d sigmaSpace=%d', d, sigma_color, sigma_space)
-            denoised_f32 = cv2.bilateralFilter(scidata_f32, d, sigma_color, sigma_space)
+            sigma_color_norm = float(sigma_color) / 255.0
+            scidata_f32 = scidata.astype(numpy.float32) / dtype_max
 
-            return numpy.clip(denoised_f32 / scale, 0, max_val).astype(scidata.dtype)
+            logger.info('Applying bilateral denoise (float32 0-1), d=%d sigmaColor=%.4f sigmaSpace=%d', d, sigma_color_norm, sigma_space)
+            denoised_f32 = cv2.bilateralFilter(scidata_f32, d, sigma_color_norm, float(sigma_space))
+
+            return numpy.clip(numpy.rint(denoised_f32 * dtype_max), 0, float(dtype_max)).astype(scidata.dtype)
         else:
             logger.info('Applying bilateral denoise, d=%d sigmaColor=%d sigmaSpace=%d', d, sigma_color, sigma_space)
             return cv2.bilateralFilter(scidata, d, sigma_color, sigma_space)

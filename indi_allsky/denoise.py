@@ -11,11 +11,10 @@ logger = logging.getLogger('indi_allsky')
 class IndiAllskyDenoise(object):
     """Lightweight image denoising for allsky cameras.
 
-    Provides four denoising algorithms (quality order):
+    Provides three Pi-friendly denoising algorithms (quality order):
       - gaussian_blur: Fast Gaussian filter (gentle smoothing)
       - median_blur: Fast median filter (removes hot pixels / salt-and-pepper noise)
       - bilateral: Edge-aware filter (smooths sky while preserving star edges)
-      - nlm_luma: Non-Local Means, luminance-only (best quality, moderate cost)
 
     Each algorithm respects a configurable strength parameter so users
     can tune the trade-off between noise reduction and star preservation.
@@ -56,14 +55,25 @@ class IndiAllskyDenoise(object):
 
 
     # ------------------------------------------------------------------
-    # Algorithm: Median Blur
+    # Algorithm: Median Blur (conditional — hot pixel removal)
     # ------------------------------------------------------------------
     def median_blur(self, scidata):
-        """Apply a fast median blur.
+        """Apply a conditional median filter (hot/cold pixel removal).
 
-        The strength parameter maps to the kernel size:
-          1 → 3x3,  2 → 5x5,  3 → 7x7  (formula: ksize = strength * 2 + 1)
-        Strength range: 1-5.  Higher values smear stars.
+        Computes a local median for each pixel.  Only pixels that differ
+        from their neighbourhood median by more than a threshold are
+        replaced; clean pixels pass through untouched.  This is the same
+        approach used by G'MIC's "Remove Hot Pixels" filter.
+
+        The strength parameter controls the kernel size:
+          1 → 3×3,  2 → 5×5,  3 → 7×7  (ksize = strength * 2 + 1)
+
+        The threshold is derived from the image dtype:
+          uint8  → 15 counts
+          uint16 → 15 × 257 ≈ 3855 counts   (same proportion of range)
+          float  → 15 / 255 ≈ 0.059
+
+        Strength range: 1-5.  Higher values use a larger neighbourhood.
         """
         strength = self._get_strength()
 
@@ -75,9 +85,31 @@ class IndiAllskyDenoise(object):
 
         ksize = strength * 2 + 1  # always odd: 3, 5, 7, 9, 11
 
-        logger.info('Applying median blur denoise, ksize=%d', ksize)
+        # Compute local median
+        median = cv2.medianBlur(scidata, ksize)
 
-        return cv2.medianBlur(scidata, ksize)
+        # Threshold: ~6 % of the dynamic range
+        if scidata.dtype == numpy.uint8:
+            threshold = numpy.uint8(15)
+        elif scidata.dtype == numpy.uint16:
+            threshold = numpy.uint16(3855)
+        elif scidata.dtype == numpy.int16:
+            threshold = numpy.int16(1928)
+        else:
+            # float
+            threshold = numpy.float32(15.0 / 255.0)
+
+        # Only replace outlier pixels; leave clean pixels untouched
+        diff = cv2.absdiff(scidata, median)
+        outlier_mask = diff > threshold
+        result = scidata.copy()
+        result[outlier_mask] = median[outlier_mask]
+
+        n_replaced = int(numpy.count_nonzero(outlier_mask))
+        logger.info('Applying conditional median denoise, ksize=%d threshold=%s replaced=%d pixels',
+                     ksize, str(threshold), n_replaced)
+
+        return result
 
 
     # ------------------------------------------------------------------
@@ -156,88 +188,3 @@ class IndiAllskyDenoise(object):
         else:
             logger.info('Applying bilateral denoise, d=%d sigmaColor=%d sigmaSpace=%d', d, sigma_color, sigma_space)
             return cv2.bilateralFilter(scidata, d, sigma_color, sigma_space)
-
-
-    # ------------------------------------------------------------------
-    # Algorithm: Non-Local Means — luminance-only, tuned (best quality)
-    # ------------------------------------------------------------------
-    def nlm_luma(self, scidata):
-        """Apply Non-Local Means denoising (luminance-only, tight search).
-
-        Uses OpenCV's C-optimised NLM engine but applies two key speedups
-        over the naive ``fastNlMeansDenoisingColored`` call:
-
-          1. Colour images: only denoise the luminance (Y) channel.
-             Chrominance carries little perceptible noise so this gives
-             a ~3× speed-up with no visible quality loss.
-          2. Tighter search window: ``searchWindowSize = strength * 4 + 3``
-             (11 at strength 2, 15 at strength 3).  Much faster than the
-             default 21 and still covers the useful self-similarity range
-             for allsky images.
-
-        The strength parameter controls:
-          h (filter strength)    = strength * 5 + 3   (8, 13, 18, 23, 28)
-          templateWindowSize     = strength * 2 + 1   (3, 5, 7, 9, 11)
-          searchWindowSize       = strength * 4 + 3   (7, 11, 15, 19, 23)
-
-        Typical Pi 4 performance at strength 3: ~1-2 s.
-        Strength range: 1-5.
-        """
-        strength = self._get_strength()
-
-        if strength <= 0:
-            return scidata
-
-        strength = max(1, min(strength, 5))
-
-        h = strength * 5 + 3
-        template_ws = strength * 2 + 1  # must be odd
-        search_ws = strength * 4 + 3    # must be odd
-
-        # --- Handle bit depth ------------------------------------------
-        original_dtype = scidata.dtype
-        needs_conversion = original_dtype not in (numpy.uint8,)
-
-        if needs_conversion:
-            # fastNlMeansDenoising only accepts uint8; normalise to 0-255
-            if numpy.issubdtype(original_dtype, numpy.integer):
-                dtype_max = numpy.float32(numpy.iinfo(original_dtype).max)
-            else:
-                dtype_max = numpy.float32(1.0)
-            scidata_8 = numpy.clip(
-                scidata.astype(numpy.float32) / dtype_max * 255.0,
-                0, 255,
-            ).astype(numpy.uint8)
-        else:
-            dtype_max = numpy.float32(255.0)
-            scidata_8 = scidata
-
-        # --- Colour: luminance-only denoise (~3× faster) ---------------
-        if scidata_8.ndim == 3:
-            ycrcb = cv2.cvtColor(scidata_8, cv2.COLOR_BGR2YCrCb)
-
-            logger.info(
-                'Applying NLM denoise (luma-only), h=%d template=%d search=%d',
-                h, template_ws, search_ws,
-            )
-            ycrcb[:, :, 0] = cv2.fastNlMeansDenoising(
-                ycrcb[:, :, 0], None, h, template_ws, search_ws,
-            )
-            denoised_8 = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
-        else:
-            logger.info(
-                'Applying NLM denoise (mono), h=%d template=%d search=%d',
-                h, template_ws, search_ws,
-            )
-            denoised_8 = cv2.fastNlMeansDenoising(
-                scidata_8, None, h, template_ws, search_ws,
-            )
-
-        # --- Convert back to original dtype ----------------------------
-        if needs_conversion:
-            return numpy.clip(
-                numpy.rint(denoised_8.astype(numpy.float32) / 255.0 * dtype_max),
-                0, float(dtype_max),
-            ).astype(original_dtype)
-        else:
-            return denoised_8

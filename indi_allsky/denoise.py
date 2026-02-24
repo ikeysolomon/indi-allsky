@@ -176,7 +176,7 @@ class IndiAllskyDenoise(object):
              for allsky images.
 
         The strength parameter controls:
-          h (filter strength)    = strength * 3 + 1   (4, 7, 10, 13, 16)
+          h (filter strength)    = strength * 5 + 3   (8, 13, 18, 23, 28)
           templateWindowSize     = strength * 2 + 1   (3, 5, 7, 9, 11)
           searchWindowSize       = strength * 4 + 3   (7, 11, 15, 19, 23)
 
@@ -190,7 +190,7 @@ class IndiAllskyDenoise(object):
 
         strength = max(1, min(strength, 5))
 
-        h = strength * 3 + 1
+        h = strength * 5 + 3
         template_ws = strength * 2 + 1  # must be odd
         search_ws = strength * 4 + 3    # must be odd
 

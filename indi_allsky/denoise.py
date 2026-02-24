@@ -138,7 +138,7 @@ class IndiAllskyDenoise(object):
             # bilateralFilter supports uint8 and float32; scale to float32
             # in 0-255 range so sigma values behave identically to 8-bit
             max_val = scidata.max() if scidata.max() > 0 else 1
-            scale = 255.0 / max_val
+            scale = numpy.float32(255.0 / max_val)
             scidata_f32 = scidata.astype(numpy.float32) * scale
 
             logger.info('Applying bilateral denoise (float32), d=%d sigmaColor=%d sigmaSpace=%d', d, sigma_color, sigma_space)

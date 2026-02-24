@@ -551,6 +551,28 @@ var fullscreen = false;  //initial state
         <div class="col-sm-8">Range: 1-5. Higher = stronger noise reduction.</div>
     </div>
 
+    <div class="form-group row">
+        <div class="col-sm-2">
+            {{ form_image_processing.BILATERAL_SIGMA_COLOR.label(class='col-form-label') }}
+        </div>
+        <div class="col-sm-2">
+            {{ form_image_processing.BILATERAL_SIGMA_COLOR(class='form-control bg-secondary') }}
+            <div id="BILATERAL_SIGMA_COLOR-error" class="invalid-feedback text-danger" style="display: none;"></div>
+        </div>
+        <div class="col-sm-8">How much brightness difference to blend across (1-150). Low (10-20) preserves star edges tightly. High (50+) smooths more aggressively. Default: 20</div>
+    </div>
+
+    <div class="form-group row">
+        <div class="col-sm-2">
+            {{ form_image_processing.BILATERAL_SIGMA_SPACE.label(class='col-form-label') }}
+        </div>
+        <div class="col-sm-2">
+            {{ form_image_processing.BILATERAL_SIGMA_SPACE(class='form-control bg-secondary') }}
+            <div id="BILATERAL_SIGMA_SPACE-error" class="invalid-feedback text-danger" style="display: none;"></div>
+        </div>
+        <div class="col-sm-8">How far away pixels can influence each other (1-150). Low (15-35) for fine detail. High (50+) for broad smooth gradients. Default: 35</div>
+    </div>
+
     <hr>
 
     <div class="form-group row">
@@ -2021,6 +2043,8 @@ const field_names = [
     'SCNR_MTF_MIDTONES',
     'IMAGE_DENOISE',
     'IMAGE_DENOISE_STRENGTH',
+    'BILATERAL_SIGMA_COLOR',
+    'BILATERAL_SIGMA_SPACE',
     'WBR_FACTOR',
     'WBG_FACTOR',
     'WBB_FACTOR',
@@ -2258,11 +2282,34 @@ function init() {
     $('#DISABLE_PROCESSING').prop('checked', false);
 }
 
+// Bilateral sigma fields
+$('#IMAGE_DENOISE').on('change', function() {
+    if ($(this).val() === 'bilateral') {
+        $('#BILATERAL_SIGMA_COLOR').removeAttr('readonly disabled');
+        $('#BILATERAL_SIGMA_COLOR').removeClass('bg-dark text-secondary');
+        $('#BILATERAL_SIGMA_SPACE').removeAttr('readonly disabled');
+        $('#BILATERAL_SIGMA_SPACE').removeClass('bg-dark text-secondary');
+    } else {
+        $('#BILATERAL_SIGMA_COLOR').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_COLOR').addClass('bg-dark text-secondary');
+        $('#BILATERAL_SIGMA_SPACE').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_SPACE').addClass('bg-dark text-secondary');
+    }
+});
+
 
 $( document ).ready(function() {
     $('#fits-image').on("click", function() {
         goFullscreen(this);
     });
+
+    // Bilateral sigma fields - grey out on page load when not bilateral
+    if ($('#IMAGE_DENOISE').val() !== 'bilateral') {
+        $('#BILATERAL_SIGMA_COLOR').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_COLOR').addClass('bg-dark text-secondary');
+        $('#BILATERAL_SIGMA_SPACE').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_SPACE').addClass('bg-dark text-secondary');
+    }
 
     init();
 });

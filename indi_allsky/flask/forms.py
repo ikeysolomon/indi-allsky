@@ -425,6 +425,17 @@ def IMAGE_DENOISE_STRENGTH_validator(form, field):
         raise ValidationError('Strength must be 5 or less')
 
 
+def BILATERAL_SIGMA_validator(form, field):
+    if not isinstance(field.data, (int, float)):
+        raise ValidationError('Please enter valid number')
+
+    if field.data < 1:
+        raise ValidationError('Sigma must be 1 or more')
+
+    if field.data > 150:
+        raise ValidationError('Sigma must be 150 or less')
+
+
 def TEMP_DISPLAY_validator(form, field):
     if field.data not in list(zip(*form.TEMP_DISPLAY_choices))[0]:
         raise ValidationError('Please select the temperature system for display')
@@ -4331,6 +4342,10 @@ class IndiAllskyConfigForm(FlaskForm):
     IMAGE_DENOISE_DAY                = SelectField('Denoise (Day)', choices=IMAGE_DENOISE_choices, validators=[IMAGE_DENOISE_validator])
     IMAGE_DENOISE_STRENGTH           = IntegerField('Denoise Strength (Night)', validators=[IMAGE_DENOISE_STRENGTH_validator], widget=NumberInput(step=1))
     IMAGE_DENOISE_STRENGTH_DAY       = IntegerField('Denoise Strength (Day)', validators=[IMAGE_DENOISE_STRENGTH_validator], widget=NumberInput(step=1))
+    BILATERAL_SIGMA_COLOR            = IntegerField('Bilateral Sigma Color (Night)', validators=[BILATERAL_SIGMA_validator], widget=NumberInput(step=1))
+    BILATERAL_SIGMA_COLOR_DAY        = IntegerField('Bilateral Sigma Color (Day)', validators=[BILATERAL_SIGMA_validator], widget=NumberInput(step=1))
+    BILATERAL_SIGMA_SPACE            = IntegerField('Bilateral Sigma Space (Night)', validators=[BILATERAL_SIGMA_validator], widget=NumberInput(step=1))
+    BILATERAL_SIGMA_SPACE_DAY        = IntegerField('Bilateral Sigma Space (Day)', validators=[BILATERAL_SIGMA_validator], widget=NumberInput(step=1))
     WBR_FACTOR                       = FloatField('Red Balance Factor (Night)', validators=[WB_FACTOR_validator], widget=NumberInput(step=0.05))
     WBG_FACTOR                       = FloatField('Green Balance Factor', validators=[WB_FACTOR_validator], widget=NumberInput(step=0.05))
     WBB_FACTOR                       = FloatField('Blue Balance Factor', validators=[WB_FACTOR_validator], widget=NumberInput(step=0.05))
@@ -8993,6 +9008,8 @@ class IndiAllskyImageProcessingForm(FlaskForm):
     SCNR_MTF_MIDTONES                = FloatField('SCNR MTF Midtones', validators=[SCNR_MTF_MIDTONES_validator])
     IMAGE_DENOISE                    = SelectField('Denoise', choices=IndiAllskyConfigForm.IMAGE_DENOISE_choices, validators=[IMAGE_DENOISE_validator])
     IMAGE_DENOISE_STRENGTH           = IntegerField('Denoise Strength', validators=[IMAGE_DENOISE_STRENGTH_validator], widget=NumberInput(step=1))
+    BILATERAL_SIGMA_COLOR            = IntegerField('Bilateral Sigma Color', validators=[BILATERAL_SIGMA_validator], widget=NumberInput(step=1))
+    BILATERAL_SIGMA_SPACE            = IntegerField('Bilateral Sigma Space', validators=[BILATERAL_SIGMA_validator], widget=NumberInput(step=1))
     WBR_FACTOR                       = FloatField('Red Balance Factor', validators=[WB_FACTOR_validator], widget=NumberInput(step=0.05))
     WBG_FACTOR                       = FloatField('Green Balance Factor', validators=[WB_FACTOR_validator], widget=NumberInput(step=0.05))
     WBB_FACTOR                       = FloatField('Blue Balance Factor', validators=[WB_FACTOR_validator], widget=NumberInput(step=0.05))

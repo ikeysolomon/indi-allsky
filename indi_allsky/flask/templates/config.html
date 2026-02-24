@@ -1727,9 +1727,9 @@ var camera_id = {{ camera_id }};
             <div>Denoise algorithm to reduce image noise (applied before stretch)</div>
             <div>
               <ul>
-                <li>Median Blur &mdash; Fast, removes hot pixels. Best for Pi.</li>
-                <li>Gaussian Blur &mdash; Gentle smoothing.</li>
-                <li>Non-Local Means &mdash; Best quality, higher CPU.</li>
+                <li>Gaussian Blur &mdash; Kernel smoothing, lowest cost. Softens everything uniformly.</li>
+                <li>Median Blur &mdash; Rank filter, low cost. Eliminates hot pixels without blurring edges.</li>
+                <li>Bilateral &mdash; Edge-aware filter, moderate cost. Smooths sky noise while preserving star edges.</li>
               </ul>
             </div>
         </div>
@@ -1744,6 +1744,28 @@ var camera_id = {{ camera_id }};
             <div id="IMAGE_DENOISE_STRENGTH-error" class="invalid-feedback text-danger" style="display: none;"></div>
         </div>
         <div class="col-sm-8">Range: 1-5. Higher = stronger noise reduction but may smear stars.</div>
+    </div>
+
+    <div class="form-group row">
+        <div class="col-sm-2">
+            {{ form_config.BILATERAL_SIGMA_COLOR.label(class='col-form-label') }}
+        </div>
+        <div class="col-sm-2">
+            {{ form_config.BILATERAL_SIGMA_COLOR(class='form-control bg-secondary') }}
+            <div id="BILATERAL_SIGMA_COLOR-error" class="invalid-feedback text-danger" style="display: none;"></div>
+        </div>
+        <div class="col-sm-8">How much brightness difference to blend across (1-150). Low (10-20) preserves star edges tightly. High (50+) smooths more aggressively. Default: 20</div>
+    </div>
+
+    <div class="form-group row">
+        <div class="col-sm-2">
+            {{ form_config.BILATERAL_SIGMA_SPACE.label(class='col-form-label') }}
+        </div>
+        <div class="col-sm-2">
+            {{ form_config.BILATERAL_SIGMA_SPACE(class='form-control bg-secondary') }}
+            <div id="BILATERAL_SIGMA_SPACE-error" class="invalid-feedback text-danger" style="display: none;"></div>
+        </div>
+        <div class="col-sm-8">How far away pixels can influence each other (1-150). Low (15-35) for fine detail. High (50+) for broad smooth gradients. Default: 35</div>
     </div>
 
     <hr>
@@ -1937,6 +1959,28 @@ var camera_id = {{ camera_id }};
             <div id="IMAGE_DENOISE_STRENGTH_DAY-error" class="invalid-feedback text-danger" style="display: none;"></div>
         </div>
         <div class="col-sm-8">Range: 1-5. Higher = stronger noise reduction but may smear stars.</div>
+    </div>
+
+    <div class="form-group row">
+        <div class="col-sm-2">
+            {{ form_config.BILATERAL_SIGMA_COLOR_DAY.label(class='col-form-label') }}
+        </div>
+        <div class="col-sm-2">
+            {{ form_config.BILATERAL_SIGMA_COLOR_DAY(class='form-control bg-secondary') }}
+            <div id="BILATERAL_SIGMA_COLOR_DAY-error" class="invalid-feedback text-danger" style="display: none;"></div>
+        </div>
+        <div class="col-sm-8">How much brightness difference to blend across (1-150). Low (10-20) preserves star edges tightly. High (50+) smooths more aggressively. Default: 20</div>
+    </div>
+
+    <div class="form-group row">
+        <div class="col-sm-2">
+            {{ form_config.BILATERAL_SIGMA_SPACE_DAY.label(class='col-form-label') }}
+        </div>
+        <div class="col-sm-2">
+            {{ form_config.BILATERAL_SIGMA_SPACE_DAY(class='form-control bg-secondary') }}
+            <div id="BILATERAL_SIGMA_SPACE_DAY-error" class="invalid-feedback text-danger" style="display: none;"></div>
+        </div>
+        <div class="col-sm-8">How far away pixels can influence each other (1-150). Low (15-35) for fine detail. High (50+) for broad smooth gradients. Default: 35</div>
     </div>
 
     <hr>
@@ -9681,6 +9725,10 @@ const field_names = [
     'IMAGE_DENOISE_DAY',
     'IMAGE_DENOISE_STRENGTH',
     'IMAGE_DENOISE_STRENGTH_DAY',
+    'BILATERAL_SIGMA_COLOR',
+    'BILATERAL_SIGMA_COLOR_DAY',
+    'BILATERAL_SIGMA_SPACE',
+    'BILATERAL_SIGMA_SPACE_DAY',
     'CCD_TEMP',
     'CCD_TEMP_DAY',
     'TEMP_DISPLAY',
@@ -10664,6 +10712,10 @@ $('#USE_NIGHT_COLOR').on('change', function() {
         $('#IMAGE_DENOISE_DAY').addClass('bg-dark text-secondary');
         $('#IMAGE_DENOISE_STRENGTH_DAY').attr({'readonly': true, 'disabled': true});
         $('#IMAGE_DENOISE_STRENGTH_DAY').addClass('bg-dark text-secondary');
+        $('#BILATERAL_SIGMA_COLOR_DAY').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_COLOR_DAY').addClass('bg-dark text-secondary');
+        $('#BILATERAL_SIGMA_SPACE_DAY').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_SPACE_DAY').addClass('bg-dark text-secondary');
         $('#WBR_FACTOR_DAY').attr({'readonly': true, 'disabled': true});
         $('#WBR_FACTOR_DAY').addClass('bg-dark text-secondary');
         $('#WBG_FACTOR_DAY').attr({'readonly': true, 'disabled': true});
@@ -10692,6 +10744,18 @@ $('#USE_NIGHT_COLOR').on('change', function() {
         $('#IMAGE_DENOISE_DAY').removeClass('bg-dark text-secondary');
         $('#IMAGE_DENOISE_STRENGTH_DAY').removeAttr('readonly disabled');
         $('#IMAGE_DENOISE_STRENGTH_DAY').removeClass('bg-dark text-secondary');
+        // re-evaluate bilateral day fields based on day dropdown
+        if ($('#IMAGE_DENOISE_DAY').val() === 'bilateral') {
+            $('#BILATERAL_SIGMA_COLOR_DAY').removeAttr('readonly disabled');
+            $('#BILATERAL_SIGMA_COLOR_DAY').removeClass('bg-dark text-secondary');
+            $('#BILATERAL_SIGMA_SPACE_DAY').removeAttr('readonly disabled');
+            $('#BILATERAL_SIGMA_SPACE_DAY').removeClass('bg-dark text-secondary');
+        } else {
+            $('#BILATERAL_SIGMA_COLOR_DAY').attr({'readonly': true, 'disabled': true});
+            $('#BILATERAL_SIGMA_COLOR_DAY').addClass('bg-dark text-secondary');
+            $('#BILATERAL_SIGMA_SPACE_DAY').attr({'readonly': true, 'disabled': true});
+            $('#BILATERAL_SIGMA_SPACE_DAY').addClass('bg-dark text-secondary');
+        }
         $('#WBR_FACTOR_DAY').removeAttr('readonly disabled');
         $('#WBR_FACTOR_DAY').removeClass('bg-dark text-secondary');
         $('#WBG_FACTOR_DAY').removeAttr('readonly disabled');
@@ -10711,6 +10775,36 @@ $('#USE_NIGHT_COLOR').on('change', function() {
         $('#GAMMA_CORRECTION_DAY').removeClass('bg-dark text-secondary');
         $('#SHARPEN_AMOUNT_DAY').removeAttr('readonly disabled');
         $('#SHARPEN_AMOUNT_DAY').removeClass('bg-dark text-secondary');
+    }
+});
+
+// Bilateral sigma fields - night
+$('#IMAGE_DENOISE').on('change', function() {
+    if ($(this).val() === 'bilateral') {
+        $('#BILATERAL_SIGMA_COLOR').removeAttr('readonly disabled');
+        $('#BILATERAL_SIGMA_COLOR').removeClass('bg-dark text-secondary');
+        $('#BILATERAL_SIGMA_SPACE').removeAttr('readonly disabled');
+        $('#BILATERAL_SIGMA_SPACE').removeClass('bg-dark text-secondary');
+    } else {
+        $('#BILATERAL_SIGMA_COLOR').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_COLOR').addClass('bg-dark text-secondary');
+        $('#BILATERAL_SIGMA_SPACE').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_SPACE').addClass('bg-dark text-secondary');
+    }
+});
+
+// Bilateral sigma fields - day
+$('#IMAGE_DENOISE_DAY').on('change', function() {
+    if ($(this).val() === 'bilateral') {
+        $('#BILATERAL_SIGMA_COLOR_DAY').removeAttr('readonly disabled');
+        $('#BILATERAL_SIGMA_COLOR_DAY').removeClass('bg-dark text-secondary');
+        $('#BILATERAL_SIGMA_SPACE_DAY').removeAttr('readonly disabled');
+        $('#BILATERAL_SIGMA_SPACE_DAY').removeClass('bg-dark text-secondary');
+    } else {
+        $('#BILATERAL_SIGMA_COLOR_DAY').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_COLOR_DAY').addClass('bg-dark text-secondary');
+        $('#BILATERAL_SIGMA_SPACE_DAY').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_SPACE_DAY').addClass('bg-dark text-secondary');
     }
 });
 
@@ -11041,6 +11135,10 @@ $( document ).ready(function() {
         $('#IMAGE_DENOISE_DAY').addClass('bg-dark text-secondary');
         $('#IMAGE_DENOISE_STRENGTH_DAY').attr({'readonly': true, 'disabled': true});
         $('#IMAGE_DENOISE_STRENGTH_DAY').addClass('bg-dark text-secondary');
+        $('#BILATERAL_SIGMA_COLOR_DAY').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_COLOR_DAY').addClass('bg-dark text-secondary');
+        $('#BILATERAL_SIGMA_SPACE_DAY').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_SPACE_DAY').addClass('bg-dark text-secondary');
         $('#WBR_FACTOR_DAY').attr({'readonly': true, 'disabled': true});
         $('#WBR_FACTOR_DAY').addClass('bg-dark text-secondary');
         $('#WBG_FACTOR_DAY').attr({'readonly': true, 'disabled': true});
@@ -11060,6 +11158,22 @@ $( document ).ready(function() {
         $('#GAMMA_CORRECTION_DAY').addClass('bg-dark text-secondary');
         $('#SHARPEN_AMOUNT_DAY').attr({'readonly': true, 'disabled': true});
         $('#SHARPEN_AMOUNT_DAY').addClass('bg-dark text-secondary');
+    }
+
+    // Bilateral sigma fields - grey out when not bilateral (night)
+    if ($('#IMAGE_DENOISE').val() !== 'bilateral') {
+        $('#BILATERAL_SIGMA_COLOR').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_COLOR').addClass('bg-dark text-secondary');
+        $('#BILATERAL_SIGMA_SPACE').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_SPACE').addClass('bg-dark text-secondary');
+    }
+
+    // Bilateral sigma fields - grey out when not bilateral (day)
+    if ($('#IMAGE_DENOISE_DAY').val() !== 'bilateral' || $('#USE_NIGHT_COLOR').prop('checked')) {
+        $('#BILATERAL_SIGMA_COLOR_DAY').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_COLOR_DAY').addClass('bg-dark text-secondary');
+        $('#BILATERAL_SIGMA_SPACE_DAY').attr({'readonly': true, 'disabled': true});
+        $('#BILATERAL_SIGMA_SPACE_DAY').addClass('bg-dark text-secondary');
     }
 
     // Night timelapse settings

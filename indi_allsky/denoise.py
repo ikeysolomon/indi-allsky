@@ -39,6 +39,21 @@ class IndiAllskyDenoise(object):
         return int(self.config.get('IMAGE_DENOISE_STRENGTH_DAY', 3))
 
 
+    def _get_bilateral_sigma(self):
+        """Return (sigmaColor, sigmaSpace) for the bilateral filter."""
+        if self.config.get('USE_NIGHT_COLOR', True):
+            sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR', 20))
+            sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE', 35))
+        elif self.night_av[constants.NIGHT_NIGHT]:
+            sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR', 20))
+            sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE', 35))
+        else:
+            sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR_DAY', 20))
+            sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE_DAY', 35))
+
+        return max(1, sigma_color), max(1, sigma_space)
+
+
     # ------------------------------------------------------------------
     # Algorithm: Median Blur
     # ------------------------------------------------------------------
@@ -100,11 +115,12 @@ class IndiAllskyDenoise(object):
         than Non-Local Means but higher quality than Gaussian/Median for
         astro images.
 
-        The strength parameter controls the filter size (d) and sigma:
-          d      = strength * 2 + 1   (diameter: 3, 5, 7, 9, 11)
-          sigmaColor = strength * 25  (colour-space influence)
-          sigmaSpace = strength * 25  (spatial influence)
-        Strength range: 1-5.
+        The strength parameter controls the filter size (d):
+          d = strength * 2 + 1   (diameter: 3, 5, 7, 9, 11)
+        sigmaColor and sigmaSpace are user-configurable:
+          sigmaColor controls how much difference in brightness is tolerated
+          sigmaSpace controls how far away pixels can influence
+        Lower sigmaColor preserves more edges.  Strength range: 1-5.
         """
         strength = self._get_strength()
 
@@ -114,7 +130,7 @@ class IndiAllskyDenoise(object):
         strength = max(1, min(strength, 5))
 
         d = strength * 2 + 1
-        sigma = strength * 25
+        sigma_color, sigma_space = self._get_bilateral_sigma()
 
         is_16bit = scidata.dtype in (numpy.uint16, numpy.int16)
 
@@ -123,10 +139,10 @@ class IndiAllskyDenoise(object):
             max_val = scidata.max() if scidata.max() > 0 else 1
             scidata_8 = (scidata.astype(numpy.float32) / max_val * 255).astype(numpy.uint8)
 
-            logger.info('Applying bilateral denoise (16-bit via 8-bit), d=%d sigma=%d', d, sigma)
-            denoised_8 = cv2.bilateralFilter(scidata_8, d, sigma, sigma)
+            logger.info('Applying bilateral denoise (16-bit via 8-bit), d=%d sigmaColor=%d sigmaSpace=%d', d, sigma_color, sigma_space)
+            denoised_8 = cv2.bilateralFilter(scidata_8, d, sigma_color, sigma_space)
 
             return (denoised_8.astype(numpy.float32) / 255.0 * max_val).astype(scidata.dtype)
         else:
-            logger.info('Applying bilateral denoise, d=%d sigma=%d', d, sigma)
-            return cv2.bilateralFilter(scidata, d, sigma, sigma)
+            logger.info('Applying bilateral denoise, d=%d sigmaColor=%d sigmaSpace=%d', d, sigma_color, sigma_space)
+            return cv2.bilateralFilter(scidata, d, sigma_color, sigma_space)

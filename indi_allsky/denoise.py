@@ -132,17 +132,19 @@ class IndiAllskyDenoise(object):
         d = strength * 2 + 1
         sigma_color, sigma_space = self._get_bilateral_sigma()
 
-        is_16bit = scidata.dtype in (numpy.uint16, numpy.int16)
+        needs_conversion = scidata.dtype not in (numpy.uint8, numpy.float32)
 
-        if is_16bit:
-            # bilateralFilter only works on 8-bit; convert, filter, scale back
+        if needs_conversion:
+            # bilateralFilter supports uint8 and float32; scale to float32
+            # in 0-255 range so sigma values behave identically to 8-bit
             max_val = scidata.max() if scidata.max() > 0 else 1
-            scidata_8 = (scidata.astype(numpy.float32) / max_val * 255).astype(numpy.uint8)
+            scale = 255.0 / max_val
+            scidata_f32 = scidata.astype(numpy.float32) * scale
 
-            logger.info('Applying bilateral denoise (16-bit via 8-bit), d=%d sigmaColor=%d sigmaSpace=%d', d, sigma_color, sigma_space)
-            denoised_8 = cv2.bilateralFilter(scidata_8, d, sigma_color, sigma_space)
+            logger.info('Applying bilateral denoise (float32), d=%d sigmaColor=%d sigmaSpace=%d', d, sigma_color, sigma_space)
+            denoised_f32 = cv2.bilateralFilter(scidata_f32, d, sigma_color, sigma_space)
 
-            return (denoised_8.astype(numpy.float32) / 255.0 * max_val).astype(scidata.dtype)
+            return numpy.clip(denoised_f32 / scale, 0, max_val).astype(scidata.dtype)
         else:
             logger.info('Applying bilateral denoise, d=%d sigmaColor=%d sigmaSpace=%d', d, sigma_color, sigma_space)
             return cv2.bilateralFilter(scidata, d, sigma_color, sigma_space)

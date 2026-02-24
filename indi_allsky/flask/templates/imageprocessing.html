@@ -2282,9 +2282,17 @@ function init() {
     $('#DISABLE_PROCESSING').prop('checked', false);
 }
 
-// Bilateral sigma fields
+// Denoise dependent fields
 $('#IMAGE_DENOISE').on('change', function() {
-    if ($(this).val() === 'bilateral') {
+    var val = $(this).val();
+    if (val) {
+        $('#IMAGE_DENOISE_STRENGTH').removeAttr('readonly disabled');
+        $('#IMAGE_DENOISE_STRENGTH').removeClass('bg-dark text-secondary');
+    } else {
+        $('#IMAGE_DENOISE_STRENGTH').attr({'readonly': true, 'disabled': true});
+        $('#IMAGE_DENOISE_STRENGTH').addClass('bg-dark text-secondary');
+    }
+    if (val === 'bilateral') {
         $('#BILATERAL_SIGMA_COLOR').removeAttr('readonly disabled');
         $('#BILATERAL_SIGMA_COLOR').removeClass('bg-dark text-secondary');
         $('#BILATERAL_SIGMA_SPACE').removeAttr('readonly disabled');
@@ -2303,7 +2311,11 @@ $( document ).ready(function() {
         goFullscreen(this);
     });
 
-    // Bilateral sigma fields - grey out on page load when not bilateral
+    // Denoise dependent fields - grey out on page load
+    if (!$('#IMAGE_DENOISE').val()) {
+        $('#IMAGE_DENOISE_STRENGTH').attr({'readonly': true, 'disabled': true});
+        $('#IMAGE_DENOISE_STRENGTH').addClass('bg-dark text-secondary');
+    }
     if ($('#IMAGE_DENOISE').val() !== 'bilateral') {
         $('#BILATERAL_SIGMA_COLOR').attr({'readonly': true, 'disabled': true});
         $('#BILATERAL_SIGMA_COLOR').addClass('bg-dark text-secondary');

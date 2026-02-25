@@ -536,12 +536,12 @@ var fullscreen = false;  //initial state
             <div id="IMAGE_DENOISE-error" class="invalid-feedback text-danger" style="display: none;"></div>
         </div>
         <div class="col-sm-7">
-            <div>Denoise algorithm (applied before stretch).<br>
+            <div>Denoise algorithm to reduce image noise (applied before stretch). Stars are preserved.<br>
             <small class="text-muted">
-            <b>Gaussian</b> — smooths dark sky regions while preserving bright features (stars, planets). Fast general-purpose choice.<br>
-            <b>MAD Median</b> — surgically removes salt-and-pepper noise (hot/cold pixel speckles) without touching stars or sky.<br>
-            <b>Bilateral</b> — reduces grainy sky background noise while keeping star edges sharp. Best if your main issue is noisy sky.<br>
-            <b>Wavelet</b> — highest quality. Separates noise from signal in frequency domain, preserving stars and sky gradients. Slower (~0.5–2s). Requires PyWavelets.
+            <b>Gaussian</b> — Fastest - Smooths background glow, stars masked out. High strength can soften faint detail.<br>
+            <b>MAD Median</b> — Fast -Removes salt and pepper noise, everything else untouched. Poorer at backgrounds<br>
+            <b>Bilateral</b> — Medium - Smooths read noise but keeps edges sharp. Could introduce "patchiness"<br>
+            <b>Wavelet</b> — Slow - All-round best quality, handles any noise type. Requires PyWavelets.
             </small></div>
         </div>
     </div>
@@ -554,7 +554,7 @@ var fullscreen = false;  //initial state
             {{ form_image_processing.IMAGE_DENOISE_STRENGTH(class='form-control bg-secondary') }}
             <div id="IMAGE_DENOISE_STRENGTH-error" class="invalid-feedback text-danger" style="display: none;"></div>
         </div>
-        <div class="col-sm-8">Range: 1-5. Controls kernel size (1=3×3, 3=7×7, 5=11×11). Higher = larger neighbourhood = stronger effect. For MAD Median: lower values (1-2) safer for cameras with large star PSFs.</div>
+        <div class="col-sm-8">Range: 1-5. Higher = stronger smoothing. High values increase broader effect. Low values preserve fine details.</div>
     </div>
 
     <div class="form-group row">

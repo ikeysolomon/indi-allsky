@@ -151,9 +151,9 @@ class IndiAllskyDenoise(object):
              blurred values; a smooth transition (~10% of dtype range)
              avoids hard edges.
 
-        The strength parameter maps to the kernel size:
-          1 → 3×3,  2 → 5×5,  3 → 7×7  (ksize = strength * 2 + 1)
-        Sigma is computed automatically by OpenCV (sigmaX=0).
+        The strength parameter maps to Gaussian sigma (linear: step=2.4, max=12):
+          1 → σ=2.4,  2 → σ=4.8,  3 → σ=7.2,  4 → σ=9.6,  5 → σ=12.0
+        Kernel size is derived automatically as 6σ (rounded to odd).
         Strength range: 1-5.
         """
         strength = self._get_strength()
@@ -163,9 +163,9 @@ class IndiAllskyDenoise(object):
 
         strength = max(1, min(strength, 5))
 
-        ksize = strength * 2 + 1
+        sigma = strength * 2.4
 
-        blurred = cv2.GaussianBlur(scidata, (ksize, ksize), 0)
+        blurred = cv2.GaussianBlur(scidata, (0, 0), sigma)
 
         # Determine dtype-aware threshold at 85th percentile
         if scidata.dtype == numpy.uint8:
@@ -192,8 +192,8 @@ class IndiAllskyDenoise(object):
         result = numpy.clip(result_f32, 0, float(dtype_max)).astype(scidata.dtype)
 
         n_preserved = int(numpy.count_nonzero(alpha > 0.5))
-        logger.info('Applying luminance-masked gaussian denoise, ksize=%d threshold=%.0f preserved=%d bright pixels',
-                     ksize, float(threshold), n_preserved)
+        logger.info('Applying luminance-masked gaussian denoise, sigma=%.1f threshold=%.0f preserved=%d bright pixels',
+                     sigma, float(threshold), n_preserved)
 
         return result
 
@@ -266,10 +266,8 @@ class IndiAllskyDenoise(object):
           - Sky gradients (coarse-scale — preserved)
           - Noise (medium-scale random — suppressed)
 
-        The strength parameter scales the BayesShrink threshold:
-          strength=3  → optimal (mathematically derived threshold)
-          strength<3  → gentler (preserves more faint detail)
-          strength>3  → more aggressive (smoother result)
+        The strength parameter scales the BayesShrink threshold linearly:
+          1 → 1.2×,  2 → 2.4×,  3 → 3.6×,  4 → 4.8×,  5 → 6.0×
 
         Wavelet: Daubechies-4 (db4), levels: auto (3-4), soft thresholding.
         Requires PyWavelets (pywt).  Strength range: 1-5.
@@ -287,8 +285,9 @@ class IndiAllskyDenoise(object):
 
         strength = max(1, min(strength, 5))
 
-        # Scale factor: strength=3 → 1.0 (optimal BayesShrink)
-        scale = float(strength) / 3.0
+        # Scale factor applied to BayesShrink threshold (linear: step=1.2, max=6.0):
+        #   1 → 1.2,  2 → 2.4,  3 → 3.6,  4 → 4.8,  5 → 6.0
+        scale = strength * 1.2
 
         # Determine dtype range for normalization
         if numpy.issubdtype(scidata.dtype, numpy.integer):

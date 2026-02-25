@@ -13,7 +13,7 @@ class IndiAllskyDenoise(object):
 
     Provides four denoising algorithms (quality order):
       - gaussian_blur: Luminance-masked Gaussian filter (smooths sky, preserves bright stars)
-      - median_blur: MAD-based adaptive median filter (removes salt-and-pepper noise)
+      - median_blur: fixed-threshold median filter (removes salt-and-pepper noise)
       - bilateral: Edge-aware filter (smooths sky while preserving star edges)
       - wavelet: BayesShrink wavelet denoise (frequency-domain, best quality, requires PyWavelets)
 
@@ -55,82 +55,55 @@ class IndiAllskyDenoise(object):
         return max(1, sigma_color), max(1, sigma_space)
 
 
+    def _medianBlur(self, img, ksize):
+        """cv2.medianBlur only supports CV_8U for multi-channel images in newer OpenCV.
+        Split into per-channel blurs when the image is 16-bit (or deeper) multi-channel."""
+        if img.ndim == 2 or img.dtype == numpy.uint8:
+            return cv2.medianBlur(img, ksize)
+        channels = cv2.split(img)
+        return cv2.merge([cv2.medianBlur(ch, ksize) for ch in channels])
+
     # ------------------------------------------------------------------
-    # Algorithm: Median Blur (MAD-based adaptive — salt-and-pepper removal)
+    # Algorithm: Median Blur (fixed-threshold — salt-and-pepper removal)
     # ------------------------------------------------------------------
     def median_blur(self, scidata):
-        """Apply a Median Absolute Deviation (MAD) adaptive median filter.
+        """Apply a fixed-threshold median filter to remove salt-and-pepper noise.
 
-        Targets salt-and-pepper noise — random bright and dark speckles
-        caused by sensor readout noise.  Uses the MAD (Median Absolute
-        Deviation) as a robust measure of local spread:
+        Computes the local median for each pixel's neighbourhood, then
+        replaces only pixels that deviate from the median by more than a
+        fixed ADU threshold.  Multi-pixel features (stars, gradients) are
+        preserved because their local median is representative of the
+        feature itself, not of the sky background.
 
-          1. Compute the local median of each pixel's neighbourhood.
-          2. Compute absolute deviations: |pixel − local_median|.
-          3. Compute the local MAD = median(|pixel − local_median|)
-             over the same neighbourhood.
-          4. Flag pixels where |pixel − local_median| > multiplier × MAD
-             as outliers and replace them with the local median.
-
-        MAD is inherently robust to outliers (unlike mean/std), making
-        it ideal for detecting hot-pixel speckles without being thrown
-        off by stars or other real bright features in the window.
-
-        The strength parameter controls the kernel size:
-          1 → 3×3,  2 → 5×5,  3 → 7×7  (ksize = strength * 2 + 1)
-
-        The outlier multiplier is fixed at 3.0 (≈ 2σ for Gaussian
-        noise via the 1.4826 MAD-to-σ conversion).
-        A minimum floor prevents false positives in perfectly uniform
-        regions where MAD ≈ 0.
-
-        Strength range: 1-5.  Higher values use a larger neighbourhood.
+        Strength controls kernel size:
+          1 → 3×3,  2 → 5×5,  3 → 7×7,  4 → 9×9,  5 → 11×11
         """
         strength = self._get_strength()
 
         if strength <= 0:
             return scidata
 
-        # Clamp strength to sane range
         strength = max(1, min(strength, 5))
-
         ksize = strength * 2 + 1  # always odd: 3, 5, 7, 9, 11
-        mad_ksize = max(ksize, 5)  # MAD window at least 5×5
-        if mad_ksize % 2 == 0:
-            mad_ksize += 1
-
-        multiplier = numpy.float32(3.0)  # ~2σ (3 × MAD ≈ 2.02σ for Gaussian)
-
-        # Step 1 — local median
-        local_median = cv2.medianBlur(scidata, ksize)
-
-        # Step 2 — absolute deviations from the local median
-        abs_dev = cv2.absdiff(scidata, local_median)  # same dtype as input
-
-        # Step 3 — local MAD = median of the absolute deviations
-        local_mad = cv2.medianBlur(abs_dev, mad_ksize)
-
-        # Step 4 — build threshold map = multiplier × MAD, with a floor
-        local_mad_f32 = local_mad.astype(numpy.float32)
 
         if scidata.dtype == numpy.uint8:
-            floor = numpy.float32(5.0)
+            threshold = numpy.float32(5.0)
         elif scidata.dtype in (numpy.uint16, numpy.int16):
-            floor = numpy.float32(5.0 * 257.0)  # ~1285
+            threshold = numpy.float32(5.0 * 257.0)  # ~1285 in 16-bit
         else:
-            floor = numpy.float32(5.0 / 255.0)
+            threshold = numpy.float32(5.0 / 255.0)
 
-        threshold_map = numpy.maximum(multiplier * local_mad_f32, floor)
+        local_median = self._medianBlur(scidata, ksize)
 
-        # Only replace outlier pixels; leave clean pixels untouched
-        diff = abs_dev.astype(numpy.float32)
-        outlier_mask = diff > threshold_map
+        diff = cv2.absdiff(scidata, local_median).astype(numpy.float32)
+        outlier_mask = diff > threshold
+
         result = scidata.copy()
         result[outlier_mask] = local_median[outlier_mask]
 
         n_replaced = int(numpy.count_nonzero(outlier_mask))
-        logger.info('Applying MAD median denoise, ksize=%d mad_ksize=%d multiplier=%.1f replaced=%d pixels',
-                     ksize, mad_ksize, float(multiplier), n_replaced)
+        logger.info('Applying median denoise, ksize=%d threshold=%.1f replaced=%d pixels',
+                    ksize, float(threshold), n_replaced)
 
         return result
 

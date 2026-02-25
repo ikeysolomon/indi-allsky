@@ -1,6 +1,7 @@
 import cv2
 import numpy
 import logging
+import time
 
 from . import constants
 
@@ -101,6 +102,8 @@ class IndiAllskyDenoise(object):
           1 → 3×3,  2 → 5×5,  3 → 7×7,  4 → 9×9,  5 → 11×11
         """
         strength = self._get_strength()
+        logger.info('Wavelet denoise requested (strength=%d)', strength)
+        start_t = time.time()
 
         if strength <= 0:
             return scidata
@@ -152,6 +155,8 @@ class IndiAllskyDenoise(object):
         Strength range: 1-5.
         """
         strength = self._get_strength()
+        logger.info('Wavelet denoise requested (strength=%d)', strength)
+        start_t = time.time()
 
         if strength <= 0:
             return scidata
@@ -261,8 +266,8 @@ class IndiAllskyDenoise(object):
           - Sky gradients (coarse-scale — preserved)
           - Noise (medium-scale random — suppressed)
 
-        The strength parameter scales the BayesShrink threshold linearly:
-          1 → 1.2×,  2 → 2.4×,  3 → 3.6×,  4 → 4.8×,  5 → 6.0×
+                The strength parameter scales the BayesShrink threshold linearly:
+                    1 → 2.4×,  2 → 4.8×,  3 → 7.2×,  4 → 9.6×,  5 → 12.0×
 
         Wavelet: Daubechies-4 (db4), levels: auto (3-4), soft thresholding.
         Requires PyWavelets (pywt).  Strength range: 1-5.
@@ -282,9 +287,9 @@ class IndiAllskyDenoise(object):
 
         strength = max(1, min(strength, 5))
 
-        # Scale factor applied to BayesShrink threshold (linear: step=1.2, max=6.0):
-        #   1 → 1.2,  2 → 2.4,  3 → 3.6,  4 → 4.8,  5 → 6.0
-        scale = strength * 1.2
+        # Scale factor applied to BayesShrink threshold (linear similar to Gaussian):
+        #   1 → 2.4,  2 → 4.8,  3 → 7.2,  4 → 9.6,  5 → 12.0
+        scale = strength * 2.4
 
         # Determine dtype range for normalization
         if numpy.issubdtype(scidata.dtype, numpy.integer):
@@ -353,7 +358,8 @@ class IndiAllskyDenoise(object):
             channels = [_denoise_channel(scidata[:, :, c]) for c in range(scidata.shape[2])]
             result = numpy.stack(channels, axis=2)
 
-        logger.info('Applying wavelet denoise (BayesShrink), levels=%d scale=%.2f',
-                     levels, scale)
+        elapsed = time.time() - start_t
+        logger.info('Applied wavelet denoise (BayesShrink), levels=%d scale=%.2f time=%.3fs',
+                 levels, scale, elapsed)
 
         return result

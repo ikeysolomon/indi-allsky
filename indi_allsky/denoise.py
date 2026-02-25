@@ -11,10 +11,11 @@ logger = logging.getLogger('indi_allsky')
 class IndiAllskyDenoise(object):
     """Lightweight image denoising for allsky cameras.
 
-    Provides three Pi-friendly denoising algorithms (quality order):
-      - gaussian_blur: Fast Gaussian filter (gentle smoothing)
-      - median_blur: Fast median filter (removes hot pixels / salt-and-pepper noise)
+    Provides four denoising algorithms (quality order):
+      - gaussian_blur: Luminance-masked Gaussian filter (smooths sky, preserves bright stars)
+      - median_blur: MAD-based adaptive median filter (removes salt-and-pepper noise)
       - bilateral: Edge-aware filter (smooths sky while preserving star edges)
+      - wavelet: BayesShrink wavelet denoise (frequency-domain, best quality, requires PyWavelets)
 
     Each algorithm respects a configurable strength parameter so users
     can tune the trade-off between noise reduction and star preservation.
@@ -55,29 +56,33 @@ class IndiAllskyDenoise(object):
 
 
     # ------------------------------------------------------------------
-    # Algorithm: Median Blur (adaptive conditional — salt-and-pepper removal)
+    # Algorithm: Median Blur (MAD-based adaptive — salt-and-pepper removal)
     # ------------------------------------------------------------------
     def median_blur(self, scidata):
-        """Apply an adaptive conditional median filter.
+        """Apply a Median Absolute Deviation (MAD) adaptive median filter.
 
         Targets salt-and-pepper noise — random bright and dark speckles
-        caused by sensor readout noise.  Computes a local median and a
-        local standard deviation for each pixel.  Pixels that deviate
-        from their neighbourhood median by more than ``multiplier ×
-        local_std`` are replaced with the median; the rest pass through
-        untouched, preserving stars and real detail.
+        caused by sensor readout noise.  Uses the MAD (Median Absolute
+        Deviation) as a robust measure of local spread:
 
-        Dark sky regions (low local std) get a tight threshold that
-        catches faint noise speckles.  Bright or textured areas (high
-        local std) get a loose threshold that preserves detail.
+          1. Compute the local median of each pixel's neighbourhood.
+          2. Compute absolute deviations: |pixel − local_median|.
+          3. Compute the local MAD = median(|pixel − local_median|)
+             over the same neighbourhood.
+          4. Flag pixels where |pixel − local_median| > multiplier × MAD
+             as outliers and replace them with the local median.
+
+        MAD is inherently robust to outliers (unlike mean/std), making
+        it ideal for detecting hot-pixel speckles without being thrown
+        off by stars or other real bright features in the window.
 
         The strength parameter controls the kernel size:
           1 → 3×3,  2 → 5×5,  3 → 7×7  (ksize = strength * 2 + 1)
 
-        The outlier multiplier is fixed at 2.0 (catches typical noise
-        speckles while preserving real structure).
+        The outlier multiplier is fixed at 3.0 (≈ 2σ for Gaussian
+        noise via the 1.4826 MAD-to-σ conversion).
         A minimum floor prevents false positives in perfectly uniform
-        regions where local std ≈ 0.
+        regions where MAD ≈ 0.
 
         Strength range: 1-5.  Higher values use a larger neighbourhood.
         """
@@ -90,23 +95,24 @@ class IndiAllskyDenoise(object):
         strength = max(1, min(strength, 5))
 
         ksize = strength * 2 + 1  # always odd: 3, 5, 7, 9, 11
-        sigma_ksize = max(ksize, 7)  # std-dev window at least 7×7
-        if sigma_ksize % 2 == 0:
-            sigma_ksize += 1
+        mad_ksize = max(ksize, 5)  # MAD window at least 5×5
+        if mad_ksize % 2 == 0:
+            mad_ksize += 1
 
-        multiplier = numpy.float32(2.0)  # 2-sigma — catches noise speckles
+        multiplier = numpy.float32(3.0)  # ~2σ (3 × MAD ≈ 2.02σ for Gaussian)
 
-        # Compute local median
-        median = cv2.medianBlur(scidata, ksize)
+        # Step 1 — local median
+        local_median = cv2.medianBlur(scidata, ksize)
 
-        # Compute local standard deviation via Gaussian-weighted moments
-        scidata_f32 = scidata.astype(numpy.float32)
-        local_mean = cv2.GaussianBlur(scidata_f32, (sigma_ksize, sigma_ksize), 0)
-        local_mean_sq = cv2.GaussianBlur(scidata_f32 * scidata_f32, (sigma_ksize, sigma_ksize), 0)
-        local_var = cv2.max(local_mean_sq - local_mean * local_mean, 0)
-        local_std = cv2.sqrt(local_var)
+        # Step 2 — absolute deviations from the local median
+        abs_dev = cv2.absdiff(scidata, local_median)  # same dtype as input
 
-        # Adaptive threshold = multiplier × local_std, with a floor
+        # Step 3 — local MAD = median of the absolute deviations
+        local_mad = cv2.medianBlur(abs_dev, mad_ksize)
+
+        # Step 4 — build threshold map = multiplier × MAD, with a floor
+        local_mad_f32 = local_mad.astype(numpy.float32)
+
         if scidata.dtype == numpy.uint8:
             floor = numpy.float32(5.0)
         elif scidata.dtype in (numpy.uint16, numpy.int16):
@@ -114,29 +120,39 @@ class IndiAllskyDenoise(object):
         else:
             floor = numpy.float32(5.0 / 255.0)
 
-        threshold_map = cv2.max(multiplier * local_std, floor)
+        threshold_map = cv2.max(multiplier * local_mad_f32, floor)
 
-        # Only replace noisy pixels; leave clean pixels untouched
-        diff = cv2.absdiff(scidata, median).astype(numpy.float32)
+        # Only replace outlier pixels; leave clean pixels untouched
+        diff = abs_dev.astype(numpy.float32)
         outlier_mask = diff > threshold_map
         result = scidata.copy()
-        result[outlier_mask] = median[outlier_mask]
+        result[outlier_mask] = local_median[outlier_mask]
 
         n_replaced = int(numpy.count_nonzero(outlier_mask))
-        logger.info('Applying adaptive median denoise, ksize=%d multiplier=%.1f replaced=%d pixels',
-                     ksize, float(multiplier), n_replaced)
+        logger.info('Applying MAD median denoise, ksize=%d mad_ksize=%d multiplier=%.1f replaced=%d pixels',
+                     ksize, mad_ksize, float(multiplier), n_replaced)
 
         return result
 
 
     # ------------------------------------------------------------------
-    # Algorithm: Gaussian Blur
+    # Algorithm: Gaussian Blur (luminance-masked — preserves bright features)
     # ------------------------------------------------------------------
     def gaussian_blur(self, scidata):
-        """Apply a fast Gaussian blur.
+        """Apply a luminance-masked Gaussian blur.
+
+        Smooths dark sky regions while preserving bright features (stars,
+        planets, moon).  Works by:
+
+          1. Compute a Gaussian-blurred copy of the image.
+          2. Determine a brightness threshold at the 85th percentile.
+          3. Build a soft blend mask: pixels well above the threshold
+             keep their original values; pixels well below get the
+             blurred values; a smooth transition (~10% of dtype range)
+             avoids hard edges.
 
         The strength parameter maps to the kernel size:
-          1 → 3x3,  2 → 5x5,  3 → 7x7
+          1 → 3×3,  2 → 5×5,  3 → 7×7  (ksize = strength * 2 + 1)
         Sigma is computed automatically by OpenCV (sigmaX=0).
         Strength range: 1-5.
         """
@@ -149,9 +165,37 @@ class IndiAllskyDenoise(object):
 
         ksize = strength * 2 + 1
 
-        logger.info('Applying gaussian blur denoise, ksize=%d', ksize)
+        blurred = cv2.GaussianBlur(scidata, (ksize, ksize), 0)
 
-        return cv2.GaussianBlur(scidata, (ksize, ksize), 0)
+        # Determine dtype-aware threshold at 85th percentile
+        if scidata.dtype == numpy.uint8:
+            dtype_max = numpy.float32(255.0)
+        elif scidata.dtype in (numpy.uint16, numpy.int16):
+            dtype_max = numpy.float32(65535.0)
+        else:
+            dtype_max = numpy.float32(1.0)
+
+        threshold = numpy.float32(numpy.percentile(scidata, 85))
+
+        # Soft transition width: 10% of dtype range (avoids hard edges)
+        transition = numpy.float32(dtype_max * 0.10)
+        transition = max(transition, numpy.float32(1.0))  # floor for uint8
+
+        # Build soft blend mask: 0.0 = use blurred, 1.0 = keep original
+        scidata_f32 = scidata.astype(numpy.float32)
+        # alpha ramps from 0→1 over the transition band above threshold
+        alpha = numpy.clip((scidata_f32 - threshold) / transition, 0.0, 1.0)
+
+        # Blend: result = alpha * original + (1 - alpha) * blurred
+        result_f32 = alpha * scidata_f32 + (numpy.float32(1.0) - alpha) * blurred.astype(numpy.float32)
+
+        result = numpy.clip(result_f32, 0, float(dtype_max)).astype(scidata.dtype)
+
+        n_preserved = int(numpy.count_nonzero(alpha > 0.5))
+        logger.info('Applying luminance-masked gaussian denoise, ksize=%d threshold=%.0f preserved=%d bright pixels',
+                     ksize, float(threshold), n_preserved)
+
+        return result
 
 
     # ------------------------------------------------------------------
@@ -205,3 +249,115 @@ class IndiAllskyDenoise(object):
         else:
             logger.info('Applying bilateral denoise, d=%d sigmaColor=%d sigmaSpace=%d', d, sigma_color, sigma_space)
             return cv2.bilateralFilter(scidata, d, sigma_color, sigma_space)
+
+
+    # ------------------------------------------------------------------
+    # Algorithm: Wavelet Denoise (BayesShrink — frequency-domain, best quality)
+    # ------------------------------------------------------------------
+    def wavelet(self, scidata):
+        """Apply wavelet-based denoising with BayesShrink adaptive thresholding.
+
+        Decomposes the image into frequency bands using the Discrete
+        Wavelet Transform (DWT), estimates noise in the finest detail
+        coefficients, and shrinks noisy coefficients using BayesShrink
+        adaptive soft thresholding.  This naturally separates:
+
+          - Stars (fine-scale signal — preserved)
+          - Sky gradients (coarse-scale — preserved)
+          - Noise (medium-scale random — suppressed)
+
+        The strength parameter scales the BayesShrink threshold:
+          strength=3  → optimal (mathematically derived threshold)
+          strength<3  → gentler (preserves more faint detail)
+          strength>3  → more aggressive (smoother result)
+
+        Wavelet: Daubechies-4 (db4), levels: auto (3-4), soft thresholding.
+        Requires PyWavelets (pywt).  Strength range: 1-5.
+        """
+        try:
+            import pywt
+        except ImportError:
+            logger.error('PyWavelets (pywt) is not installed — wavelet denoise unavailable, skipping')
+            return scidata
+
+        strength = self._get_strength()
+
+        if strength <= 0:
+            return scidata
+
+        strength = max(1, min(strength, 5))
+
+        # Scale factor: strength=3 → 1.0 (optimal BayesShrink)
+        scale = float(strength) / 3.0
+
+        # Determine dtype range for normalization
+        if numpy.issubdtype(scidata.dtype, numpy.integer):
+            dtype_max = float(numpy.iinfo(scidata.dtype).max)
+        else:
+            dtype_max = 1.0
+
+        orig_dtype = scidata.dtype
+
+        # Auto decomposition levels: 3-4 based on smallest image dimension
+        min_dim = min(scidata.shape[0], scidata.shape[1])
+        max_level = pywt.dwt_max_level(min_dim, pywt.Wavelet('db4').dec_len)
+        levels = min(max(max_level, 1), 4)
+
+        def _denoise_channel(channel):
+            """Denoise a single 2D channel using BayesShrink."""
+            # Normalize to 0-1 float64 for wavelet precision
+            data = channel.astype(numpy.float64) / dtype_max
+
+            # Forward DWT
+            coeffs = pywt.wavedec2(data, 'db4', level=levels)
+
+            # Estimate noise sigma from finest detail coefficients (HH band)
+            # MAD estimator: sigma = median(|d|) / 0.6745
+            detail_hh = coeffs[-1][2]  # HH = diagonal detail at finest level
+            sigma_noise = numpy.median(numpy.abs(detail_hh)) / 0.6745
+
+            if sigma_noise < 1e-10:
+                # No measurable noise
+                return channel
+
+            # Apply BayesShrink to each detail level
+            denoised_coeffs = [coeffs[0]]  # keep approximation coefficients untouched
+            for i in range(1, len(coeffs)):
+                new_details = []
+                for detail_band in coeffs[i]:
+                    # BayesShrink threshold: sigma_noise^2 / sigma_signal
+                    sigma_band = numpy.sqrt(max(numpy.var(detail_band) - sigma_noise ** 2, 0))
+                    if sigma_band < 1e-10:
+                        threshold = numpy.max(numpy.abs(detail_band))  # shrink everything
+                    else:
+                        threshold = (sigma_noise ** 2) / sigma_band
+
+                    # Scale by user strength
+                    threshold *= scale
+
+                    # Soft thresholding
+                    new_details.append(pywt.threshold(detail_band, threshold, mode='soft'))
+
+                denoised_coeffs.append(tuple(new_details))
+
+            # Inverse DWT
+            reconstructed = pywt.waverec2(denoised_coeffs, 'db4')
+
+            # Trim to original size (waverec2 may pad by 1 pixel)
+            reconstructed = reconstructed[:channel.shape[0], :channel.shape[1]]
+
+            # Convert back to original range
+            return numpy.clip(reconstructed * dtype_max, 0, dtype_max).astype(orig_dtype)
+
+        # Handle grayscale vs color
+        if scidata.ndim == 2:
+            result = _denoise_channel(scidata)
+        else:
+            # Denoise each channel independently
+            channels = [_denoise_channel(scidata[:, :, c]) for c in range(scidata.shape[2])]
+            result = numpy.stack(channels, axis=2)
+
+        logger.info('Applying wavelet denoise (BayesShrink), levels=%d scale=%.2f',
+                     levels, scale)
+
+        return result

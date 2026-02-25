@@ -3622,9 +3622,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
     IMAGE_DENOISE_choices = (
         ('', 'Disabled'),
-        ('gaussian_blur', 'Gaussian Blur (fast, gentle smoothing)'),
-        ('median_blur', 'Median Blur (fast, removes hot/cold pixels)'),
-        ('bilateral', 'Bilateral (edge-aware, best quality)'),
+        ('gaussian_blur', 'Gaussian Blur — smooths sky, preserves bright stars'),
+        ('median_blur', 'MAD Median — removes salt-and-pepper noise, preserves stars'),
+        ('bilateral', 'Bilateral — smooths sky background, preserves edges'),
+        ('wavelet', 'Wavelet — frequency-domain, best quality (requires PyWavelets)'),
     )
 
     IMAGE_EXPORT_RAW_choices = (

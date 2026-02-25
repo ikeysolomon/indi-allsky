@@ -216,7 +216,10 @@ class IndiAllskyDenoise(object):
           sigmaSpace controls how far away pixels can influence
         Lower sigmaColor preserves more edges.  Strength range: 1-5.
         """
+        # Start timer and log request so completion is always traceable
+        start_t = time.time()
         strength = self._get_strength()
+        logger.info('Wavelet denoise requested (strength=%d)', strength)
 
         if strength <= 0:
             return scidata

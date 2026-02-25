@@ -120,7 +120,7 @@ class IndiAllskyDenoise(object):
         else:
             floor = numpy.float32(5.0 / 255.0)
 
-        threshold_map = cv2.max(multiplier * local_mad_f32, floor)
+        threshold_map = numpy.maximum(multiplier * local_mad_f32, floor)
 
         # Only replace outlier pixels; leave clean pixels untouched
         diff = abs_dev.astype(numpy.float32)

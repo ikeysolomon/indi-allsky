@@ -58,10 +58,32 @@ class IndiAllskyDenoise(object):
     def _medianBlur(self, img, ksize):
         """cv2.medianBlur only supports CV_8U for multi-channel images in newer OpenCV.
         Split into per-channel blurs when the image is 16-bit (or deeper) multi-channel."""
-        if img.ndim == 2 or img.dtype == numpy.uint8:
-            return cv2.medianBlur(img, ksize)
+        def _blur_channel(ch):
+            # Fast path for 8-bit single-channel
+            if ch.dtype == numpy.uint8:
+                return cv2.medianBlur(ch, ksize)
+
+            # Integer types (commonly uint16) — scale down to 8-bit, blur, scale back
+            if numpy.issubdtype(ch.dtype, numpy.integer):
+                # Use a divisor that maps 0..65535 -> 0..255 approximately
+                divisor = 257
+                ch8 = (ch.astype(numpy.uint32) // divisor).astype(numpy.uint8)
+                b8 = cv2.medianBlur(ch8, ksize)
+                return (b8.astype(numpy.uint32) * divisor).astype(ch.dtype)
+
+            # Floating types: scale to 0..255, blur, then rescale back
+            ch8 = numpy.clip((ch * 255.0), 0, 255).astype(numpy.uint8)
+            b8 = cv2.medianBlur(ch8, ksize)
+            return (b8.astype(numpy.float32) / 255.0).astype(ch.dtype)
+
+        # Single-channel image
+        if img.ndim == 2:
+            return _blur_channel(img)
+
+        # Multi-channel: process each channel independently and merge
         channels = cv2.split(img)
-        return cv2.merge([cv2.medianBlur(ch, ksize) for ch in channels])
+        blurred = [_blur_channel(ch) for ch in channels]
+        return cv2.merge(blurred)
 
     # ------------------------------------------------------------------
     # Algorithm: Median Blur (fixed-threshold — salt-and-pepper removal)
@@ -248,8 +270,10 @@ class IndiAllskyDenoise(object):
         try:
             import pywt
         except ImportError:
-            logger.error('PyWavelets (pywt) is not installed — wavelet denoise unavailable, skipping')
-            return scidata
+            logger.warning('PyWavelets (pywt) is not installed — falling back to median denoise')
+            # Fall back to the fast median-based denoise to provide a usable
+            # result when the optional dependency is missing.
+            return self.median_blur(scidata)
 
         strength = self._get_strength()
 

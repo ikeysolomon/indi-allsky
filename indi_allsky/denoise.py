@@ -148,21 +148,18 @@ class IndiAllskyDenoise(object):
         else:
             base_threshold = float(5.0 / 255.0)
 
-        # Use tuned multiplier from benchmarking results (baked in):
-        # A lower multiplier makes the median filter more aggressive in
-        # replacing outlier pixels; this was chosen to balance star
-        # preservation vs noise reduction on typical camera images.
+        # Use tuned multipliers that increase replacement aggressiveness
+        # with strength. These default to values that better remove
+        # salt-and-pepper noise while avoiding blurring of multi-pixel
+        # features by only replacing isolated outliers.
         strength = max(1, min(self._get_strength(), 5))
-        tuned_multipliers = {1: 0.2, 2: 0.2, 3: 0.2, 4: 0.2, 5: 0.2}
+        tuned_multipliers = {1: 0.5, 2: 1.0, 3: 1.6, 4: 2.4, 5: 3.2}
         base_multiplier = float(tuned_multipliers.get(strength, 1.0))
 
-        # Allow global scaling/exponent to reshape strength→multiplier curve.
-        # Defaults baked from autotune. These are read from config when
-        # available; fallback values mirror the latest autotune suggestions.
-        med_scale_factor = float(self.config.get('MEDIAN_SCALE_FACTOR', 2.4))
-        med_scale_exp = float(self.config.get('MEDIAN_SCALE_EXP', 2.0))
+        # Simplify scaling defaults to be more direct and stronger by default.
+        med_scale_factor = float(self.config.get('MEDIAN_SCALE_FACTOR', 1.0))
+        med_scale_exp = float(self.config.get('MEDIAN_SCALE_EXP', 1.0))
 
-        # Use normalized strength mapping to produce bounded, smooth changes
         t = self._norm_strength()
         med_min = base_multiplier * med_scale_factor * (1.0 ** (med_scale_exp - 1.0))
         med_max = base_multiplier * med_scale_factor * (5.0 ** (med_scale_exp - 1.0))
@@ -175,11 +172,32 @@ class IndiAllskyDenoise(object):
         diff = cv2.absdiff(scidata, local_median).astype(numpy.float32)
         outlier_mask = diff > threshold
 
-        result = scidata.copy()
-        result[outlier_mask] = local_median[outlier_mask]
+        # For multi-channel images, build a 2D outlier map (True if any channel is outlier)
+        if scidata.ndim == 3 and scidata.shape[2] >= 3:
+            outlier_2d = numpy.any(outlier_mask, axis=2)
+        else:
+            outlier_2d = outlier_mask.astype(numpy.bool_)
 
-        n_replaced = int(numpy.count_nonzero(outlier_mask))
-        logger.info('Applying median denoise, ksize=%d threshold=%.1f replaced=%d pixels',
+        # Require isolation: only replace pixels that are isolated outliers
+        # (typical of salt-and-pepper) to avoid blurring real features.
+        out_u8 = outlier_2d.astype(numpy.uint8)
+        neigh_count = cv2.filter2D(out_u8, -1, numpy.ones((3, 3), dtype=numpy.uint8))
+        isolated = (neigh_count == 1)
+
+        # Build final per-channel replacement mask
+        result = scidata.copy()
+        if scidata.ndim == 3 and scidata.shape[2] >= 3:
+            rep_mask = numpy.repeat(isolated[:, :, numpy.newaxis], scidata.shape[2], axis=2)
+            # Only replace pixels where there is an outlier and it is isolated
+            final_mask = rep_mask & outlier_mask
+            result[final_mask] = local_median[final_mask]
+            n_replaced = int(numpy.count_nonzero(final_mask))
+        else:
+            final_mask = isolated & outlier_2d
+            result[final_mask] = local_median[final_mask]
+            n_replaced = int(numpy.count_nonzero(final_mask))
+
+        logger.info('Applying median denoise, ksize=%d threshold=%.1f replaced=%d isolated pixels',
                     ksize, float(threshold), n_replaced)
 
         return result
@@ -214,9 +232,12 @@ class IndiAllskyDenoise(object):
         strength = max(1, min(strength, 5))
 
         # Configurable scale: base factor and exponent allow non-linear
-        # mappings from strength→sigma. Baked defaults chosen by autotune.
-        scale_factor = float(self.config.get('GAUSSIAN_SCALE_FACTOR', 0.2))
-        scale_exp = float(self.config.get('GAUSSIAN_SCALE_EXP', 0.5))
+        # mappings from strength→sigma. Increase defaults to produce
+        # noticeably stronger blurring at higher strengths while still
+        # allowing the user to override via config.
+        # Default maps roughly: 1 -> 2.4, 5 -> 12.0 (linear step 2.4)
+        scale_factor = float(self.config.get('GAUSSIAN_SCALE_FACTOR', 2.4))
+        scale_exp = float(self.config.get('GAUSSIAN_SCALE_EXP', 1.0))
 
         # Use normalized strength mapping to produce bounded sigma between
         # the value at strength=1 and strength=5 to avoid runaway values.
@@ -432,8 +453,11 @@ class IndiAllskyDenoise(object):
         # Configurable scale for wavelet shrinkage (factor & exponent).
         # Use the fine autotune suggestion (no PR) as a reasonable default
         # for Pi-class images. These may be overridden in runtime config.
-        wavelet_scale_factor = float(self.config.get('WAVELET_SCALE_FACTOR', 0.1))
-        wavelet_scale_exp = float(self.config.get('WAVELET_SCALE_EXP', 0.5))
+        # Make default wavelet scaling more aggressive: larger thresholds
+        # produce stronger denoising across strength levels. Users can
+        # still override via config keys.
+        wavelet_scale_factor = float(self.config.get('WAVELET_SCALE_FACTOR', 0.6))
+        wavelet_scale_exp = float(self.config.get('WAVELET_SCALE_EXP', 1.0))
 
         # Map strength→scale using a normalized bounded interpolation to
         # avoid runaway thresholds that obliterate the image.
@@ -511,9 +535,12 @@ class IndiAllskyDenoise(object):
             result = numpy.stack(channels, axis=2)
 
         # Blend denoised vs original to inherently limit destructive changes.
-        blend_cap = float(self.config.get('WAVELET_MAX_BLEND', 0.25))
-        # Blend scales with strength: keep a small amount at strength=1, up to cap at strength=5
-        blend = float(blend_cap * (0.25 + 0.75 * t))
+        # Increase default blend cap to allow a stronger contribution of the
+        # denoised result (more visible effect) while still retaining some
+        # original image to protect stars.
+        blend_cap = float(self.config.get('WAVELET_MAX_BLEND', 0.7))
+        # Blend scales with strength: small at low strength, larger at high strength
+        blend = float(blend_cap * (0.2 + 0.8 * t))
 
         # Ensure types align for blending
         orig_f = scidata.astype(numpy.float32)

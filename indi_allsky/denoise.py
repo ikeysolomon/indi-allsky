@@ -263,10 +263,14 @@ class IndiAllskyDenoise(object):
             outlier_2d = outlier_mask.astype(numpy.bool_)
 
         # Require isolation: only replace pixels that are isolated outliers
-        # (typical of salt-and-pepper) to avoid blurring real features.
+        # (typical of salt-and-pepper). Allow a small configurable neighborhood
+        # to be considered isolated so tiny clusters (<=2 neighbors) of
+        # corrupted pixels are also replaced. This is configurable via
+        # `MEDIAN_ISOLATED_MAX_NEIGHBORS` (default 2).
         out_u8 = outlier_2d.astype(numpy.uint8)
         neigh_count = cv2.filter2D(out_u8, -1, numpy.ones((3, 3), dtype=numpy.uint8))
-        isolated = (neigh_count == 1)
+        max_neighbors = int(self.config.get('MEDIAN_ISOLATED_MAX_NEIGHBORS', 3))
+        isolated = (neigh_count <= max_neighbors)
 
         # Build final per-channel replacement mask
         result = scidata.copy()
@@ -274,22 +278,23 @@ class IndiAllskyDenoise(object):
         # replacing pixels that belong to fine structure (small stars, thin
         # clouds, edges). Use a relatively high multiplier on the median of
         # abs(Laplacian) to avoid marking noise as detail.
-        try:
+        # Decide whether to use Laplacian-based detail masking for median.
+        use_laplacian = bool(self.config.get('DENOISE_USE_LAPLACIAN', True)) and not bool(self.config.get('DENOISE_FAST_MODE', False))
+        if use_laplacian:
             if scidata.ndim == 3 and scidata.shape[2] >= 3:
-                lum = (0.299 * scidata[:, :, 2].astype(numpy.float32) +
-                       0.587 * scidata[:, :, 1].astype(numpy.float32) +
-                       0.114 * scidata[:, :, 0].astype(numpy.float32))
+                lum = self._compute_luminance(scidata)
             else:
                 lum = scidata.astype(numpy.float32)
 
-            lap = cv2.Laplacian(lum, cv2.CV_32F, ksize=3)
-            lap_abs = numpy.abs(lap)
-            # Relaxed detail threshold: raise the multiplier so fewer
-            # pixels are considered 'detail' to avoid over-protecting and
-            # preventing denoising. This reduces dulling caused by masking.
-            detail_thresh = max(numpy.median(lap_abs) * 6.0, float(numpy.max(lap_abs)) * 0.001)
-            detail_mask = lap_abs > detail_thresh
-        except Exception:
+            # Make the median detail mask much less permissive so small
+            # corrupted clusters are denoised. These defaults raise the
+            # Laplacian multiplier and brightness gate to reduce preservation.
+            med_lap_mult = float(self.config.get('DENOISE_LAPLACIAN_MULTIPLIER', 12.0))
+            med_bright_frac = float(self.config.get('DENOISE_BRIGHT_GATE_FRAC', 0.10))
+            detail_mask = self._detail_mask(lum, threshold=None,
+                                            dtype_max=(numpy.iinfo(scidata.dtype).max if numpy.issubdtype(scidata.dtype, numpy.integer) else 1.0),
+                                            lap_multiplier=med_lap_mult, bright_gate_frac=med_bright_frac)
+        else:
             detail_mask = numpy.zeros((scidata.shape[0], scidata.shape[1]), dtype=bool)
         if scidata.ndim == 3 and scidata.shape[2] >= 3:
             rep_mask = numpy.repeat(isolated[:, :, numpy.newaxis], scidata.shape[2], axis=2)
@@ -345,11 +350,13 @@ class IndiAllskyDenoise(object):
         # strength=5 produce a visibly stronger blur while still allowing
         # config overrides. We add a small detail-preservation mask below
         # to avoid softening fine structure while increasing sigma.
-        # Default maps roughly: 1 -> ~4.5, 5 -> ~42.0 (noticeably stronger blur at high strength)
-        # Increase defaults so strength=5 is clearly stronger while keeping
-        # a brightness-aware Laplacian mask to protect fine bright features.
-        scale_factor = float(self.config.get('GAUSSIAN_SCALE_FACTOR', 5.2))
-        scale_exp = float(self.config.get('GAUSSIAN_SCALE_EXP', 1.3))
+        # Default maps roughly: 1 -> ~5.0, 5 -> ~60.0 (stronger blur at high strength)
+        # Bump defaults to make denoising more aggressive by default while
+        # keeping the detail-preservation mask in place. These can still be
+        # overridden via config keys `GAUSSIAN_SCALE_FACTOR` and
+        # `GAUSSIAN_SCALE_EXP` if you need milder behavior.
+        scale_factor = float(self.config.get('GAUSSIAN_SCALE_FACTOR', 6.0))
+        scale_exp = float(self.config.get('GAUSSIAN_SCALE_EXP', 1.4))
 
         # Use normalized strength mapping to produce bounded sigma between
         # the value at strength=1 and strength=5 to avoid runaway values.
@@ -387,8 +394,10 @@ class IndiAllskyDenoise(object):
         use_laplacian = bool(self.config.get('DENOISE_USE_LAPLACIAN', True)) and not bool(self.config.get('DENOISE_FAST_MODE', False))
         if use_laplacian:
             lum = self._compute_luminance(scidata)
-            lap_mult = float(self.config.get('DENOISE_LAPLACIAN_MULTIPLIER', 3.0))
-            bright_frac = float(self.config.get('DENOISE_BRIGHT_GATE_FRAC', 0.05))
+            # Increase gaussian laplacian multiplier to reduce preservation
+            # and make the filter act more broadly.
+            lap_mult = float(self.config.get('DENOISE_LAPLACIAN_MULTIPLIER', 8.0))
+            bright_frac = float(self.config.get('DENOISE_BRIGHT_GATE_FRAC', 0.10))
             dm = self._detail_mask(lum, threshold=threshold, dtype_max=dtype_max, lap_multiplier=lap_mult, bright_gate_frac=bright_frac)
             alpha[dm] = 1.0
 
@@ -589,8 +598,11 @@ class IndiAllskyDenoise(object):
         # Increase default scaling so thresholds are stronger by default.
         # These defaults make strength levels more aggressive; users can
         # override via `WAVELET_SCALE_FACTOR` and `WAVELET_SCALE_EXP` in config.
-        wavelet_scale_factor = float(self.config.get('WAVELET_SCALE_FACTOR', 3.6))
-        wavelet_scale_exp = float(self.config.get('WAVELET_SCALE_EXP', 3.5))
+        # Make wavelet thresholds more aggressive by default so strength=5
+        # produces a stronger shrinkage effect. These can be tuned via
+        # `WAVELET_SCALE_FACTOR` and `WAVELET_SCALE_EXP` in config.
+        wavelet_scale_factor = float(self.config.get('WAVELET_SCALE_FACTOR', 5.0))
+        wavelet_scale_exp = float(self.config.get('WAVELET_SCALE_EXP', 4.0))
 
         # Map strength→scale using a normalized bounded interpolation to
         # avoid runaway thresholds that obliterate the image.

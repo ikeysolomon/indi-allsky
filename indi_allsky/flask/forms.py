@@ -432,8 +432,8 @@ def BILATERAL_SIGMA_validator(form, field):
     if field.data < 1:
         raise ValidationError('Sigma must be 1 or more')
 
-    if field.data > 150:
-        raise ValidationError('Sigma must be 150 or less')
+    if field.data > 50:
+        raise ValidationError('Sigma must be 50 or less')
 
 
 def TEMP_DISPLAY_validator(form, field):
@@ -3622,9 +3622,9 @@ class IndiAllskyConfigForm(FlaskForm):
 
     IMAGE_DENOISE_choices = (
         ('', 'Disabled'),
-        ('gaussian_blur', 'Gaussian Blur — smooths sky, preserves bright stars'),
-        ('median_blur', 'Median — removes salt-and-pepper noise, preserves stars'),
-        ('bilateral', 'Bilateral — smooths sky background, preserves edges'),
+        ('gaussian_blur', 'Gaussian Blur — smooths uniformly'),
+        ('median_blur', 'Median — removes salt-and-pepper noise'),
+        ('bilateral', 'Bilateral — smooths sky background'),
         ('wavelet', 'Wavelet — frequency-domain, best quality'),
     )
 

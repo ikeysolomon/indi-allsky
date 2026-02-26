@@ -13,15 +13,17 @@ logger = logging.getLogger('indi_allsky')
 class IndiAllskyDenoise(object):
     """Lightweight image denoising for allsky cameras.
 
-    Provides four denoising algorithms (quality order):
-      - gaussian_blur: Luminance-masked Gaussian filter (smooths sky, preserves bright stars)
-      - median_blur: fixed-threshold median filter (removes salt-and-pepper noise)
-      - bilateral: Edge-aware filter (smooths sky while preserving star edges)
-      - wavelet: BayesShrink wavelet denoise (frequency-domain, best quality, requires PyWavelets)
+    Provides four denoising algorithms:
+      - gaussian_blur: Direct Gaussian blur with strength-based blending
+      - median_blur: Direct median filter with strength-based blending
+      - bilateral: Edge-aware bilateral filter (preserves star edges)
+      - wavelet: BayesShrink wavelet denoise (frequency-domain, best quality)
 
-    Each algorithm respects a configurable strength parameter so users
-    can tune the trade-off between noise reduction and star preservation.
+    All algorithms apply the filter directly and blend with the original
+    at a strength-dependent ratio.  Strength 1 gives subtle smoothing;
+    strength 5 produces fully-filtered output (visibly smoother).
 
+    Each algorithm respects a configurable strength parameter (1-5).
     Temporal averaging is handled separately by the stacking system.
     """
 
@@ -190,19 +192,22 @@ class IndiAllskyDenoise(object):
         return cv2.merge(blurred)
 
     # ------------------------------------------------------------------
-    # Algorithm: Median Blur (fixed-threshold — salt-and-pepper removal)
+    # Algorithm: Median Blur (direct — effective general-purpose denoising)
     # ------------------------------------------------------------------
     def median_blur(self, scidata):
-        """Apply a fixed-threshold median filter to remove salt-and-pepper noise.
+        """Apply a direct median blur blended with the original.
 
-        Computes the local median for each pixel's neighbourhood, then
-        replaces only pixels that deviate from the median by more than a
-        fixed ADU threshold.  Multi-pixel features (stars, gradients) are
-        preserved because their local median is representative of the
-        feature itself, not of the sky background.
+        Applies a median filter at a strength-dependent kernel size and
+        blends the result with the original.  The median filter naturally
+        preserves edges (unlike Gaussian) while effectively smoothing
+        noise.
 
-        Strength controls kernel size:
-          1 → 3×3,  2 → 5×5,  3 → 7×7,  4 → 9×9,  5 → 11×11
+        Strength mapping:
+          1 → 3×3 kernel, blend=0.40   (gentle)
+          3 → 7×7 kernel, blend=0.70   (moderate)
+          5 → 11×11 kernel, blend=1.00  (strong — fully filtered)
+
+        Strength range: 1-5.
         """
         strength = self._get_strength()
 
@@ -212,139 +217,42 @@ class IndiAllskyDenoise(object):
         strength = max(1, min(strength, 5))
         ksize = strength * 2 + 1  # always odd: 3, 5, 7, 9, 11
 
-        # Base thresholds tuned for typical camera ADU ranges. We allow an
-        # optional autotune multiplier per-strength to adjust sensitivity
-        # automatically (see testing/bench_out/autotune_suggestions.json).
-        base_threshold = None
-        if scidata.dtype == numpy.uint8:
-            base_threshold = float(5.0)
-        elif scidata.dtype in (numpy.uint16, numpy.int16):
-            base_threshold = float(5.0 * 257.0)  # ~1285 in 16-bit
-        else:
-            base_threshold = float(5.0 / 255.0)
+        blurred = self._medianBlur(scidata, ksize)
 
-        # Use tuned multipliers that increase replacement aggressiveness
-        # with strength. We raise the defaults so strength=5 produces a
-        # more noticeable removal of salt-and-pepper noise. To avoid
-        # blurring fine detail we add a Laplacian-based protection mask
-        # that prevents replacements where legitimate small-scale
-        # structures exist.
-        strength = max(1, min(self._get_strength(), 5))
-        # Increase aggressiveness: stronger defaults so strength=5 is much
-        # more effective at removing salt-and-pepper while still protecting
-        # fine detail via the Laplacian mask above.
-        # Further increase aggressiveness: larger multipliers make the
-        # median threshold wider so more salt-and-pepper pixels are caught
-        # and replaced. Keep conservative Laplacian protection to avoid
-        # touching small bright features like stars.
-        # Increase aggressiveness further: larger multipliers make the
-        # median threshold wider so more salt-and-pepper pixels are caught
-        # and replaced. These defaults are intentionally strong for
-        # high-strength settings but remain configurable via
-        # `MEDIAN_SCALE_FACTOR`/`MEDIAN_SCALE_EXP`.
-        tuned_multipliers = {1: 3.0, 2: 6.0, 3: 12.0, 4: 20.0, 5: 30.0}
-        base_multiplier = float(tuned_multipliers.get(strength, 1.0))
-
-        # Keep scaling params configurable but with stronger defaults.
-        med_scale_factor = float(self.config.get('MEDIAN_SCALE_FACTOR', 1.0))
-        med_scale_exp = float(self.config.get('MEDIAN_SCALE_EXP', 1.0))
-
+        # Blend fraction: 40% at strength=1 → 100% at strength=5
         t = self._norm_strength()
-        med_min = base_multiplier * med_scale_factor * (1.0 ** (med_scale_exp - 1.0))
-        med_max = base_multiplier * med_scale_factor * (5.0 ** (med_scale_exp - 1.0))
-        multiplier = float(med_min + (med_max - med_min) * (t ** med_scale_exp))
+        blend = float(self.config.get('MEDIAN_BLEND', 0.40 + 0.60 * t))
+        blend = max(0.0, min(1.0, blend))
 
-        threshold = numpy.float32(base_threshold * multiplier)
-
-        local_median = self._medianBlur(scidata, ksize)
-
-        diff = cv2.absdiff(scidata, local_median).astype(numpy.float32)
-        outlier_mask = diff > threshold
-
-        # For multi-channel images, build a 2D outlier map (True if any channel is outlier)
-        if scidata.ndim == 3 and scidata.shape[2] >= 3:
-            outlier_2d = numpy.any(outlier_mask, axis=2)
+        if numpy.issubdtype(scidata.dtype, numpy.integer):
+            dtype_max = float(numpy.iinfo(scidata.dtype).max)
         else:
-            outlier_2d = outlier_mask.astype(numpy.bool_)
+            dtype_max = 1.0
 
-        # Require isolation: only replace pixels that are isolated outliers
-        # (typical of salt-and-pepper). Allow a small configurable neighborhood
-        # to be considered isolated so tiny clusters (<=2 neighbors) of
-        # corrupted pixels are also replaced. This is configurable via
-        # `MEDIAN_ISOLATED_MAX_NEIGHBORS` (default 2).
-        out_u8 = outlier_2d.astype(numpy.uint8)
-        neigh_count = cv2.filter2D(out_u8, -1, numpy.ones((3, 3), dtype=numpy.uint8))
-        max_neighbors = int(self.config.get('MEDIAN_ISOLATED_MAX_NEIGHBORS', 4))
-        isolated = (neigh_count <= max_neighbors)
+        result_f32 = blend * blurred.astype(numpy.float32) + (1.0 - blend) * scidata.astype(numpy.float32)
+        result = numpy.clip(result_f32, 0, dtype_max).astype(scidata.dtype)
 
-        # Build final per-channel replacement mask
-        result = scidata.copy()
-        # Build a conservative detail mask (Laplacian on luminance) to avoid
-        # replacing pixels that belong to fine structure (small stars, thin
-        # clouds, edges). Use a relatively high multiplier on the median of
-        # abs(Laplacian) to avoid marking noise as detail.
-        # Decide whether to use Laplacian-based detail masking for median.
-        use_laplacian = bool(self.config.get('DENOISE_USE_LAPLACIAN', True)) and not bool(self.config.get('DENOISE_FAST_MODE', False))
-        if use_laplacian:
-            if scidata.ndim == 3 and scidata.shape[2] >= 3:
-                lum = self._compute_luminance(scidata)
-            else:
-                lum = scidata.astype(numpy.float32)
-
-            # Make the median detail mask much less permissive so small
-            # corrupted clusters are denoised. These defaults raise the
-            # Laplacian multiplier and brightness gate to reduce preservation.
-            # Make the median detail mask more permeable: use a higher
-            # Laplacian multiplier (fewer pixels marked as detail) and a
-            # larger brightness gate so only very bright structures are
-            # preserved. Both are configurable via the same config keys.
-            med_lap_mult = float(self.config.get('DENOISE_LAPLACIAN_MULTIPLIER', 24.0))
-            med_bright_frac = float(self.config.get('DENOISE_BRIGHT_GATE_FRAC', 0.25))
-            detail_mask = self._detail_mask(lum, threshold=None,
-                                            dtype_max=(numpy.iinfo(scidata.dtype).max if numpy.issubdtype(scidata.dtype, numpy.integer) else 1.0),
-                                            lap_multiplier=med_lap_mult, bright_gate_frac=med_bright_frac)
-        else:
-            detail_mask = numpy.zeros((scidata.shape[0], scidata.shape[1]), dtype=bool)
-        if scidata.ndim == 3 and scidata.shape[2] >= 3:
-            rep_mask = numpy.repeat(isolated[:, :, numpy.newaxis], scidata.shape[2], axis=2)
-            # Only replace pixels where there is an outlier and it is isolated
-            # and not part of a fine-detail region.
-            final_mask = rep_mask & outlier_mask & numpy.repeat(~detail_mask[:, :, numpy.newaxis], scidata.shape[2], axis=2)
-            result[final_mask] = local_median[final_mask]
-            n_replaced = int(numpy.count_nonzero(final_mask))
-        else:
-            final_mask = isolated & outlier_2d & (~detail_mask)
-            result[final_mask] = local_median[final_mask]
-            n_replaced = int(numpy.count_nonzero(final_mask))
-
-        # Match overall luminance to the input to avoid perceived brightening
-        result = self._match_luminance(scidata, result)
-
-        logger.info('Applying median denoise, ksize=%d threshold=%.1f replaced=%d isolated pixels',
-                    ksize, float(threshold), n_replaced)
+        logger.info('Applying median denoise, ksize=%d blend=%.2f', ksize, blend)
 
         return result
 
 
     # ------------------------------------------------------------------
-    # Algorithm: Gaussian Blur (luminance-masked — preserves bright features)
+    # Algorithm: Gaussian Blur (direct — simple and effective)
     # ------------------------------------------------------------------
     def gaussian_blur(self, scidata):
-        """Apply a luminance-masked Gaussian blur.
+        """Apply a direct Gaussian blur blended with the original.
 
-        Smooths dark sky regions while preserving bright features (stars,
-        planets, moon).  Works by:
+        Applies cv2.GaussianBlur at a strength-dependent sigma and
+        linearly blends the blurred result with the original.  Higher
+        strengths use a larger sigma *and* a larger blend fraction so
+        the smoothing effect is always clearly visible.
 
-          1. Compute a Gaussian-blurred copy of the image.
-          2. Determine a brightness threshold at the 85th percentile.
-          3. Build a soft blend mask: pixels well above the threshold
-             keep their original values; pixels well below get the
-             blurred values; a smooth transition (~10% of dtype range)
-             avoids hard edges.
+        Strength mapping (defaults, configurable via GAUSSIAN_SIGMA_MAP):
+          1 → σ≈1.5, blend=0.30   (gentle)
+          3 → σ≈5.0, blend=0.65   (moderate)
+          5 → σ≈11,  blend=1.00   (strong — fully blurred)
 
-        The strength parameter maps to Gaussian sigma (linear: step=2.4, max=12):
-          1 → σ=2.4,  2 → σ=4.8,  3 → σ=7.2,  4 → σ=9.6,  5 → σ=12.0
-        Kernel size is derived automatically as 6σ (rounded to odd).
         Strength range: 1-5.
         """
         strength = self._get_strength()
@@ -354,73 +262,27 @@ class IndiAllskyDenoise(object):
 
         strength = max(1, min(strength, 5))
 
-        # Configurable scale: base factor and exponent allow non-linear
-        # mappings from strength→sigma. Increase defaults further to make
-        # strength=5 produce a visibly stronger blur while still allowing
-        # config overrides. We add a small detail-preservation mask below
-        # to avoid softening fine structure while increasing sigma.
-        # Default maps roughly: 1 -> ~6.0, 5 -> ~80.0 (much stronger blur at high strength)
-        # Increase defaults so strength=5 is clearly stronger. Also increase
-        # the Laplacian thresholds used to detect 'detail' so the mask
-        # protects fewer pixels (lets the blur act on more of the image).
-        scale_factor = float(self.config.get('GAUSSIAN_SCALE_FACTOR', 8.0))
-        scale_exp = float(self.config.get('GAUSSIAN_SCALE_EXP', 1.5))
-
-        # Use normalized strength mapping to produce bounded sigma between
-        # the value at strength=1 and strength=5 to avoid runaway values.
-        t = self._norm_strength()
-        sigma_min = scale_factor * (1.0 ** scale_exp)
-        sigma_max = scale_factor * (5.0 ** scale_exp)
-        sigma = float(sigma_min + (sigma_max - sigma_min) * (t ** scale_exp))
+        # Sigma per strength level.  Configurable via GAUSSIAN_SIGMA
+        # (overrides the whole map) or GAUSSIAN_SIGMA_MAP (per-level).
+        default_sigma_map = {1: 1.5, 2: 3.0, 3: 5.0, 4: 8.0, 5: 11.0}
+        sigma = float(self.config.get('GAUSSIAN_SIGMA', default_sigma_map.get(strength, 5.0)))
 
         blurred = cv2.GaussianBlur(scidata, (0, 0), sigma)
 
-        # Determine dtype-aware threshold at 85th percentile
-        if scidata.dtype == numpy.uint8:
-            dtype_max = numpy.float32(255.0)
-        elif scidata.dtype in (numpy.uint16, numpy.int16):
-            dtype_max = numpy.float32(65535.0)
+        # Blend fraction: 30% at strength=1 → 100% at strength=5
+        t = self._norm_strength()
+        blend = float(self.config.get('GAUSSIAN_BLEND', 0.30 + 0.70 * t))
+        blend = max(0.0, min(1.0, blend))
+
+        if numpy.issubdtype(scidata.dtype, numpy.integer):
+            dtype_max = float(numpy.iinfo(scidata.dtype).max)
         else:
-            dtype_max = numpy.float32(1.0)
+            dtype_max = 1.0
 
-        threshold = numpy.float32(numpy.percentile(scidata, 85))
+        result_f32 = blend * blurred.astype(numpy.float32) + (1.0 - blend) * scidata.astype(numpy.float32)
+        result = numpy.clip(result_f32, 0, dtype_max).astype(scidata.dtype)
 
-        # Soft transition width: 10% of dtype range (avoids hard edges)
-        transition = numpy.float32(dtype_max * 0.10)
-        transition = max(transition, numpy.float32(1.0))  # floor for uint8
-
-        # Build soft blend mask: 0.0 = use blurred, 1.0 = keep original
-        scidata_f32 = scidata.astype(numpy.float32)
-        # alpha ramps from 0→1 over the transition band above threshold
-        alpha = numpy.clip((scidata_f32 - threshold) / transition, 0.0, 1.0)
-
-        # Preserve local high-frequency detail (small stars, thin clouds)
-        # by computing a Laplacian-based detail map and ensuring alpha=1
-        # where significant detail exists. Thresholding is conservative
-        # to avoid preserving noise.
-        # Optionally compute a Laplacian-based detail mask unless fast mode is requested.
-        use_laplacian = bool(self.config.get('DENOISE_USE_LAPLACIAN', True)) and not bool(self.config.get('DENOISE_FAST_MODE', False))
-        if use_laplacian:
-            lum = self._compute_luminance(scidata)
-            # Increase gaussian laplacian multiplier so fewer pixels are
-            # considered 'detail' (i.e. protect less), and raise the
-            # brightness gate so only very bright structures are preserved.
-            lap_mult = float(self.config.get('DENOISE_LAPLACIAN_MULTIPLIER', 12.0))
-            bright_frac = float(self.config.get('DENOISE_BRIGHT_GATE_FRAC', 0.20))
-            dm = self._detail_mask(lum, threshold=threshold, dtype_max=dtype_max, lap_multiplier=lap_mult, bright_gate_frac=bright_frac)
-            alpha[dm] = 1.0
-
-        # Blend: result = alpha * original + (1 - alpha) * blurred
-        result_f32 = alpha * scidata_f32 + (numpy.float32(1.0) - alpha) * blurred.astype(numpy.float32)
-
-        result = numpy.clip(result_f32, 0, float(dtype_max)).astype(scidata.dtype)
-
-        # Match overall luminance to the input to avoid perceived brightening
-        result = self._match_luminance(scidata, result)
-
-        n_preserved = int(numpy.count_nonzero(alpha > 0.5))
-        logger.info('Applying luminance-masked gaussian denoise, sigma=%.1f threshold=%.0f preserved=%d bright pixels',
-                 sigma, float(threshold), n_preserved)
+        logger.info('Applying gaussian denoise, sigma=%.1f blend=%.2f', sigma, blend)
 
         return result
 
@@ -568,25 +430,24 @@ class IndiAllskyDenoise(object):
         logger.info('Applied hot-pixel filter (star-safe), strength=%d replaced=%d pixels', strength, n_replaced)
 
         return result
+
     def wavelet(self, scidata):
         """Apply wavelet-based denoising with BayesShrink adaptive thresholding.
 
         Decomposes the image into frequency bands using the Discrete
         Wavelet Transform (DWT), estimates noise in the finest detail
         coefficients, and shrinks noisy coefficients using BayesShrink
-        adaptive soft thresholding.  This naturally separates:
+        adaptive soft thresholding.
 
-          - Stars (fine-scale signal — preserved)
-          - Sky gradients (coarse-scale — preserved)
-          - Noise (medium-scale random — suppressed)
-
-                The strength parameter scales the BayesShrink threshold linearly:
-                    1 → 2.4×,  2 → 4.8×,  3 → 7.2×,  4 → 9.6×,  5 → 12.0×
+        The strength parameter controls both the threshold scaling and
+        the blend ratio with the original image:
+          1 → gentle shrinkage, 40% blend   (subtle smoothing)
+          3 → moderate shrinkage, 70% blend  (visible smoothing)
+          5 → strong shrinkage, 100% blend   (aggressive, slightly blurry)
 
         Wavelet: Daubechies-4 (db4), levels: auto (3-4), soft thresholding.
         Requires PyWavelets (pywt).  Strength range: 1-5.
         """
-        # start timer and log request so completion is always traceable
         start_t = time.time()
         strength = self._get_strength()
         logger.info('Wavelet denoise requested (strength=%d)', strength)
@@ -596,29 +457,10 @@ class IndiAllskyDenoise(object):
 
         strength = max(1, min(strength, 5))
 
-        # Configurable scale for wavelet shrinkage (factor & exponent).
-        # Use the fine autotune suggestion (no PR) as a reasonable default
-        # for Pi-class images. These may be overridden in runtime config.
-        # Make default wavelet scaling significantly more aggressive so
-        # strength level 5 produces a visibly stronger thresholding
-        # effect. Keep config overrides available if you need to tune
-        # for specific cameras. Use a non-linear exponent to emphasize
-        # higher strength levels.
-        # Increase default scaling so thresholds are stronger by default.
-        # These defaults make strength levels more aggressive; users can
-        # override via `WAVELET_SCALE_FACTOR` and `WAVELET_SCALE_EXP` in config.
-        # Make wavelet thresholds significantly more aggressive by default
-        # so strength=5 produces visible shrinkage. These can be tuned via
-        # `WAVELET_SCALE_FACTOR` and `WAVELET_SCALE_EXP` in config.
-        wavelet_scale_factor = float(self.config.get('WAVELET_SCALE_FACTOR', 8.0))
-        wavelet_scale_exp = float(self.config.get('WAVELET_SCALE_EXP', 5.0))
-
-        # Map strength→scale using a normalized bounded interpolation to
-        # avoid runaway thresholds that obliterate the image.
-        t = self._norm_strength()
-        scale_min = wavelet_scale_factor * (1.0 ** wavelet_scale_exp)
-        scale_max = wavelet_scale_factor * (5.0 ** wavelet_scale_exp)
-        scale = float(scale_min + (scale_max - scale_min) * (t ** wavelet_scale_exp))
+        # Simple linear scale: strength 1→1.5x, 3→4.0x, 5→8.0x
+        # These directly multiply the BayesShrink threshold.
+        default_scale_map = {1: 1.5, 2: 2.5, 3: 4.0, 4: 6.0, 5: 8.0}
+        scale = float(self.config.get('WAVELET_SCALE', default_scale_map.get(strength, 4.0)))
 
         # Determine dtype range for normalization
         if numpy.issubdtype(scidata.dtype, numpy.integer):
@@ -646,69 +488,50 @@ class IndiAllskyDenoise(object):
             detail_hh = coeffs[-1][2]  # HH = diagonal detail at finest level
             sigma_noise = numpy.median(numpy.abs(detail_hh)) / 0.6745
 
-            if sigma_noise < 1e-10:
-                # No measurable noise
-                return channel
+            # Enforce a minimum noise floor so the filter always does
+            # *something* even on high-SNR / well-lit images.
+            min_sigma = float(self.config.get('WAVELET_MIN_SIGMA', 0.005))
+            sigma_noise = max(sigma_noise, min_sigma)
 
             # Apply BayesShrink to each detail level
-            denoised_coeffs = [coeffs[0]]  # keep approximation coefficients untouched
+            denoised_coeffs = [coeffs[0]]  # keep approximation untouched
             for i in range(1, len(coeffs)):
                 new_details = []
                 for detail_band in coeffs[i]:
-                    # BayesShrink threshold: sigma_noise^2 / sigma_signal
                     sigma_band = numpy.sqrt(max(numpy.var(detail_band) - sigma_noise ** 2, 0))
                     if sigma_band < 1e-10:
-                        threshold = numpy.max(numpy.abs(detail_band))  # shrink everything
+                        threshold = numpy.max(numpy.abs(detail_band))
                     else:
                         threshold = (sigma_noise ** 2) / sigma_band
 
                     # Scale by user strength
                     threshold *= scale
 
-                    # Soft thresholding
                     new_details.append(pywt.threshold(detail_band, threshold, mode='soft'))
 
                 denoised_coeffs.append(tuple(new_details))
 
             # Inverse DWT
             reconstructed = pywt.waverec2(denoised_coeffs, 'db4')
-
-            # Trim to original size (waverec2 may pad by 1 pixel)
             reconstructed = reconstructed[:channel.shape[0], :channel.shape[1]]
 
-            # Convert back to original range
-            denoised_ch = numpy.clip(reconstructed * dtype_max, 0, dtype_max).astype(orig_dtype)
-            return denoised_ch
+            return numpy.clip(reconstructed * dtype_max, 0, dtype_max).astype(orig_dtype)
 
         # Handle grayscale vs color
         if scidata.ndim == 2:
             result = _denoise_channel(scidata)
         else:
-            # Denoise each channel independently
             channels = [_denoise_channel(scidata[:, :, c]) for c in range(scidata.shape[2])]
             result = numpy.stack(channels, axis=2)
 
-        # Blend denoised vs original to inherently limit destructive changes.
-        # Increase default blend cap further so the wavelet result is more
-        # apparent at high strengths. Users can lower `WAVELET_MAX_BLEND`
-        # in config if they want a more conservative mix.
-        # Allow up to a full blend of the denoised result at max strength
-        # so users see a strong effect when they select 5 — still overrideable in config.
-        blend_cap = float(self.config.get('WAVELET_MAX_BLEND', 1.0))
-        # Blend scales with strength: small at low strength, larger at high strength
-        # Bias the blend upward so denoised output is used more aggressively
-        # even at moderate strengths. At strength=1 we use 50% denoised by
-        # default, and ramp to full denoised at strength=5. Configurable via
-        # `WAVELET_MAX_BLEND` to opt for more conservative mixes.
-        blend = float(blend_cap * (0.5 + 0.5 * t))
+        # Blend: 40% at strength=1 → 100% at strength=5
+        t = self._norm_strength()
+        blend = float(self.config.get('WAVELET_BLEND', 0.40 + 0.60 * t))
+        blend = max(0.0, min(1.0, blend))
 
-        # Ensure types align for blending
         orig_f = scidata.astype(numpy.float32)
         den_f = result.astype(numpy.float32)
         blended = numpy.clip((blend * den_f) + ((1.0 - blend) * orig_f), 0, float(dtype_max)).astype(orig_dtype)
-
-        # Match overall luminance to the input to avoid perceived brightening
-        blended = self._match_luminance(scidata, blended)
 
         elapsed = time.time() - start_t
         logger.info('Applied wavelet denoise (BayesShrink), levels=%d scale=%.2f blend=%.2f time=%.3fs',

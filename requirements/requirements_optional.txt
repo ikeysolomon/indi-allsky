@@ -1,5 +1,6 @@
+```pip-requirements
 # Optional modules
-PyWavelets >= 1.4.0
+```
 PyMySQL
 boto3
 apache-libcloud

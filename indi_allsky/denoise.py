@@ -155,7 +155,10 @@ class IndiAllskyDenoise(object):
         # that prevents replacements where legitimate small-scale
         # structures exist.
         strength = max(1, min(self._get_strength(), 5))
-        tuned_multipliers = {1: 0.8, 2: 1.5, 3: 2.5, 4: 4.0, 5: 6.0}
+        # Increase aggressiveness: stronger defaults so strength=5 is much
+        # more effective at removing salt-and-pepper while still protecting
+        # fine detail via the Laplacian mask above.
+        tuned_multipliers = {1: 1.0, 2: 2.0, 3: 4.0, 4: 7.0, 5: 10.0}
         base_multiplier = float(tuned_multipliers.get(strength, 1.0))
 
         # Keep scaling params configurable but with stronger defaults.
@@ -257,9 +260,9 @@ class IndiAllskyDenoise(object):
         # strength=5 produce a visibly stronger blur while still allowing
         # config overrides. We add a small detail-preservation mask below
         # to avoid softening fine structure while increasing sigma.
-        # Default maps roughly: 1 -> 3.6, 5 -> 18.0
-        scale_factor = float(self.config.get('GAUSSIAN_SCALE_FACTOR', 3.6))
-        scale_exp = float(self.config.get('GAUSSIAN_SCALE_EXP', 1.0))
+        # Default maps roughly: 1 -> 4.5, 5 -> ~31.0 (much stronger blur at high strength)
+        scale_factor = float(self.config.get('GAUSSIAN_SCALE_FACTOR', 4.5))
+        scale_exp = float(self.config.get('GAUSSIAN_SCALE_EXP', 1.2))
 
         # Use normalized strength mapping to produce bounded sigma between
         # the value at strength=1 and strength=5 to avoid runaway values.
@@ -496,8 +499,8 @@ class IndiAllskyDenoise(object):
         # effect. Keep config overrides available if you need to tune
         # for specific cameras. Use a non-linear exponent to emphasize
         # higher strength levels.
-        wavelet_scale_factor = float(self.config.get('WAVELET_SCALE_FACTOR', 1.2))
-        wavelet_scale_exp = float(self.config.get('WAVELET_SCALE_EXP', 2.0))
+        wavelet_scale_factor = float(self.config.get('WAVELET_SCALE_FACTOR', 2.4))
+        wavelet_scale_exp = float(self.config.get('WAVELET_SCALE_EXP', 3.0))
 
         # Map strength→scale using a normalized bounded interpolation to
         # avoid runaway thresholds that obliterate the image.
@@ -578,9 +581,11 @@ class IndiAllskyDenoise(object):
         # Increase default blend cap further so the wavelet result is more
         # apparent at high strengths. Users can lower `WAVELET_MAX_BLEND`
         # in config if they want a more conservative mix.
-        blend_cap = float(self.config.get('WAVELET_MAX_BLEND', 0.9))
+        # Allow up to a full blend of the denoised result at max strength
+        # so users see a strong effect when they select 5 — still overrideable in config.
+        blend_cap = float(self.config.get('WAVELET_MAX_BLEND', 1.0))
         # Blend scales with strength: small at low strength, larger at high strength
-        blend = float(blend_cap * (0.15 + 0.85 * t))
+        blend = float(blend_cap * (0.10 + 0.90 * t))
 
         # Ensure types align for blending
         orig_f = scidata.astype(numpy.float32)

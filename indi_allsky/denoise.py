@@ -306,9 +306,9 @@ class IndiAllskyDenoise(object):
 
         blurred = self._medianBlur(scidata, ksize)
 
-        # Blend fraction: 40% at strength=1 → 100% at strength=5
+        # Blend fraction: 30% at strength=1 → 80% at strength=5
         t = self._norm_strength()
-        blend = float(self.config.get('MEDIAN_BLEND', 0.40 + 0.60 * t))
+        blend = float(self.config.get('MEDIAN_BLEND', 0.30 + 0.50 * t))
         blend = max(0.0, min(1.0, blend))
 
         if numpy.issubdtype(scidata.dtype, numpy.integer):
@@ -354,14 +354,14 @@ class IndiAllskyDenoise(object):
 
         # Sigma per strength level.  Configurable via GAUSSIAN_SIGMA
         # (overrides the whole map) or GAUSSIAN_SIGMA_MAP (per-level).
-        default_sigma_map = {1: 1.5, 2: 3.0, 3: 5.0, 4: 8.0, 5: 11.0}
-        sigma = float(self.config.get('GAUSSIAN_SIGMA', default_sigma_map.get(strength, 5.0)))
+        default_sigma_map = {1: 0.8, 2: 1.5, 3: 2.5, 4: 3.5, 5: 5.0}
+        sigma = float(self.config.get('GAUSSIAN_SIGMA', default_sigma_map.get(strength, 2.5)))
 
         blurred = cv2.GaussianBlur(scidata, (0, 0), sigma)
 
-        # Blend fraction: 30% at strength=1 → 100% at strength=5
+        # Blend fraction: 20% at strength=1 → 70% at strength=5
         t = self._norm_strength()
-        blend = float(self.config.get('GAUSSIAN_BLEND', 0.30 + 0.70 * t))
+        blend = float(self.config.get('GAUSSIAN_BLEND', 0.20 + 0.50 * t))
         blend = max(0.0, min(1.0, blend))
 
         if numpy.issubdtype(scidata.dtype, numpy.integer):

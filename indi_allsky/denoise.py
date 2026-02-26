@@ -2,6 +2,7 @@ import cv2
 import numpy
 import logging
 import time
+import pywt
 
 from . import constants
 
@@ -418,14 +419,6 @@ class IndiAllskyDenoise(object):
         Wavelet: Daubechies-4 (db4), levels: auto (3-4), soft thresholding.
         Requires PyWavelets (pywt).  Strength range: 1-5.
         """
-        try:
-            import pywt
-        except ImportError:
-            logger.warning('PyWavelets (pywt) is not installed — falling back to median denoise')
-            # Fall back to the fast median-based denoise to provide a usable
-            # result when the optional dependency is missing.
-            return self.median_blur(scidata)
-
         # start timer and log request so completion is always traceable
         start_t = time.time()
         strength = self._get_strength()

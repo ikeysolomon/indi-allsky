@@ -538,10 +538,10 @@ var fullscreen = false;  //initial state
         <div class="col-sm-7">
             <div>Denoise algorithm to reduce image noise (applied before stretch). Stars are preserved.<br>
             <small class="text-muted">
-            <b>Gaussian</b> — Fast — Luminance-masked blur; smooths sky while preserving bright stars. Best for: broad background noise.<br>
-            <b>Median</b> — Fast — Local median replace for isolated hot/cold pixels. Best for: salt-and-pepper / hot pixels.<br>
-            <b>Bilateral</b> — Medium — Edge-aware smoothing; keeps star edges sharp. Best for: read noise with detail preservation.<br>
-            <b>Wavelet</b> — Slow — BayesShrink wavelet denoise (requires optional PyWavelets). Best for: mixed noise types and highest quality.
+            <b>Gaussian</b> — Fastest - Smooths background glow, stars masked out. High strength can soften faint detail.<br>
+            <b>Median</b> — Fast - Removes salt and pepper noise, everything else untouched. Poorer at backgrounds<br>
+            <b>Bilateral</b> — Medium - Smooths read noise but keeps edges sharp. Could introduce "patchiness"<br>
+            <b>Wavelet</b> — Slow - All-round best quality, handles any noise type. Needs optional extras from installer.
             </small></div>
         </div>
     </div>

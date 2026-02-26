@@ -1,6 +1,5 @@
-```pip-requirements
 # Optional modules
-```
+# (Leave packages here, one per line. Example: PyWavelets >= 1.4.0)
 PyMySQL
 boto3
 apache-libcloud

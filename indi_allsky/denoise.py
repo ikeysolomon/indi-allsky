@@ -308,7 +308,7 @@ class IndiAllskyDenoise(object):
 
         # Blend fraction: 30% at strength=1 → 80% at strength=5
         t = self._norm_strength()
-        blend = float(self.config.get('MEDIAN_BLEND', 0.30 + 0.50 * t))
+        blend = float(self.config.get('MEDIAN_BLEND', 0.35 + 0.57 * t))
         blend = max(0.0, min(1.0, blend))
 
         if numpy.issubdtype(scidata.dtype, numpy.integer):
@@ -354,14 +354,14 @@ class IndiAllskyDenoise(object):
 
         # Sigma per strength level.  Configurable via GAUSSIAN_SIGMA
         # (overrides the whole map) or GAUSSIAN_SIGMA_MAP (per-level).
-        default_sigma_map = {1: 0.8, 2: 1.5, 3: 2.5, 4: 3.5, 5: 5.0}
-        sigma = float(self.config.get('GAUSSIAN_SIGMA', default_sigma_map.get(strength, 2.5)))
+        default_sigma_map = {1: 1.0, 2: 1.8, 3: 3.0, 4: 4.2, 5: 5.8}
+        sigma = float(self.config.get('GAUSSIAN_SIGMA', default_sigma_map.get(strength, 3.0)))
 
         blurred = cv2.GaussianBlur(scidata, (0, 0), sigma)
 
         # Blend fraction: 20% at strength=1 → 70% at strength=5
         t = self._norm_strength()
-        blend = float(self.config.get('GAUSSIAN_BLEND', 0.20 + 0.50 * t))
+        blend = float(self.config.get('GAUSSIAN_BLEND', 0.25 + 0.55 * t))
         blend = max(0.0, min(1.0, blend))
 
         if numpy.issubdtype(scidata.dtype, numpy.integer):
@@ -552,8 +552,8 @@ class IndiAllskyDenoise(object):
 
         # Simple linear scale: strength 1→1.5x, 3→4.0x, 5→8.0x
         # These directly multiply the BayesShrink threshold.
-        default_scale_map = {1: 1.5, 2: 2.5, 3: 4.0, 4: 6.0, 5: 8.0}
-        scale = float(self.config.get('WAVELET_SCALE', default_scale_map.get(strength, 4.0)))
+        default_scale_map = {1: 1.8, 2: 3.0, 3: 4.6, 4: 7.0, 5: 9.2}
+        scale = float(self.config.get('WAVELET_SCALE', default_scale_map.get(strength, 4.6)))
 
         # Determine dtype range for normalization
         if numpy.issubdtype(scidata.dtype, numpy.integer):
@@ -619,7 +619,7 @@ class IndiAllskyDenoise(object):
 
         # Blend: 40% at strength=1 → 100% at strength=5
         t = self._norm_strength()
-        blend = float(self.config.get('WAVELET_BLEND', 0.40 + 0.60 * t))
+        blend = float(self.config.get('WAVELET_BLEND', 0.46 + 0.54 * t))
         blend = max(0.0, min(1.0, blend))
 
         orig_f = scidata.astype(numpy.float32)

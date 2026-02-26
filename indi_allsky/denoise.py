@@ -29,6 +29,85 @@ class IndiAllskyDenoise(object):
         self.config = config
         self.night_av = night_av
 
+    def _match_luminance(self, orig, result):
+        """Scale `result` to match the mean luminance of `orig` to avoid
+        perceived brightening/dimming after denoising. Returns a copy.
+
+        The applied gain is clipped to a small range to avoid introducing
+        large global contrast changes.
+        """
+        try:
+            # Compute luminance using Rec.601-like weights on RGB, or
+            # identity for single-channel images.
+            if orig.ndim == 3 and orig.shape[2] >= 3:
+                orig_lum = (0.299 * orig[:, :, 2].astype(numpy.float32) +
+                            0.587 * orig[:, :, 1].astype(numpy.float32) +
+                            0.114 * orig[:, :, 0].astype(numpy.float32))
+                res_lum = (0.299 * result[:, :, 2].astype(numpy.float32) +
+                           0.587 * result[:, :, 1].astype(numpy.float32) +
+                           0.114 * result[:, :, 0].astype(numpy.float32))
+            else:
+                orig_lum = orig.astype(numpy.float32)
+                res_lum = result.astype(numpy.float32)
+
+            orig_mean = float(numpy.mean(orig_lum))
+            res_mean = float(numpy.mean(res_lum))
+
+            if res_mean <= 1e-6:
+                return result
+
+            gain = orig_mean / (res_mean + 1e-9)
+
+            # Clip gain to avoid extreme global changes but allow modest
+            # correction to prevent perceived brightening/dimming.
+            min_gain = float(self.config.get('DENOISE_MIN_LUM_GAIN', 0.92))
+            max_gain = float(self.config.get('DENOISE_MAX_LUM_GAIN', 1.08))
+            gain = max(min_gain, min(max_gain, gain))
+
+            # Apply gain uniformly to all channels
+            res_f = result.astype(numpy.float32) * gain
+            dtype_max = float(numpy.iinfo(result.dtype).max) if numpy.issubdtype(result.dtype, numpy.integer) else 1.0
+            res_f = numpy.clip(res_f, 0.0, dtype_max).astype(result.dtype)
+            return res_f
+        except Exception:
+            return result
+
+    def _compute_luminance(self, img):
+        """Return a float32 luminance image for `img` (shape HxW)."""
+        if img.ndim == 3 and img.shape[2] >= 3:
+            return (0.299 * img[:, :, 2].astype(numpy.float32) +
+                    0.587 * img[:, :, 1].astype(numpy.float32) +
+                    0.114 * img[:, :, 0].astype(numpy.float32))
+        return img.astype(numpy.float32)
+
+    def _detail_mask(self, lum, threshold=None, dtype_max=1.0,
+                     lap_multiplier=3.0, bright_gate_frac=0.05):
+        """Compute a conservative detail mask (True where detail exists).
+
+        - `lum` should be float32 luminance image.
+        - `threshold` is optional brightness threshold used for gating.
+        - `dtype_max` is the maximum possible value for the dtype.
+        - `lap_multiplier` scales the median-abs-Laplacian to decide detail.
+        - `bright_gate_frac` is fraction of threshold/dtype_max used as gate.
+        """
+        try:
+            lap = cv2.Laplacian(lum, cv2.CV_32F, ksize=3)
+            lap_abs = numpy.abs(lap)
+            lap_median = numpy.median(lap_abs)
+            detail_thresh = max(lap_median * float(lap_multiplier), float(dtype_max) * 0.0005)
+
+            # Brightness gate: prefer using provided threshold; otherwise use
+            # a small fraction of the dtype range to avoid preserving noise.
+            if threshold is None:
+                bright_gate = float(dtype_max) * float(bright_gate_frac)
+            else:
+                bright_gate = max(float(threshold) * float(bright_gate_frac), float(dtype_max) * 0.005)
+
+            bright_pixels = lum > bright_gate
+            return (lap_abs > detail_thresh) & bright_pixels
+        except Exception:
+            return numpy.zeros_like(lum, dtype=bool)
+
     def _get_strength(self):
         """Return the effective denoise strength (int) respecting night/day config."""
         if self.config.get('USE_NIGHT_COLOR', True):
@@ -56,22 +135,21 @@ class IndiAllskyDenoise(object):
         strength = max(1, min(self._get_strength(), 5))
         # Tuned mapping: strengths 1-5 -> sigma_color (baseline)
         tuned_sigma = {
-            1: 8,
-            2: 8,
-            3: 8,
-            4: 12,
-            5: 16,
-        }
+            # Decide whether to use Laplacian-based detail masking. Fast mode
+            # disables expensive Laplacian operations for performance.
+            use_laplacian = bool(self.config.get('DENOISE_USE_LAPLACIAN', True)) and not bool(self.config.get('DENOISE_FAST_MODE', False))
+            if use_laplacian:
+                if scidata.ndim == 3 and scidata.shape[2] >= 3:
+                    lum = self._compute_luminance(scidata)
+                else:
+                    lum = scidata.astype(numpy.float32)
 
-        base_sigma = float(tuned_sigma.get(strength, 10))
-
-        # Allow scaling/exponent to reshape strength→sigma mapping.
-        # Fallbacks reflect autotune suggestions (BILATERAL_SCALE_FACTOR=0.4, BILATERAL_SCALE_EXP=1.0)
-        bil_scale_factor = float(self.config.get('BILATERAL_SCALE_FACTOR', 0.4))
-        bil_scale_exp = float(self.config.get('BILATERAL_SCALE_EXP', 1.0))
-
-        # Use a normalized strength mapping (t in [0,1]) and a bounded
-        # interpolation between the scale at strength=1 and strength=5.
+                lap_mult = float(self.config.get('DENOISE_LAPLACIAN_MULTIPLIER', 6.0))
+                bright_frac = float(self.config.get('DENOISE_BRIGHT_GATE_FRAC', 0.02))
+                detail_mask = self._detail_mask(lum, threshold=None, dtype_max=(numpy.iinfo(scidata.dtype).max if numpy.issubdtype(scidata.dtype, numpy.integer) else 1.0),
+                                                lap_multiplier=lap_mult, bright_gate_frac=bright_frac)
+            else:
+                detail_mask = numpy.zeros((scidata.shape[0], scidata.shape[1]), dtype=bool)
         t = (float(strength) - 1.0) / 4.0
         sigma_min = base_sigma * bil_scale_factor * (1.0 ** (bil_scale_exp - 1.0))
         sigma_max = base_sigma * bil_scale_factor * (5.0 ** (bil_scale_exp - 1.0))
@@ -158,7 +236,11 @@ class IndiAllskyDenoise(object):
         # Increase aggressiveness: stronger defaults so strength=5 is much
         # more effective at removing salt-and-pepper while still protecting
         # fine detail via the Laplacian mask above.
-        tuned_multipliers = {1: 1.0, 2: 2.0, 3: 4.0, 4: 7.0, 5: 10.0}
+        # Further increase aggressiveness: larger multipliers make the
+        # median threshold wider so more salt-and-pepper pixels are caught
+        # and replaced. Keep conservative Laplacian protection to avoid
+        # touching small bright features like stars.
+        tuned_multipliers = {1: 2.0, 2: 4.0, 3: 8.0, 4: 14.0, 5: 20.0}
         base_multiplier = float(tuned_multipliers.get(strength, 1.0))
 
         # Keep scaling params configurable but with stronger defaults.
@@ -205,7 +287,10 @@ class IndiAllskyDenoise(object):
 
             lap = cv2.Laplacian(lum, cv2.CV_32F, ksize=3)
             lap_abs = numpy.abs(lap)
-            detail_thresh = max(numpy.median(lap_abs) * 4.0, float(numpy.max(lap_abs)) * 0.001)
+            # Relaxed detail threshold: raise the multiplier so fewer
+            # pixels are considered 'detail' to avoid over-protecting and
+            # preventing denoising. This reduces dulling caused by masking.
+            detail_thresh = max(numpy.median(lap_abs) * 6.0, float(numpy.max(lap_abs)) * 0.001)
             detail_mask = lap_abs > detail_thresh
         except Exception:
             detail_mask = numpy.zeros((scidata.shape[0], scidata.shape[1]), dtype=bool)
@@ -220,6 +305,9 @@ class IndiAllskyDenoise(object):
             final_mask = isolated & outlier_2d & (~detail_mask)
             result[final_mask] = local_median[final_mask]
             n_replaced = int(numpy.count_nonzero(final_mask))
+
+        # Match overall luminance to the input to avoid perceived brightening
+        result = self._match_luminance(scidata, result)
 
         logger.info('Applying median denoise, ksize=%d threshold=%.1f replaced=%d isolated pixels',
                     ksize, float(threshold), n_replaced)
@@ -260,9 +348,11 @@ class IndiAllskyDenoise(object):
         # strength=5 produce a visibly stronger blur while still allowing
         # config overrides. We add a small detail-preservation mask below
         # to avoid softening fine structure while increasing sigma.
-        # Default maps roughly: 1 -> 4.5, 5 -> ~31.0 (much stronger blur at high strength)
-        scale_factor = float(self.config.get('GAUSSIAN_SCALE_FACTOR', 4.5))
-        scale_exp = float(self.config.get('GAUSSIAN_SCALE_EXP', 1.2))
+        # Default maps roughly: 1 -> ~4.5, 5 -> ~42.0 (noticeably stronger blur at high strength)
+        # Increase defaults so strength=5 is clearly stronger while keeping
+        # a brightness-aware Laplacian mask to protect fine bright features.
+        scale_factor = float(self.config.get('GAUSSIAN_SCALE_FACTOR', 5.2))
+        scale_exp = float(self.config.get('GAUSSIAN_SCALE_EXP', 1.3))
 
         # Use normalized strength mapping to produce bounded sigma between
         # the value at strength=1 and strength=5 to avoid runaway values.
@@ -296,26 +386,26 @@ class IndiAllskyDenoise(object):
         # by computing a Laplacian-based detail map and ensuring alpha=1
         # where significant detail exists. Thresholding is conservative
         # to avoid preserving noise.
-        try:
-            lap = cv2.Laplacian(scidata_f32, cv2.CV_32F, ksize=3)
-            lap_abs = numpy.abs(lap)
-            # Conservative detail threshold: a few times the median absolute
-            # Laplacian to avoid marking noise as detail.
-            detail_thresh = max(numpy.median(lap_abs) * 3.0, float(dtype_max) * 0.001)
-            detail_mask = lap_abs > detail_thresh
-            alpha[detail_mask] = 1.0
-        except Exception:
-            # If Laplacian fails for any reason, fall back to brightness-only mask
-            pass
+        # Optionally compute a Laplacian-based detail mask unless fast mode is requested.
+        use_laplacian = bool(self.config.get('DENOISE_USE_LAPLACIAN', True)) and not bool(self.config.get('DENOISE_FAST_MODE', False))
+        if use_laplacian:
+            lum = self._compute_luminance(scidata)
+            lap_mult = float(self.config.get('DENOISE_LAPLACIAN_MULTIPLIER', 3.0))
+            bright_frac = float(self.config.get('DENOISE_BRIGHT_GATE_FRAC', 0.05))
+            dm = self._detail_mask(lum, threshold=threshold, dtype_max=dtype_max, lap_multiplier=lap_mult, bright_gate_frac=bright_frac)
+            alpha[dm] = 1.0
 
         # Blend: result = alpha * original + (1 - alpha) * blurred
         result_f32 = alpha * scidata_f32 + (numpy.float32(1.0) - alpha) * blurred.astype(numpy.float32)
 
         result = numpy.clip(result_f32, 0, float(dtype_max)).astype(scidata.dtype)
 
+        # Match overall luminance to the input to avoid perceived brightening
+        result = self._match_luminance(scidata, result)
+
         n_preserved = int(numpy.count_nonzero(alpha > 0.5))
         logger.info('Applying luminance-masked gaussian denoise, sigma=%.1f threshold=%.0f preserved=%d bright pixels',
-                     sigma, float(threshold), n_preserved)
+                 sigma, float(threshold), n_preserved)
 
         return result
 
@@ -499,8 +589,11 @@ class IndiAllskyDenoise(object):
         # effect. Keep config overrides available if you need to tune
         # for specific cameras. Use a non-linear exponent to emphasize
         # higher strength levels.
-        wavelet_scale_factor = float(self.config.get('WAVELET_SCALE_FACTOR', 2.4))
-        wavelet_scale_exp = float(self.config.get('WAVELET_SCALE_EXP', 3.0))
+        # Increase default scaling so thresholds are stronger by default.
+        # These defaults make strength levels more aggressive; users can
+        # override via `WAVELET_SCALE_FACTOR` and `WAVELET_SCALE_EXP` in config.
+        wavelet_scale_factor = float(self.config.get('WAVELET_SCALE_FACTOR', 3.6))
+        wavelet_scale_exp = float(self.config.get('WAVELET_SCALE_EXP', 3.5))
 
         # Map strength→scale using a normalized bounded interpolation to
         # avoid runaway thresholds that obliterate the image.
@@ -585,12 +678,19 @@ class IndiAllskyDenoise(object):
         # so users see a strong effect when they select 5 — still overrideable in config.
         blend_cap = float(self.config.get('WAVELET_MAX_BLEND', 1.0))
         # Blend scales with strength: small at low strength, larger at high strength
-        blend = float(blend_cap * (0.10 + 0.90 * t))
+        # Bias the blend upward so denoised output becomes visible earlier
+        # at mid strengths while still allowing a mostly-original image at
+        # the lowest setting. Users can reduce `WAVELET_MAX_BLEND` to be
+        # more conservative if desired.
+        blend = float(blend_cap * (0.25 + 0.75 * t))
 
         # Ensure types align for blending
         orig_f = scidata.astype(numpy.float32)
         den_f = result.astype(numpy.float32)
         blended = numpy.clip((blend * den_f) + ((1.0 - blend) * orig_f), 0, float(dtype_max)).astype(orig_dtype)
+
+        # Match overall luminance to the input to avoid perceived brightening
+        blended = self._match_luminance(scidata, blended)
 
         elapsed = time.time() - start_t
         logger.info('Applied wavelet denoise (BayesShrink), levels=%d scale=%.2f blend=%.2f time=%.3fs',

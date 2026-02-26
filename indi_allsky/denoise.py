@@ -28,7 +28,6 @@ class IndiAllskyDenoise(object):
         self.config = config
         self.night_av = night_av
 
-
     def _get_strength(self):
         """Return the effective denoise strength (int) respecting night/day config."""
         if self.config.get('USE_NIGHT_COLOR', True):
@@ -40,18 +39,46 @@ class IndiAllskyDenoise(object):
         # daytime
         return int(self.config.get('IMAGE_DENOISE_STRENGTH_DAY', 3))
 
+    def _norm_strength(self):
+        """Return normalized strength t in [0,1] derived from effective strength 1..5."""
+        s = max(1, min(self._get_strength(), 5))
+        return (float(s) - 1.0) / 4.0
+
 
     def _get_bilateral_sigma(self):
         """Return (sigmaColor, sigmaSpace) for the bilateral filter."""
-        if self.config.get('USE_NIGHT_COLOR', True):
-            sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR', 10))
-            sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE', 15))
-        elif self.night_av[constants.NIGHT_NIGHT]:
-            sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR', 10))
-            sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE', 15))
-        else:
-            sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR_DAY', 10))
-            sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE_DAY', 15))
+        # Tuned sigma_color per strength (derived from benchmarks).
+        # These values are baked into the runtime behavior to provide
+        # consistent denoising without relying on external test files.
+        sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE', 15))
+
+        strength = max(1, min(self._get_strength(), 5))
+        # Tuned mapping: strengths 1-5 -> sigma_color (baseline)
+        tuned_sigma = {
+            1: 8,
+            2: 8,
+            3: 8,
+            4: 12,
+            5: 16,
+        }
+
+        base_sigma = float(tuned_sigma.get(strength, 10))
+
+        # Allow scaling/exponent to reshape strength→sigma mapping.
+        # Fallbacks reflect autotune suggestions (BILATERAL_SCALE_FACTOR=0.4, BILATERAL_SCALE_EXP=1.0)
+        bil_scale_factor = float(self.config.get('BILATERAL_SCALE_FACTOR', 0.4))
+        bil_scale_exp = float(self.config.get('BILATERAL_SCALE_EXP', 1.0))
+
+        # Use a normalized strength mapping (t in [0,1]) and a bounded
+        # interpolation between the scale at strength=1 and strength=5.
+        t = (float(strength) - 1.0) / 4.0
+        sigma_min = base_sigma * bil_scale_factor * (1.0 ** (bil_scale_exp - 1.0))
+        sigma_max = base_sigma * bil_scale_factor * (5.0 ** (bil_scale_exp - 1.0))
+        sigma_color = int(max(1.0, sigma_min + (sigma_max - sigma_min) * (t ** bil_scale_exp)))
+
+        # If explicit override provided, respect it
+        if 'BILATERAL_SIGMA_COLOR' in self.config:
+            sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR'))
 
         return max(1, sigma_color), max(1, sigma_space)
 
@@ -102,8 +129,6 @@ class IndiAllskyDenoise(object):
           1 → 3×3,  2 → 5×5,  3 → 7×7,  4 → 9×9,  5 → 11×11
         """
         strength = self._get_strength()
-        logger.info('Wavelet denoise requested (strength=%d)', strength)
-        start_t = time.time()
 
         if strength <= 0:
             return scidata
@@ -111,12 +136,38 @@ class IndiAllskyDenoise(object):
         strength = max(1, min(strength, 5))
         ksize = strength * 2 + 1  # always odd: 3, 5, 7, 9, 11
 
+        # Base thresholds tuned for typical camera ADU ranges. We allow an
+        # optional autotune multiplier per-strength to adjust sensitivity
+        # automatically (see testing/bench_out/autotune_suggestions.json).
+        base_threshold = None
         if scidata.dtype == numpy.uint8:
-            threshold = numpy.float32(5.0)
+            base_threshold = float(5.0)
         elif scidata.dtype in (numpy.uint16, numpy.int16):
-            threshold = numpy.float32(5.0 * 257.0)  # ~1285 in 16-bit
+            base_threshold = float(5.0 * 257.0)  # ~1285 in 16-bit
         else:
-            threshold = numpy.float32(5.0 / 255.0)
+            base_threshold = float(5.0 / 255.0)
+
+        # Use tuned multiplier from benchmarking results (baked in):
+        # A lower multiplier makes the median filter more aggressive in
+        # replacing outlier pixels; this was chosen to balance star
+        # preservation vs noise reduction on typical camera images.
+        strength = max(1, min(self._get_strength(), 5))
+        tuned_multipliers = {1: 0.2, 2: 0.2, 3: 0.2, 4: 0.2, 5: 0.2}
+        base_multiplier = float(tuned_multipliers.get(strength, 1.0))
+
+        # Allow global scaling/exponent to reshape strength→multiplier curve.
+        # Defaults baked from autotune. These are read from config when
+        # available; fallback values mirror the latest autotune suggestions.
+        med_scale_factor = float(self.config.get('MEDIAN_SCALE_FACTOR', 2.4))
+        med_scale_exp = float(self.config.get('MEDIAN_SCALE_EXP', 2.0))
+
+        # Use normalized strength mapping to produce bounded, smooth changes
+        t = self._norm_strength()
+        med_min = base_multiplier * med_scale_factor * (1.0 ** (med_scale_exp - 1.0))
+        med_max = base_multiplier * med_scale_factor * (5.0 ** (med_scale_exp - 1.0))
+        multiplier = float(med_min + (med_max - med_min) * (t ** med_scale_exp))
+
+        threshold = numpy.float32(base_threshold * multiplier)
 
         local_median = self._medianBlur(scidata, ksize)
 
@@ -155,15 +206,23 @@ class IndiAllskyDenoise(object):
         Strength range: 1-5.
         """
         strength = self._get_strength()
-        logger.info('Wavelet denoise requested (strength=%d)', strength)
-        start_t = time.time()
 
         if strength <= 0:
             return scidata
 
         strength = max(1, min(strength, 5))
 
-        sigma = strength * 2.4
+        # Configurable scale: base factor and exponent allow non-linear
+        # mappings from strength→sigma. Baked defaults chosen by autotune.
+        scale_factor = float(self.config.get('GAUSSIAN_SCALE_FACTOR', 0.2))
+        scale_exp = float(self.config.get('GAUSSIAN_SCALE_EXP', 0.5))
+
+        # Use normalized strength mapping to produce bounded sigma between
+        # the value at strength=1 and strength=5 to avoid runaway values.
+        t = self._norm_strength()
+        sigma_min = scale_factor * (1.0 ** scale_exp)
+        sigma_max = scale_factor * (5.0 ** scale_exp)
+        sigma = float(sigma_min + (sigma_max - sigma_min) * (t ** scale_exp))
 
         blurred = cv2.GaussianBlur(scidata, (0, 0), sigma)
 
@@ -216,11 +275,8 @@ class IndiAllskyDenoise(object):
           sigmaSpace controls how far away pixels can influence
         Lower sigmaColor preserves more edges.  Strength range: 1-5.
         """
-        # Start timer and log request so completion is always traceable
-        start_t = time.time()
         strength = self._get_strength()
-        logger.info('Wavelet denoise requested (strength=%d)', strength)
-
+        
         if strength <= 0:
             return scidata
 
@@ -254,9 +310,96 @@ class IndiAllskyDenoise(object):
             return cv2.bilateralFilter(scidata, d, sigma_color, sigma_space)
 
 
+        # end bilateral
+
+
     # ------------------------------------------------------------------
     # Algorithm: Wavelet Denoise (BayesShrink — frequency-domain, best quality)
     # ------------------------------------------------------------------
+    def hot_pixel(self, scidata):
+        """Remove isolated hot pixels while protecting stars.
+
+        We build a conservative "star" mask from a high percentile of
+        local brightness and dilate it by a small radius; any hot-pixel
+        candidates inside that mask are ignored to protect star cores.
+
+        This cannot provide a mathematical 100% guarantee (that would
+        require full source detection and modeling), but it makes the
+        filter extremely unlikely to touch real stars in practice.
+        """
+        # Opt-in guard: hot-pixel filter is disabled by default unless
+        # the runtime config explicitly enables it via `HOTPIXEL_ENABLE`.
+        if not bool(self.config.get('HOTPIXEL_ENABLE', False)):
+            return scidata
+
+        strength = self._get_strength()
+        if strength <= 0:
+            return scidata
+
+        # Per-dtype base threshold for a "hot" pixel
+        if scidata.dtype == numpy.uint8:
+            base_thresh = 15.0
+        elif scidata.dtype in (numpy.uint16, numpy.int16):
+            base_thresh = 15.0 * 257.0
+        else:
+            base_thresh = 15.0 / 255.0
+
+        # Make threshold slightly stronger with strength
+        thresh = float(base_thresh * (0.8 + 0.3 * (min(max(strength, 1), 5) - 1)))
+
+        # Candidate replacement value: small median (3x3)
+        local_med = self._medianBlur(scidata, 3)
+
+        # Use luminance to detect isolated hot pixels across color channels
+        if scidata.ndim == 3 and scidata.shape[2] >= 3:
+            lum = (0.299 * scidata[:, :, 2].astype(numpy.float32) +
+                   0.587 * scidata[:, :, 1].astype(numpy.float32) +
+                   0.114 * scidata[:, :, 0].astype(numpy.float32))
+            local_med_lum = (0.299 * local_med[:, :, 2].astype(numpy.float32) +
+                             0.587 * local_med[:, :, 1].astype(numpy.float32) +
+                             0.114 * local_med[:, :, 0].astype(numpy.float32))
+        else:
+            lum = scidata.astype(numpy.float32)
+            local_med_lum = local_med.astype(numpy.float32)
+
+        lum_diff = (lum - local_med_lum)
+        hot_mask_2d = lum_diff > thresh
+
+        # Require isolation via 3x3 neighbor count on the 2D hot mask
+        hot_u8 = hot_mask_2d.astype(numpy.uint8)
+        neigh_count = cv2.filter2D(hot_u8, -1, numpy.ones((3, 3), dtype=numpy.uint8))
+        isolated_2d = (neigh_count == 1)
+
+        # Build star-protect mask from a high brightness percentile
+        star_pct = int(self.config.get('HOTPIXEL_STAR_PERCENTILE', 95))
+        try:
+            star_threshold = float(numpy.percentile(lum, star_pct))
+        except Exception:
+            star_threshold = float(numpy.max(lum))
+
+        star_mask_2d = lum >= star_threshold
+        protect_radius = int(self.config.get('HOTPIXEL_PROTECT_RADIUS', 2))
+        kern = numpy.ones((protect_radius * 2 + 1, protect_radius * 2 + 1), dtype=numpy.uint8)
+        star_mask_dil = cv2.dilate(star_mask_2d.astype(numpy.uint8), kern).astype(bool)
+
+        # Final 2D replacement mask
+        replace_mask_2d = hot_mask_2d & isolated_2d & (~star_mask_dil)
+
+        if not numpy.any(replace_mask_2d):
+            return scidata
+
+        # Expand to per-channel mask for replacement if needed
+        result = scidata.copy()
+        if scidata.ndim == 3 and scidata.shape[2] >= 3:
+            rep_mask = numpy.repeat(replace_mask_2d[:, :, numpy.newaxis], scidata.shape[2], axis=2)
+            result[rep_mask] = local_med[rep_mask]
+        else:
+            result[replace_mask_2d] = local_med[replace_mask_2d]
+
+        n_replaced = int(numpy.count_nonzero(replace_mask_2d))
+        logger.info('Applied hot-pixel filter (star-safe), strength=%d replaced=%d pixels', strength, n_replaced)
+
+        return result
     def wavelet(self, scidata):
         """Apply wavelet-based denoising with BayesShrink adaptive thresholding.
 
@@ -283,16 +426,28 @@ class IndiAllskyDenoise(object):
             # result when the optional dependency is missing.
             return self.median_blur(scidata)
 
+        # start timer and log request so completion is always traceable
+        start_t = time.time()
         strength = self._get_strength()
+        logger.info('Wavelet denoise requested (strength=%d)', strength)
 
         if strength <= 0:
             return scidata
 
         strength = max(1, min(strength, 5))
 
-        # Scale factor applied to BayesShrink threshold (linear similar to Gaussian):
-        #   1 → 2.4,  2 → 4.8,  3 → 7.2,  4 → 9.6,  5 → 12.0
-        scale = strength * 2.4
+        # Configurable scale for wavelet shrinkage (factor & exponent).
+        # Use the fine autotune suggestion (no PR) as a reasonable default
+        # for Pi-class images. These may be overridden in runtime config.
+        wavelet_scale_factor = float(self.config.get('WAVELET_SCALE_FACTOR', 0.1))
+        wavelet_scale_exp = float(self.config.get('WAVELET_SCALE_EXP', 0.5))
+
+        # Map strength→scale using a normalized bounded interpolation to
+        # avoid runaway thresholds that obliterate the image.
+        t = self._norm_strength()
+        scale_min = wavelet_scale_factor * (1.0 ** wavelet_scale_exp)
+        scale_max = wavelet_scale_factor * (5.0 ** wavelet_scale_exp)
+        scale = float(scale_min + (scale_max - scale_min) * (t ** wavelet_scale_exp))
 
         # Determine dtype range for normalization
         if numpy.issubdtype(scidata.dtype, numpy.integer):
@@ -351,7 +506,8 @@ class IndiAllskyDenoise(object):
             reconstructed = reconstructed[:channel.shape[0], :channel.shape[1]]
 
             # Convert back to original range
-            return numpy.clip(reconstructed * dtype_max, 0, dtype_max).astype(orig_dtype)
+            denoised_ch = numpy.clip(reconstructed * dtype_max, 0, dtype_max).astype(orig_dtype)
+            return denoised_ch
 
         # Handle grayscale vs color
         if scidata.ndim == 2:
@@ -361,8 +517,18 @@ class IndiAllskyDenoise(object):
             channels = [_denoise_channel(scidata[:, :, c]) for c in range(scidata.shape[2])]
             result = numpy.stack(channels, axis=2)
 
-        elapsed = time.time() - start_t
-        logger.info('Applied wavelet denoise (BayesShrink), levels=%d scale=%.2f time=%.3fs',
-                 levels, scale, elapsed)
+        # Blend denoised vs original to inherently limit destructive changes.
+        blend_cap = float(self.config.get('WAVELET_MAX_BLEND', 0.25))
+        # Blend scales with strength: keep a small amount at strength=1, up to cap at strength=5
+        blend = float(blend_cap * (0.25 + 0.75 * t))
 
-        return result
+        # Ensure types align for blending
+        orig_f = scidata.astype(numpy.float32)
+        den_f = result.astype(numpy.float32)
+        blended = numpy.clip((blend * den_f) + ((1.0 - blend) * orig_f), 0, float(dtype_max)).astype(orig_dtype)
+
+        elapsed = time.time() - start_t
+        logger.info('Applied wavelet denoise (BayesShrink), levels=%d scale=%.2f blend=%.2f time=%.3fs',
+                levels, scale, blend, elapsed)
+
+        return blended

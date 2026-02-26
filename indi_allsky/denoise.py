@@ -128,28 +128,25 @@ class IndiAllskyDenoise(object):
     def _get_bilateral_sigma(self):
         """Return (sigmaColor, sigmaSpace) for the bilateral filter."""
         # Tuned sigma_color per strength (derived from benchmarks).
-        # These values are baked into the runtime behavior to provide
-        # consistent denoising without relying on external test files.
+        # These values provide consistent denoising without external test files.
         sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE', 15))
 
         strength = max(1, min(self._get_strength(), 5))
         # Tuned mapping: strengths 1-5 -> sigma_color (baseline)
         tuned_sigma = {
-            # Decide whether to use Laplacian-based detail masking. Fast mode
-            # disables expensive Laplacian operations for performance.
-            use_laplacian = bool(self.config.get('DENOISE_USE_LAPLACIAN', True)) and not bool(self.config.get('DENOISE_FAST_MODE', False))
-            if use_laplacian:
-                if scidata.ndim == 3 and scidata.shape[2] >= 3:
-                    lum = self._compute_luminance(scidata)
-                else:
-                    lum = scidata.astype(numpy.float32)
+            1: 8,
+            2: 8,
+            3: 8,
+            4: 12,
+            5: 16,
+        }
 
-                lap_mult = float(self.config.get('DENOISE_LAPLACIAN_MULTIPLIER', 6.0))
-                bright_frac = float(self.config.get('DENOISE_BRIGHT_GATE_FRAC', 0.02))
-                detail_mask = self._detail_mask(lum, threshold=None, dtype_max=(numpy.iinfo(scidata.dtype).max if numpy.issubdtype(scidata.dtype, numpy.integer) else 1.0),
-                                                lap_multiplier=lap_mult, bright_gate_frac=bright_frac)
-            else:
-                detail_mask = numpy.zeros((scidata.shape[0], scidata.shape[1]), dtype=bool)
+        base_sigma = float(tuned_sigma.get(strength, 10))
+
+        # Allow scaling/exponent to reshape strength→sigma mapping.
+        bil_scale_factor = float(self.config.get('BILATERAL_SCALE_FACTOR', 0.4))
+        bil_scale_exp = float(self.config.get('BILATERAL_SCALE_EXP', 1.0))
+
         t = (float(strength) - 1.0) / 4.0
         sigma_min = base_sigma * bil_scale_factor * (1.0 ** (bil_scale_exp - 1.0))
         sigma_max = base_sigma * bil_scale_factor * (5.0 ** (bil_scale_exp - 1.0))

@@ -3,6 +3,7 @@ import numpy
 import logging
 import time
 import pywt
+import concurrent.futures
 
 from . import constants
 

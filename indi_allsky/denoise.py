@@ -6,6 +6,7 @@ import pywt
 import concurrent.futures
 
 from . import constants
+from .star_mask import generate_star_mask
 
 
 logger = logging.getLogger('indi_allsky')
@@ -84,68 +85,19 @@ class IndiAllskyDenoise(object):
         return img.astype(numpy.float32)
 
     def _star_mask(self, img):
-        """Detect bright point-source features (stars) and return a soft mask.
+        """Return a soft point-source mask.
 
-        Returns a float32 array in [0, 1] where 1.0 = star (keep original).
-
-        Unlike a simple brightness threshold (which would protect lit walls,
-        ground, clouds — anything bright), this detects only *localized*
-        peaks that stick up above their local background.  Extended bright
-        regions are not affected because their local background matches
-        their own brightness.
-
-        Algorithm:
-          1. Compute luminance.
-          2. Estimate local background by Gaussian-blurring with a large σ.
-          3. Excess = luminance − background  (clipped to ≥ 0).
-          4. Star candidates = excess > median(positive excess) × factor.
-             (factor = 2.0 by default, i.e., a 2-sigma threshold for the median model)
-          5. Dilate by a small radius to protect the surrounding halo.
-          6. Gaussian-blur the binary mask to produce soft edges (no artifacts).
-
-        Configurable via:
-          DENOISE_PROTECT_STARS       : bool  (default True)
-          DENOISE_STAR_BG_SIGMA       : float (default 20) — σ for background estimation
-          DENOISE_STAR_THRESHOLD      : float (default 2.0) — 2-sigma threshold for median model (lower to catch faint stars)
-          DENOISE_STAR_DILATE         : int   (default 3)   — dilation radius in pixels
-          DENOISE_STAR_SOFT_EDGE      : float (default 3.0) — σ for soft-edge blur
+        The true implementation lives in :mod:`indi_allsky.star_mask`.  This
+        wrapper is kept for compatibility with existing callers in this class
+        and simply forwards ``img`` and the instance ``config`` dict.  Any
+        exceptions are caught and a zero mask is returned, matching the
+        previous behaviour of the inlined method.
         """
-        lum = self._compute_luminance(img)
-
-        sigma_bg = float(self.config.get('DENOISE_STAR_BG_SIGMA', 20.0))
-        # Value of 2-sigma which helps ensure faint stars are not missed. See docstring above for details.
-        threshold_factor = float(self.config.get('DENOISE_STAR_THRESHOLD', 2.0))
-        dilate_radius = int(self.config.get('DENOISE_STAR_DILATE', 3))
-        soft_edge = float(self.config.get('DENOISE_STAR_SOFT_EDGE', 3.0))
-
         try:
-            # 1. Estimate smooth local background
-            bg = cv2.GaussianBlur(lum, (0, 0), sigma_bg)
-
-            # 2. Excess brightness above background (point-source signal)
-            excess = numpy.maximum(lum - bg, 0.0)
-
-            # 3. Robust threshold: median of positive excess × factor
-            pos = excess[excess > 0]
-            if pos.size == 0:
-                return numpy.zeros(lum.shape, dtype=numpy.float32)
-
-            star_thresh = float(numpy.median(pos)) * threshold_factor
-            star_binary = (excess > star_thresh).astype(numpy.uint8)
-
-            # 4. Dilate to cover the immediate halo
-            if dilate_radius > 0:
-                kern = cv2.getStructuringElement(
-                    cv2.MORPH_ELLIPSE,
-                    (dilate_radius * 2 + 1, dilate_radius * 2 + 1))
-                star_binary = cv2.dilate(star_binary, kern)
-
-            # 5. Soft-edge transition to avoid hard-mask artefacts
-            soft = cv2.GaussianBlur(star_binary.astype(numpy.float32), (0, 0), soft_edge)
-            return numpy.clip(soft, 0.0, 1.0)
-
+            return generate_star_mask(img, self.config)
         except Exception:
-            return numpy.zeros(lum.shape, dtype=numpy.float32)
+            return numpy.zeros(img.shape[:2], dtype=numpy.float32)
+
 
     def _apply_star_protection(self, original, denoised, dtype_max):
         """Blend star regions back to the original, preserving point sources.
@@ -156,6 +108,7 @@ class IndiAllskyDenoise(object):
         if not bool(self.config.get('DENOISE_PROTECT_STARS', True)):
             return denoised
 
+        # obtain soft star protection mask (delegates to indi_allsky.star_mask)
         star_mask = self._star_mask(original)
 
         if not numpy.any(star_mask > 0.01):

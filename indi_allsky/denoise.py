@@ -277,7 +277,10 @@ class IndiAllskyDenoise(object):
 
         # Multi-channel: process each channel independently and merge
         channels = cv2.split(img)
-        blurred = [_blur_channel(ch) for ch in channels]
+        # use threads to blur each channel concurrently
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(channels)) as exe:
+            futures = [exe.submit(_blur_channel, ch) for ch in channels]
+            blurred = [f.result() for f in futures]
         return cv2.merge(blurred)
 
     # ------------------------------------------------------------------
@@ -365,6 +368,16 @@ class IndiAllskyDenoise(object):
         t = self._norm_strength()
         blend = float(self.config.get('GAUSSIAN_BLEND', 0.25 + 0.55 * t))
         blend = max(0.0, min(1.0, blend))
+
+        # compute blurred image; thread channels if colour
+        if scidata.ndim == 2 or scidata.shape[2] < 2:
+            blurred = cv2.GaussianBlur(scidata, (0, 0), sigma)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=scidata.shape[2]) as exe:
+                futures = [exe.submit(cv2.GaussianBlur, scidata[:, :, c], (0, 0), sigma)
+                           for c in range(scidata.shape[2])]
+                channels = [f.result() for f in futures]
+            blurred = numpy.stack(channels, axis=2)
 
         if numpy.issubdtype(scidata.dtype, numpy.integer):
             dtype_max = float(numpy.iinfo(scidata.dtype).max)
@@ -513,11 +526,17 @@ class IndiAllskyDenoise(object):
         if not numpy.any(replace_mask_2d):
             return scidata
 
-        # Expand to per-channel mask for replacement if needed
         result = scidata.copy()
         if scidata.ndim == 3 and scidata.shape[2] >= 3:
-            rep_mask = numpy.repeat(replace_mask_2d[:, :, numpy.newaxis], scidata.shape[2], axis=2)
-            result[rep_mask] = local_med[rep_mask]
+            # parallelise the per-channel replacement
+            with concurrent.futures.ThreadPoolExecutor(max_workers=scidata.shape[2]) as exe:
+                def do_channel(c):
+                    ch = result[:, :, c]
+                    med = local_med[:, :, c]
+                    ch[replace_mask_2d] = med[replace_mask_2d]
+                    result[:, :, c] = ch
+                futures = [exe.submit(do_channel, c) for c in range(scidata.shape[2])]
+                for f in futures: f.result()
         else:
             result[replace_mask_2d] = local_med[replace_mask_2d]
 

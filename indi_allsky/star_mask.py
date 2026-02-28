@@ -5,13 +5,11 @@ which returns a soft mask in ``float32`` (range 0..1) indicating point‑source
 locations that should be protected from denoising.  The behaviour is
 controlled by a handful of configuration values, documented below.
 
-For backwards compatibility the same keys used by ``denoise._star_mask``
-are honoured.  In addition a new convenience parameter
-``DENOISE_STAR_MASK_STRENGTH`` (0.0..1.0) acts as a **star protection
-strength** dial.  A higher value produces a stronger mask that protects
-more pixels, while a lower value tightens the criteria and exposes more
-pixels to denoising.  The parameter adjusts several internal values in a
-coordinated manner:
+A convenience parameter ``DENOISE_STAR_MASK_STRENGTH`` (0.0..1.0) acts as 
+a **star protection strength** dial.  A higher value produces a stronger 
+mask that protects more pixels, while a lower value tightens the criteria 
+and exposes more pixels to denoising.  The parameter adjusts several internal 
+values in a coordinated manner:
 
 * ``DENOISE_STAR_THRESHOLD`` is linearly interpolated from 1.2→1.0.  The
   lower number makes the detector more sensitive to faint spikes.
@@ -43,8 +41,6 @@ Configuration options:
   DENOISE_STAR_LAPLACIAN_FACTOR: float (default 0.0, off) – require laplacian > median*factor
   DENOISE_STAR_MASK_STRENGTH   : float (0..1) – convenience dial controlling max_area and lap_factor* ``DENOISE_STAR_MASK_FAST``       : bool (default False) – enable a very light, approximate star detector that skips the
    expensive Gaussian/Laplacian steps and runs in a few tens of milliseconds.  Useful on low‑power hardware.
-The implementation here is almost identical to ``denoise._star_mask`` but
-with the parameter translation logic extracted.
 """
 
 import cv2

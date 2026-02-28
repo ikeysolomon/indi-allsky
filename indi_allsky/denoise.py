@@ -422,7 +422,7 @@ class IndiAllskyDenoise(object):
 
 
     # ------------------------------------------------------------------
-    # Algorithm: Bilateral Filter (edge-aware, best quality)
+    # Algorithm: Bilateral Filter (edge-aware, high quality)
     # ------------------------------------------------------------------
     def bilateral(self, scidata):
         """Apply an edge-aware bilateral filter.

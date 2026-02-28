@@ -15,10 +15,9 @@ logger = logging.getLogger('indi_allsky')
 class IndiAllskyDenoise(object):
     """Lightweight image denoising for allsky cameras.
 
-    Provides four denoising algorithms, roughly categorised by speed:
-      * **Fast** – bilateral filter 
-      * **Medium** – gaussian or median blur 
-      * **Slow** – wavelet (best quality)
+    Provides four denoising algorithms.  Bilateral, gaussian and
+    median filters all run at similar speed on target hardware; wavelet is
+    noticeably slower but offers the highest quality.
 
     Algorithms exposed to callers:
       - gaussian_blur: Direct Gaussian blur with strength-based blending

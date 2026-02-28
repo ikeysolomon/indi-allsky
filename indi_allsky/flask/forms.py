@@ -3622,9 +3622,9 @@ class IndiAllskyConfigForm(FlaskForm):
 
     IMAGE_DENOISE_choices = (
         ('', 'Disabled'),
-        ('bilateral', 'Bilateral Filter— smooths sky background (fast)'),
-        ('gaussian_blur', 'Gaussian Blur Filter — smooths uniformly (medium)'),
-        ('median_blur', 'Median Filter — removes salt-and-pepper noise (medium)'),
+        ('gaussian_blur', 'Gaussian Blur Filter — smooths uniformly'),
+        ('median_blur', 'Median Filter — removes salt-and-pepper noise'),
+        ('bilateral', 'Bilateral Filter— smooths sky background'),
         ('wavelet', 'Wavelet Filter— frequency-domain, best quality (slow)'),
     )
 

@@ -27,6 +27,14 @@ class IndiAllskyDenoise(object):
 
     Each algorithm respects a configurable strength parameter (1-5).
     Temporal averaging is handled separately by the stacking system.
+
+    Configuration may also tweak algorithm-specific knobs:
+      * GAUSSIAN_SIGMA, GAUSSIAN_BLEND
+      * MEDIAN_BLEND
+      * BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE
+      * DENOISE_STAR_* (star protection parameters)
+      * ADAPTIVE_BLEND (enable/disable variance‑based blend adaptivity)
+      * LOCAL_STATS_KSIZE (window size for variance map, odd integer >=3)
     """
 
     def __init__(self, config, night_av):
@@ -83,6 +91,25 @@ class IndiAllskyDenoise(object):
                     0.587 * img[:, :, 1].astype(numpy.float32) +
                     0.114 * img[:, :, 0].astype(numpy.float32))
         return img.astype(numpy.float32)
+
+    def _local_variance(self, img, ksize=3):
+        """Compute a local variance map using a fixed square window.
+
+        The variance is computed on the luminance channel using the standard
+        E[x^2] - (E[x])^2 identity.  Two fast :func:`cv2.blur` calls are used
+        so the cost is negligible for small kernels.
+        ``ksize`` is forced to an odd integer >= 1.  The returned array is
+        float32, same height/width as ``img`` (single-channel).
+        """
+        if ksize % 2 == 0:
+            ksize += 1
+        lum = self._compute_luminance(img).astype(numpy.float32)
+        blur = cv2.blur(lum, (ksize, ksize))
+        blur_sq = cv2.blur(lum * lum, (ksize, ksize))
+        var = blur_sq - blur * blur
+        # negative values can arise from rounding; clamp
+        numpy.clip(var, 0.0, None, out=var)
+        return var
 
     def _star_mask(self, img):
         """Return a soft point-source mask.
@@ -270,18 +297,39 @@ class IndiAllskyDenoise(object):
         blend = float(self.config.get('MEDIAN_BLEND', 0.35 + 0.57 * t))
         blend = max(0.0, min(1.0, blend))
 
+        # --- adaptive blending using fast local variance map --------------------------------
+        # Poisson noise in astro exposures benefits from reducing the
+        # blend fraction in regions of high local variance (stars,
+        # bright noise) while letting the nominal blend apply in smooth
+        # background areas.  A small fixed window variance map costs only
+        # two cv2.blur() calls and is thus essentially free.
+        adaptive_blend = blend
+        if bool(self.config.get('ADAPTIVE_BLEND', True)) and blend > 0.0 and blend < 1.0:
+            k = int(self.config.get('LOCAL_STATS_KSIZE', 3))
+            var_map = self._local_variance(scidata, k)
+            mean_var = float(numpy.mean(var_map)) + 1e-9
+            var_norm = numpy.clip(var_map / mean_var, 0.0, 1.0)
+            adapt = 1.0 - var_norm
+            if scidata.ndim == 3:
+                adapt = adapt[:, :, numpy.newaxis]
+            adaptive_blend = blend * adapt
+        # -------------------------------------------------------------------------------------
+
         if numpy.issubdtype(scidata.dtype, numpy.integer):
             dtype_max = float(numpy.iinfo(scidata.dtype).max)
         else:
             dtype_max = 1.0
 
-        result_f32 = blend * blurred.astype(numpy.float32) + (1.0 - blend) * scidata.astype(numpy.float32)
+        # blend using adaptive map if available
+        result_f32 = adaptive_blend * blurred.astype(numpy.float32) + (1.0 - adaptive_blend) * scidata.astype(numpy.float32)
         result = numpy.clip(result_f32, 0, dtype_max).astype(scidata.dtype)
 
         # Protect stars: blend star regions back to original
         result = self._apply_star_protection(scidata, result, dtype_max)
 
-        logger.info('Applying median denoise, ksize=%d blend=%.2f', ksize, blend)
+        # log average blend for diagnostics
+        avg_blend = float(numpy.mean(adaptive_blend)) if isinstance(adaptive_blend, numpy.ndarray) else adaptive_blend
+        logger.info('Applying median denoise, ksize=%d base_blend=%.2f avg_blend=%.2f', ksize, blend, avg_blend)
 
         return result
 
@@ -290,6 +338,11 @@ class IndiAllskyDenoise(object):
     # Algorithm: Gaussian Blur (direct — simple and effective)
     # ------------------------------------------------------------------
     def gaussian_blur(self, scidata):
+        # NOTE: any future improvements to gauss/median/bilateral should keep
+        # compute cost comparable to the existing implementation.  We try to
+        # avoid expensive full‑resolution filtering by threading each channel
+        # and by falling back to single‑channel variants when possible.
+
         """Apply a direct Gaussian blur blended with the original.
 
         Applies cv2.GaussianBlur at a strength-dependent sigma and
@@ -316,12 +369,26 @@ class IndiAllskyDenoise(object):
         default_sigma_map = {1: 1.0, 2: 1.8, 3: 3.0, 4: 4.2, 5: 5.8}
         sigma = float(self.config.get('GAUSSIAN_SIGMA', default_sigma_map.get(strength, 3.0)))
 
+        # legacy behaviour: direct blur with no downsampling
         blurred = cv2.GaussianBlur(scidata, (0, 0), sigma)
 
         # Blend fraction: 20% at strength=1 → 70% at strength=5
         t = self._norm_strength()
         blend = float(self.config.get('GAUSSIAN_BLEND', 0.25 + 0.55 * t))
         blend = max(0.0, min(1.0, blend))
+
+        # --- adaptive blending using fast local variance map --------------------------------
+        adaptive_blend = blend
+        if bool(self.config.get('ADAPTIVE_BLEND', True)) and blend > 0.0 and blend < 1.0:
+            k = int(self.config.get('LOCAL_STATS_KSIZE', 3))
+            var_map = self._local_variance(scidata, k)
+            mean_var = float(numpy.mean(var_map)) + 1e-9
+            var_norm = numpy.clip(var_map / mean_var, 0.0, 1.0)
+            adapt = 1.0 - var_norm
+            if scidata.ndim == 3:
+                adapt = adapt[:, :, numpy.newaxis]
+            adaptive_blend = blend * adapt
+        # -------------------------------------------------------------------------------------
 
         # compute blurred image; thread channels if colour
         if scidata.ndim == 2 or scidata.shape[2] < 2:
@@ -338,13 +405,14 @@ class IndiAllskyDenoise(object):
         else:
             dtype_max = 1.0
 
-        result_f32 = blend * blurred.astype(numpy.float32) + (1.0 - blend) * scidata.astype(numpy.float32)
+        result_f32 = adaptive_blend * blurred.astype(numpy.float32) + (1.0 - adaptive_blend) * scidata.astype(numpy.float32)
         result = numpy.clip(result_f32, 0, dtype_max).astype(scidata.dtype)
 
         # Protect stars: blend star regions back to original
         result = self._apply_star_protection(scidata, result, dtype_max)
 
-        logger.info('Applying gaussian denoise, sigma=%.1f blend=%.2f', sigma, blend)
+        avg_blend = float(numpy.mean(adaptive_blend)) if isinstance(adaptive_blend, numpy.ndarray) else adaptive_blend
+        logger.info('Applying gaussian denoise, sigma=%.1f base_blend=%.2f avg_blend=%.2f', sigma, blend, avg_blend)
 
         return result
 
@@ -403,6 +471,14 @@ class IndiAllskyDenoise(object):
 
 
         # end bilateral
+
+    # ------------------------------------------------------------------
+    # Algorithm: Non-local Means (patch-based)
+    # ------------------------------------------------------------------
+    # Older experiments included non-local means filter, but
+    # it proved far too slow on target hardware so the implementation was
+    # dropped.  This is a warning.
+
 
 
     # ------------------------------------------------------------------

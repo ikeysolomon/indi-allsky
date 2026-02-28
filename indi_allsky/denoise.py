@@ -1,3 +1,11 @@
+"""Denoising utilities for indi-allsky.
+
+This module defines :class:`IndiAllskyDenoise`, a collection of filtering
+algorithms.  Star and nebula protection is delegated to
+:mod:`indi_allsky.protection_masks`, ensuring consistent masking logic
+across the codebase.
+"""
+
 import cv2
 import numpy
 import logging
@@ -6,7 +14,17 @@ import pywt
 import concurrent.futures
 
 from . import constants
-from .star_mask import generate_star_mask
+
+from .protection_masks import star_mask as _pm_star
+
+# caches to avoid rebuilding small objects repeatedly
+_db4_wavelet = None  # will hold a pywt.Wavelet('db4') instance
+_wavelet_level_cache: dict[int,int] = {}  # min_dim -> max_level
+_hotpixel_kernel_cache: dict[int,numpy.ndarray] = {}  # radius -> kernel
+
+# use Astropy utilities for convolution and robust statistics
+from astropy.convolution import Box2DKernel, convolve
+from astropy.stats import sigma_clipped_stats
 
 
 logger = logging.getLogger('indi_allsky')
@@ -100,32 +118,67 @@ class IndiAllskyDenoise(object):
         """Compute a local variance map using a fixed square window.
 
         The variance is computed on the luminance channel using the standard
-        E[x^2] - (E[x])^2 identity.  Two fast :func:`cv2.blur` calls are used
-        so the cost is negligible for small kernels.
-        ``ksize`` is forced to an odd integer >= 1.  The returned array is
-        float32, same height/width as ``img`` (single-channel).
+        E[x^2] - (E[x])^2 identity.  ``ksize`` is forced to an odd integer
+        >= 1.  Using :func:`astropy.convolution.convolve` with a box kernel
+        keeps the implementation simple and avoids OpenCV dependencies.
+        The returned array is float32, same height/width as ``img``
+        (single-channel).
         """
         if ksize % 2 == 0:
             ksize += 1
         lum = self._compute_luminance(img).astype(numpy.float32)
-        blur = cv2.blur(lum, (ksize, ksize))
-        blur_sq = cv2.blur(lum * lum, (ksize, ksize))
-        var = blur_sq - blur * blur
+        kernel = Box2DKernel(ksize)
+        mean = convolve(lum, kernel, normalize_kernel=True)
+        mean_sq = convolve(lum * lum, kernel, normalize_kernel=True)
+        var = mean_sq - mean * mean
         # negative values can arise from rounding; clamp
         numpy.clip(var, 0.0, None, out=var)
         return var
 
     def _star_mask(self, img):
-        """Return a soft point-source mask.
+        """Return a soft point-source mask using the protection_masks module.
 
-        The true implementation lives in :mod:`indi_allsky.star_mask`.  This
-        wrapper is kept for compatibility with existing callers in this class
-        and simply forwards ``img`` and the instance ``config`` dict.  Any
-        exceptions are caught and a zero mask is returned, matching the
-        previous behaviour of the inlined method.
+        This wrapper adapts the mask generator to this class's configuration
+        format.  Exceptions are caught and a blank mask returned, preserving
+        the previous fault-tolerant behaviour.
         """
         try:
-            return generate_star_mask(img, self.config)
+            # the protection_masks.star_mask call expects a grayscale float32 image
+            if img.ndim == 3 and img.shape[2] >= 3:
+                gray = self._compute_luminance(img)
+            else:
+                gray = img.astype(numpy.float32)
+
+            # allow override via config; defaults mirror earlier behaviour
+            pct = float(self.config.get('DENOISE_STAR_PERCENTILE', 99.0))
+            sig = float(self.config.get('DENOISE_STAR_SIGMA', 5.0))
+            fwhm = float(self.config.get('DENOISE_STAR_FWHM', 3.0))
+            return _pm_star(gray, percentile=pct, threshold_sigma=sig, fwhm=fwhm)
+        except Exception:
+            return numpy.zeros(img.shape[:2], dtype=numpy.float32)
+
+    def _nebula_mask(self, img, star_m=None):
+        """Return a nebula protection mask (float32) for ``img``.
+
+        ``star_m`` may be passed to subtract star pixels; if omitted the
+        mask is generated directly.  Configuration may provide
+        ``DENOISE_NEBULA_PERCENTILE`` (default 60.0) to tune sensitivity.
+        The implementation simply forwards to
+        :func:`indi_allsky.protection_masks.nebula_mask` and catches
+        exceptions, returning an empty mask on failure.
+        """
+        try:
+            from .protection_masks import nebula_mask as _pm_neb
+
+            if img.ndim == 3 and img.shape[2] >= 3:
+                from .denoise import IndiAllskyDenoise  # avoid circular but okay
+                # use same luminance helper
+                gray = self._compute_luminance(img)
+            else:
+                gray = img.astype(numpy.float32)
+
+            pct = float(self.config.get('DENOISE_NEBULA_PERCENTILE', 60.0))
+            return _pm_neb(gray, star_m=star_m, percentile=pct)
         except Exception:
             return numpy.zeros(img.shape[:2], dtype=numpy.float32)
 
@@ -139,7 +192,7 @@ class IndiAllskyDenoise(object):
         if not bool(self.config.get('DENOISE_PROTECT_STARS', True)):
             return denoised
 
-        # obtain soft star protection mask (delegates to indi_allsky.star_mask)
+        # obtain soft star protection mask (delegates to protection_masks.star_mask)
         star_mask = self._star_mask(original)
 
         if not numpy.any(star_mask > 0.01):
@@ -583,7 +636,11 @@ class IndiAllskyDenoise(object):
 
         star_mask_2d = lum >= star_threshold
         protect_radius = int(self.config.get('HOTPIXEL_PROTECT_RADIUS', 2))
-        kern = numpy.ones((protect_radius * 2 + 1, protect_radius * 2 + 1), dtype=numpy.uint8)
+        if protect_radius in _hotpixel_kernel_cache:
+            kern = _hotpixel_kernel_cache[protect_radius]
+        else:
+            kern = numpy.ones((protect_radius * 2 + 1, protect_radius * 2 + 1), dtype=numpy.uint8)
+            _hotpixel_kernel_cache[protect_radius] = kern
         star_mask_dil = cv2.dilate(star_mask_2d.astype(numpy.uint8), kern).astype(bool)
 
         # Final 2D replacement mask
@@ -652,7 +709,15 @@ class IndiAllskyDenoise(object):
 
         # Auto decomposition levels: 3-4 based on smallest image dimension
         min_dim = min(scidata.shape[0], scidata.shape[1])
-        max_level = pywt.dwt_max_level(min_dim, pywt.Wavelet('db4').dec_len)
+        # cache wavelet object and level computation
+        global _db4_wavelet
+        if _db4_wavelet is None:
+            _db4_wavelet = pywt.Wavelet('db4')
+        if min_dim in _wavelet_level_cache:
+            max_level = _wavelet_level_cache[min_dim]
+        else:
+            max_level = pywt.dwt_max_level(min_dim, _db4_wavelet.dec_len)
+            _wavelet_level_cache[min_dim] = max_level
         levels = min(max(max_level, 1), 4)
 
         def _denoise_channel(channel):
@@ -666,7 +731,9 @@ class IndiAllskyDenoise(object):
             # Estimate noise sigma from finest detail coefficients (HH band)
             # MAD estimator: sigma = median(|d|) / 0.6745
             detail_hh = coeffs[-1][2]  # HH = diagonal detail at finest level
-            sigma_noise = numpy.median(numpy.abs(detail_hh)) / 0.6745
+            # use astropy sigma_clipped_stats for robust std estimate
+            _, _, std_clipped = sigma_clipped_stats(detail_hh, sigma=3.0)
+            sigma_noise = std_clipped / 0.6745
 
             # Enforce a minimum noise floor so the filter always does
             # *something* even on high-SNR / well-lit images.

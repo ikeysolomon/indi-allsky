@@ -15,7 +15,12 @@ logger = logging.getLogger('indi_allsky')
 class IndiAllskyDenoise(object):
     """Lightweight image denoising for allsky cameras.
 
-    Provides four denoising algorithms:
+    Provides four denoising algorithms, roughly categorised by speed:
+      * **Fast** – bilateral filter 
+      * **Medium** – gaussian or median blur 
+      * **Slow** – wavelet (best quality)
+
+    Algorithms exposed to callers:
       - gaussian_blur: Direct Gaussian blur with strength-based blending
       - median_blur: Direct median filter with strength-based blending
       - bilateral: Edge-aware bilateral filter (preserves star edges)
@@ -445,6 +450,22 @@ class IndiAllskyDenoise(object):
         d = strength * 2 + 1
         sigma_color, sigma_space = self._get_bilateral_sigma()
 
+        # blend fraction like other algorithms
+        t = self._norm_strength()
+        blend = float(self.config.get('BILATERAL_BLEND', 0.25 + 0.55 * t))
+        blend = max(0.0, min(1.0, blend))
+
+        adaptive_blend = blend
+        if bool(self.config.get('ADAPTIVE_BLEND', True)) and 0.0 < blend < 1.0:
+            k = int(self.config.get('LOCAL_STATS_KSIZE', 3))
+            var_map = self._local_variance(scidata, k)
+            mean_var = float(numpy.mean(var_map)) + 1e-9
+            var_norm = numpy.clip(var_map / mean_var, 0.0, 1.0)
+            adapt = 1.0 - var_norm
+            if scidata.ndim == 3:
+                adapt = adapt[:, :, numpy.newaxis]
+            adaptive_blend = blend * adapt
+
         needs_conversion = scidata.dtype not in (numpy.uint8, numpy.float32)
 
         if needs_conversion:
@@ -461,13 +482,29 @@ class IndiAllskyDenoise(object):
             sigma_color_norm = float(sigma_color) / 255.0
             scidata_f32 = scidata.astype(numpy.float32) / dtype_max
 
-            logger.info('Applying bilateral denoise (float32 0-1), d=%d sigmaColor=%.4f sigmaSpace=%d', d, sigma_color_norm, sigma_space)
+            logger.info('Applying bilateral denoise (float32 0-1), d=%d sigmaColor=%.4f sigmaSpace=%d base_blend=%.2f', d, sigma_color_norm, sigma_space, blend)
             denoised_f32 = cv2.bilateralFilter(scidata_f32, d, sigma_color_norm, float(sigma_space))
 
-            return numpy.clip(numpy.rint(denoised_f32 * dtype_max), 0, float(dtype_max)).astype(scidata.dtype)
+            denoised = numpy.clip(numpy.rint(denoised_f32 * dtype_max), 0, float(dtype_max)).astype(scidata.dtype)
         else:
-            logger.info('Applying bilateral denoise, d=%d sigmaColor=%d sigmaSpace=%d', d, sigma_color, sigma_space)
-            return cv2.bilateralFilter(scidata, d, sigma_color, sigma_space)
+            logger.info('Applying bilateral denoise, d=%d sigmaColor=%d sigmaSpace=%d base_blend=%.2f', d, sigma_color, sigma_space, blend)
+            denoised = cv2.bilateralFilter(scidata, d, sigma_color, sigma_space)
+
+        # blend with adaptive map and protect stars
+        if numpy.issubdtype(scidata.dtype, numpy.integer):
+            dtype_max = float(numpy.iinfo(scidata.dtype).max)
+        else:
+            dtype_max = 1.0
+
+        result_f32 = adaptive_blend * denoised.astype(numpy.float32) + (1.0 - adaptive_blend) * scidata.astype(numpy.float32)
+        result = numpy.clip(result_f32, 0, dtype_max).astype(scidata.dtype)
+
+        result = self._apply_star_protection(scidata, result, dtype_max)
+
+        avg_blend = float(numpy.mean(adaptive_blend)) if isinstance(adaptive_blend, numpy.ndarray) else adaptive_blend
+        logger.info('Applying bilateral denoise, d=%d sigmaColor=%d sigmaSpace=%d base_blend=%.2f avg_blend=%.2f', d, sigma_color, sigma_space, blend, avg_blend)
+
+        return result
 
 
         # end bilateral

@@ -1,7 +1,7 @@
 """Denoising utilities for indi-allsky.
 
 This module defines :class:`IndiAllskyDenoise`, a collection of filtering
-algorithms.  Star and nebula protection is delegated to
+algorithms.  Star and Milky Way protection is delegated to
 :mod:`indi_allsky.protection_masks`, ensuring consistent masking logic
 across the codebase.
 """
@@ -16,7 +16,7 @@ import concurrent.futures
 from . import constants
 
 from .protection_masks import star_mask as _pm_star
-from .protection_masks import nebula_mask as _pm_neb
+from .protection_masks import milkyway_mask as _pm_mw
 from .protection_masks import detail_mask as _pm_detail
 
 # caches to avoid rebuilding small objects repeatedly
@@ -73,7 +73,8 @@ class IndiAllskyDenoise:
       * MEDIAN_BLEND
       * BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE
       * DENOISE_STAR_* (star protection parameters)
-      * DENOISE_PROTECT_NEBULA (enable nebula protection in joint mask)
+      * DENOISE_PROTECT_MILKYWAY (enable Milky Way protection in joint mask)
+      * DENOISE_MILKYWAY_BOX_SIZE, DENOISE_MILKYWAY_FILTER_SIZE (Background2D mesh tuning)
       * DENOISE_PROTECT_DETAIL (enable edge/detail protection in joint mask)
       * ADAPTIVE_BLEND (enable/disable variance‑based blend adaptivity)
       * LOCAL_STATS_KSIZE (window size for variance map, odd integer >=3)
@@ -137,7 +138,7 @@ class IndiAllskyDenoise:
         """Common tail shared by median_blur, gaussian_blur, and bilateral.
 
         Blends *filtered* with *scidata* using *adaptive_blend* (scalar or
-        ndarray), corrects luminance drift, applies star/nebula protection,
+        ndarray), corrects luminance drift, applies star/Milky Way protection,
         logs diagnostics, and returns the final result in *scidata*'s dtype.
         """
         dtype_max = self._dtype_max(scidata)
@@ -236,27 +237,27 @@ class IndiAllskyDenoise:
         return var
 
     def _build_protection_mask(self, img):
-        """Build a combined protection mask from stars, nebulae, and detail.
+        """Build a combined protection mask from stars, Milky Way, and detail.
 
         Returns a float32 HxW array in [0, 1] where 1 = fully protect
         (keep original) and 0 = allow full denoising.
 
-        The three mask computations (star, nebula, detail) operate at
+        The three mask computations (star, Milky Way, detail) operate at
         different spatial scales and are independent of each other, so
         they are dispatched concurrently to the class-level thread pool.
-        The nebula mask's star-subtraction step is applied *after* both
-        futures resolve — this lets star and nebula detection overlap in
+        The Milky Way mask's star-subtraction step is applied *after* both
+        futures resolve — this lets star and Milky Way detection overlap in
         time while still producing the correct final mask.
 
         Steps:
           1. Submit star mask to thread pool (always).
-          2. If DENOISE_PROTECT_NEBULA, submit nebula mask (without
+          2. If DENOISE_PROTECT_MILKYWAY, submit Milky Way mask (without
              star subtraction — that happens in the merge step).
           3. If DENOISE_PROTECT_DETAIL, submit detail mask.
-          4. Collect results, subtract star mask from nebula mask,
+          4. Collect results, subtract star mask from Milky Way mask,
              and take element-wise maximum of all masks.
         """
-        want_nebula = bool(self.config.get('DENOISE_PROTECT_NEBULA', False))
+        want_milkyway = bool(self.config.get('DENOISE_PROTECT_MILKYWAY', False))
         want_detail = bool(self.config.get('DENOISE_PROTECT_DETAIL', False))
 
         # Pre-compute luminance once — the module-level mask functions
@@ -276,13 +277,16 @@ class IndiAllskyDenoise:
             _pm_star, lum, percentile=star_pct,
             threshold_sigma=star_sig, fwhm=star_fwhm)
 
-        neb_future = None
-        if want_nebula:
-            # Run nebula detection WITHOUT star_m so it can proceed in
+        mw_future = None
+        if want_milkyway:
+            # Run Milky Way detection WITHOUT star_m so it can proceed in
             # parallel.  Star subtraction is applied after both finish.
-            neb_pct = float(self.config.get('DENOISE_NEBULA_PERCENTILE', 60.0))
-            neb_future = self._thread_pool.submit(
-                _pm_neb, lum, star_m=None, percentile=neb_pct)
+            mw_pct = float(self.config.get('DENOISE_MILKYWAY_PERCENTILE', 60.0))
+            mw_box = int(self.config.get('DENOISE_MILKYWAY_BOX_SIZE', 128))
+            mw_fs = int(self.config.get('DENOISE_MILKYWAY_FILTER_SIZE', 5))
+            mw_future = self._thread_pool.submit(
+                _pm_mw, lum, star_m=None, percentile=mw_pct,
+                box_size=mw_box, filter_size=(mw_fs, mw_fs))
 
         detail_future = None
         if want_detail:
@@ -292,12 +296,12 @@ class IndiAllskyDenoise:
         star_m = star_future.result()
         protection = star_m
 
-        if neb_future is not None:
-            neb_m = neb_future.result()
-            # Subtract star pixels from nebula mask (same logic that was
-            # previously inside nebula_mask via star_m= parameter).
-            neb_m = numpy.clip(neb_m - star_m, 0.0, 1.0)
-            protection = numpy.maximum(protection, neb_m)
+        if mw_future is not None:
+            mw_m = mw_future.result()
+            # Subtract star pixels from Milky Way mask (same logic that was
+            # previously inside milkyway_mask via star_m= parameter).
+            mw_m = numpy.clip(mw_m - star_m, 0.0, 1.0)
+            protection = numpy.maximum(protection, mw_m)
 
         if detail_future is not None:
             detail_bool = detail_future.result()
@@ -307,17 +311,17 @@ class IndiAllskyDenoise:
 
     def _apply_protection(self, original, denoised, dtype_max):
         """Blend protected regions back to the original, preserving
-        point sources (stars) and optionally extended emission (nebulae).
+        point sources (stars) and optionally extended emission (Milky Way).
 
         If DENOISE_PROTECT_STARS is False the denoised image is returned
-        unchanged.  Otherwise the joint star+nebula mask gates blending:
+        unchanged.  Otherwise the joint star+Milky Way mask gates blending:
         pixels with mask ~ 1 are kept from the original; pixels with
         mask ~ 0 use the denoised value.
         """
         if not bool(self.config.get('DENOISE_PROTECT_STARS', True)):
             return denoised
 
-        # Build the joint protection mask (stars + optional nebulae)
+        # Build the joint protection mask (stars + optional Milky Way)
         protection = self._build_protection_mask(original)
 
         # Fast exit when nothing is flagged
@@ -711,7 +715,7 @@ class IndiAllskyDenoise:
         # Correct luminance drift introduced by wavelet reconstruction + blending
         blended = self._match_luminance(scidata, blended, dtype_max)
 
-        # Protect stars (and optionally nebulae): blend protected regions back
+        # Protect stars (and optionally Milky Way): blend protected regions back
         blended = self._apply_protection(scidata, blended, dtype_max)
 
         elapsed = time.monotonic() - start_t

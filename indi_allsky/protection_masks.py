@@ -1,7 +1,7 @@
 """Utilities for computing spatial protection masks.
 
 This module contains the routines for detecting and masking bright stars,
-diffuse Milky‑Way nebulosity, and fine structural detail.  The computation
+the Milky Way band, and fine structural detail.  The computation
 uses photutils (DAOStarFinder for point sources and Background2D for
 extended background) and includes a small LRU cache plus asynchronous
 helpers to avoid recomputing masks on frames that have already been
@@ -14,11 +14,11 @@ an ImportError.
 Example usage::
 
     import cv2
-    from indi_allsky.protection_masks import star_mask, nebula_mask, detail_mask
+    from indi_allsky.protection_masks import star_mask, milkyway_mask, detail_mask
 
     img = cv2.imread('frame.tif', cv2.IMREAD_GRAYSCALE).astype(np.float32)
     s = star_mask(img)
-    n = nebula_mask(img, star_m=s)
+    n = milkyway_mask(img, star_m=s)
     d = detail_mask(img)
 
 """
@@ -29,6 +29,8 @@ import numpy as np
 import functools
 from concurrent.futures import ThreadPoolExecutor
 
+from scipy.ndimage import median_filter as _scipy_median_filter
+
 # photutils imports; this package must be installed.
 from astropy.convolution import Gaussian2DKernel
 from astropy.stats import sigma_clipped_stats
@@ -37,7 +39,7 @@ from photutils.background import Background2D, MedianBackground
 
 __all__ = [
     "star_mask",
-    "nebula_mask",
+    "milkyway_mask",
     "detail_mask",
     "set_cache_size",
     "async_star_mask",
@@ -147,32 +149,154 @@ def star_mask(img: np.ndarray, percentile: float = 99.0, **pu_kwargs) -> np.ndar
     return _cached_star(key_hash, percentile, sig, fwhm, shape, _raw_bytes=raw_bytes)
 
 
-def nebula_mask(img: np.ndarray, star_m: np.ndarray | None = None, percentile: float = 60.0, **pu_kwargs) -> np.ndarray:
-    """Return a mask marking diffuse Milky‑Way nebulosity in ``img``.
+def milkyway_mask(img: np.ndarray, star_m: np.ndarray | None = None, percentile: float = 60.0, **pu_kwargs) -> np.ndarray:
+    """Return a **soft graduated band-following** mask marking the Milky Way.
+
+    Unlike the star mask (which stamps Gaussian PSFs at point sources),
+    the Milky Way mask captures extended low-frequency emission — the
+    Milky Way band, bright nebulae, zodiacal light, etc.  The returned
+    mask is a smooth float32 array in [0, 1] where brighter or more
+    central regions get stronger protection and the edges taper gradually.
+
+    Algorithm  (ridge-following)
+    ----------------------------
+    1. Estimate a low-frequency background model via ``Background2D``
+       (photutils) with ``MedianBackground``.
+    2. **Detect the ridge** — for each image row, find the column with
+       peak (smoothed) background brightness.  Smooth the resulting
+       column trace with a median filter → Gaussian blur to produce a
+       stable ridge line that tracks the Milky Way band axis.
+    3. **Per-row signal strength** — compute how much brighter the ridge
+       is compared to the local dark sky (low percentile of the row).
+       Rows where the band is weak get proportionally weaker protection.
+    4. **Distance-from-ridge falloff** — build a Gaussian profile
+       centred on the ridge with a half-width proportional to signal
+       strength.  Combine this geometric weight with the actual
+       brightness excess to produce the final soft mask.
+    5. Apply gamma, Gaussian edge-softening blur, and subtract the star
+       mask so point-source protection does not double-count.
+
+    This replaces an older global-percentile-floor approach which
+    produced V-shaped masks when the Milky Way crossed the frame
+    diagonally (the global floor clipped faint parts of the band while
+    allowing bright parts to balloon out).
 
     Parameters
     ----------
     img : ndarray
-        Input grayscale image.
+        Input grayscale image (float32 preferred).
     star_m : ndarray or None
-        Optional star mask (as returned by :func:`star_mask`).  If provided
-        the star pixels are subtracted from the nebula map so that bright
-        cores do not pollute the diffuse mask.
+        Star mask (always computed when denoising is active).  When
+        provided, star pixels are subtracted from the Milky Way mask
+        so bright stars are not mis-identified as nebulosity.  Accepts
+        ``None`` only for standalone / testing use.
     percentile : float
-        Percentile threshold applied to a heavy Gaussian blur to isolate
-        extended low-frequency structure.  Lower values produce larger
-        nebula regions; adjust as needed.
+        Controls sensitivity.  Mapped internally to a per-row floor
+        percentile: ``row_floor = percentile × 0.25``.  Lower values
+        extend protection further into dim sky; higher values restrict
+        it to only the brightest emission.  Default 60 → row floor at
+        the 15th percentile.
+
+    Keyword arguments (via ``**pu_kwargs``):
+      * ``box_size`` – tile size in pixels for ``Background2D`` (default 128).
+      * ``filter_size`` – shape of the median filter applied to the
+        *background mesh* (not the image).  Must be small relative to
+        the mesh dimensions.  Default ``(5, 5)``.
+      * ``soft_sigma`` – Gaussian sigma (in pixels) for the edge-softening
+        blur applied to the final mask.  Defaults to ``box_size × 0.75``.
+      * ``gamma`` – power exponent applied to the normalised ramp before
+        blurring.  Values < 1 widen the protected region; values > 1
+        concentrate protection on the brightest cores.  Default 0.8.
+      * ``band_halfwidth`` – base half-width of the protection band as a
+        fraction of the larger image dimension.  Default 0.15 (15 %).
     """
 
     # float32 is sufficient for Background2D and halves memory vs float64
     data = img if img.dtype == np.float32 else img.astype(np.float32)
+    h, w = data.shape[:2]
     box_size = pu_kwargs.get('box_size', 128)
-    bkg = Background2D(data, box_size, filter_size=pu_kwargs.get('filter_size', (101,101)),
+
+    bkg = Background2D(data, box_size,
+                       filter_size=pu_kwargs.get('filter_size', (5, 5)),
                        bkg_estimator=MedianBackground())
-    mask = (bkg.background > np.percentile(bkg.background, percentile)).astype(np.float32)
+    bg = bkg.background.astype(np.float32)
+
+    # ---- 1. Detect the ridge (brightest column per row) ----
+    # Light Gaussian blur avoids noise-spike peaks
+    bg_smooth = cv2.GaussianBlur(bg, (0, 0), w * 0.05)
+    peak_cols = np.argmax(bg_smooth, axis=1).astype(np.float64)
+
+    # Robust smooth: median filter strips outlier rows, then Gaussian
+    med_size = min(h // 4 * 2 + 1, 501)  # always odd, ≤ 501
+    if med_size < 3:
+        med_size = 3
+    ridge = _scipy_median_filter(peak_cols, size=med_size)
+    ridge = cv2.GaussianBlur(
+        ridge.reshape(-1, 1).astype(np.float32), (0, 0), h * 0.1
+    ).ravel()
+
+    # ---- 2. Per-row signal strength ----
+    # Row floor: low percentile captures the dark sky beside the band
+    row_floor_pct = max(float(percentile) * 0.25, 5.0)
+    row_floor = np.percentile(bg, row_floor_pct, axis=1).astype(np.float32)
+
+    # Signal = brightness at ridge − row floor
+    ridge_idx = np.clip(ridge.astype(np.intp), 0, w - 1)
+    row_peak = bg[np.arange(h), ridge_idx]
+    row_strength = np.maximum(row_peak - row_floor, 0.0)
+
+    # Normalise to [0, 1]
+    strength_95 = np.percentile(row_strength[row_strength > 0], 95) \
+        if np.any(row_strength > 0) else 1.0
+    if strength_95 < 1e-6:
+        return np.zeros(data.shape[:2], dtype=np.float32)
+    row_strength_norm = np.clip(row_strength / np.float32(strength_95), 0, 1)
+
+    # ---- 3. Distance-from-ridge Gaussian mask ----
+    base_halfwidth = max(h, w) * float(pu_kwargs.get('band_halfwidth', 0.15))
+    # Rows with stronger signal get wider protection (50 %–100 % of base)
+    row_halfwidth = base_halfwidth * (0.5 + 0.5 * row_strength_norm)
+
+    col_grid = np.arange(w, dtype=np.float32)[np.newaxis, :]  # (1, W)
+    ridge_2d = ridge[:, np.newaxis].astype(np.float32)          # (H, 1)
+    dist = np.abs(col_grid - ridge_2d)                          # (H, W)
+
+    sigma_hw = (row_halfwidth * 0.6)[:, np.newaxis]             # (H, 1)
+    gauss_mask = np.exp(
+        np.float32(-0.5) * (dist / np.maximum(sigma_hw, np.float32(1.0))) ** 2
+    ).astype(np.float32)
+
+    # Weight by row signal strength
+    gauss_mask *= row_strength_norm[:, np.newaxis]
+
+    # ---- 4. Combine with brightness excess ----
+    bg_excess = bg - row_floor[:, np.newaxis]
+    bg_excess_norm = np.clip(
+        bg_excess / np.maximum(np.float32(strength_95), np.float32(1.0)), 0, 1
+    )
+
+    # Geometric mean: both ridge-proximity and actual brightness required
+    mask = np.sqrt(gauss_mask * bg_excess_norm).astype(np.float32)
+
+    # Renormalise so peak → 1
+    mask_peak = np.percentile(mask[mask > 0], 99) if np.any(mask > 0) else 1.0
+    if mask_peak > 1e-6:
+        mask = np.clip(mask / np.float32(mask_peak), 0, 1)
+
+    # ---- 5. Gamma + soft blur ----
+    gamma = float(pu_kwargs.get('gamma', 0.8))
+    if abs(gamma - 1.0) > 1e-3:
+        np.power(mask, gamma, out=mask)
+
+    soft_sigma = float(pu_kwargs.get('soft_sigma', box_size * 0.75))
+    if soft_sigma > 0.5:
+        mask = cv2.GaussianBlur(mask, (0, 0), soft_sigma)
+
+    # ---- 6. Subtract star mask ----
     if star_m is not None:
-        mask = np.clip(mask - star_m, 0.0, 1.0)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _morph_kernel_5x5)
+        np.subtract(mask, star_m, out=mask)
+        np.clip(mask, 0.0, 1.0, out=mask)
+
     return mask
 
 
@@ -225,10 +349,10 @@ def detail_mask(lum: np.ndarray, threshold: float | None = None,
 
 
 def protect_denoiser(img: np.ndarray, denoiser, star_percentile: float = 99.0,
-                     nebula_percentile: float = 60.0, **denoise_kwargs) -> np.ndarray:
-    """Denoise ``img`` while preserving stars and nebulae.
+                     milkyway_percentile: float = 60.0, **denoise_kwargs) -> np.ndarray:
+    """Denoise ``img`` while preserving stars and the Milky Way.
 
-    Computes star and nebula masks, applies the ``denoiser`` callable,
+    Computes star and Milky Way masks, applies the ``denoiser`` callable,
     then blends the protected regions back to the original.  This is a
     standalone convenience wrapper that does not require an
     :class:`~indi_allsky.denoise.IndiAllskyDenoise` instance.
@@ -241,8 +365,8 @@ def protect_denoiser(img: np.ndarray, denoiser, star_percentile: float = 99.0,
         ``denoiser(img, **denoise_kwargs) -> ndarray``.
     star_percentile : float
         Passed to :func:`star_mask`.
-    nebula_percentile : float
-        Passed to :func:`nebula_mask`.
+    milkyway_percentile : float
+        Passed to :func:`milkyway_mask`.
     """
     # Compute luminance for mask generation (cv2 SIMD path)
     if img.ndim == 3 and img.shape[2] >= 3:
@@ -255,7 +379,7 @@ def protect_denoiser(img: np.ndarray, denoiser, star_percentile: float = 99.0,
 
     # Build joint protection mask
     s_m = star_mask(gray, percentile=star_percentile)
-    n_m = nebula_mask(gray, star_m=s_m, percentile=nebula_percentile)
+    n_m = milkyway_mask(gray, star_m=s_m, percentile=milkyway_percentile)
     protection = np.maximum(s_m, n_m)
 
     # Run the user-supplied denoiser

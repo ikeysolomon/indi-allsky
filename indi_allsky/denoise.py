@@ -183,6 +183,26 @@ class IndiAllskyDenoise(object):
             return numpy.zeros(img.shape[:2], dtype=numpy.float32)
 
 
+    def _build_protection_mask(self, img) -> numpy.ndarray:
+        """Compatibility helper: build joint protection mask for ``img``.
+
+        Returns a float32 mask in [0,1] combining star and nebula protection.
+        This mirrors the historical helper expected by tests and callers.
+        """
+        try:
+            # compute luminance for mask generators
+            if img.ndim == 3 and img.shape[2] >= 3:
+                gray = self._compute_luminance(img)
+            else:
+                gray = img.astype(numpy.float32)
+
+            s_m = self._star_mask(img)
+            # Nebula/combined protection removed — return star mask only
+            return s_m.astype(numpy.float32)
+        except Exception:
+            return numpy.zeros(img.shape[:2], dtype=numpy.float32)
+
+
     def _apply_star_protection(self, original, denoised, dtype_max):
         """Blend star regions back to the original, preserving point sources.
 

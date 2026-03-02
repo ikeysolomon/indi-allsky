@@ -13,7 +13,6 @@ Outputs (in DENOISE PR TEST ENVIRONMENT/Test Output/):
     real_02_star_mask.png           – star application mask (black holes at stars)
     real_06_overlay.png             – input + green contour (stars)
     real_08_denoised_comparison.png – side-by-side before / after
-    real_09_ridge_trace.png         – ridge line (red) on background model
 """
 
 from __future__ import annotations
@@ -103,13 +102,6 @@ def _overlay_contour(base_bgr: np.ndarray, mask: np.ndarray,
                                    cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(vis, contours, -1, colour, thickness)
     return vis
-
-
-def _overlay_heatmap(base_bgr: np.ndarray, mask: np.ndarray,
-                     alpha: float = 0.45) -> np.ndarray:
-    """Blend a viridis heatmap of *mask* on top of *base_bgr*."""
-    hm = _mask_to_colour(mask)
-    return cv2.addWeighted(base_bgr, 1.0 - alpha, hm, alpha, 0)
 
 
 def _side_by_side(left: np.ndarray, right: np.ndarray,
@@ -206,7 +198,7 @@ def run():
     _save('real_02_star_mask.png', s_mask)
     print(f'  Time: {t_star * 1000:.0f} ms  ({n_stars} stars detected)')
 
-    # Nebulosity masking has been removed; no such mask produced.
+    # Nebula masking removed from pipeline (no diffuse-mask generated)
 
     # ===== 3. Star overlay (combined mask removed) =====
     print('\n--- 3. Star overlay (combined removed) ---')
@@ -257,35 +249,8 @@ def run():
         _save(suffix, denoised)
         print(f'  Time: {elapsed * 1000:.0f} ms  ({n_diff:,} px changed)')
 
-    # ===== 6. Ridge trace =====
-    print('\n--- 6. Ridge trace visualisation ---')
-    bg = _tile_median_background(gray, box_size=128, filter_size=(5, 5))
-    bg_vis = np.clip(bg / max(bg.max(), 1) * 255, 0, 255).astype(np.uint8)
-    bg_colour = cv2.cvtColor(bg_vis, cv2.COLOR_GRAY2BGR)
-
-    bg_smooth = cv2.GaussianBlur(bg, (0, 0), w * 0.05)
-    # Suppress moon / bright compact sources (same logic as previous nebula suppression)
-    bg_ridge = bg_smooth.copy()
-    moon_radius = int(max(h, w) * 0.20)
-    for _ in range(5):
-        _, max_val, _, max_loc = cv2.minMaxLoc(bg_ridge)
-        bg_mean = float(np.mean(bg_ridge[bg_ridge > 0]))
-        if max_val < bg_mean * 1.2:
-            break
-        cv2.circle(bg_ridge, max_loc, moon_radius, 0.0, -1)
-    peak_cols = np.argmax(bg_ridge, axis=1).astype(np.float64)
-    med_sz = min(h // 4 * 2 + 1, 501)
-    if med_sz < 3:
-        med_sz = 3
-    ridge_raw = _mfilt(peak_cols, size=med_sz)
-    rows = np.arange(h, dtype=np.float64)
-    coeffs = np.polyfit(rows, ridge_raw, 2)
-    ridge = np.clip(np.polyval(coeffs, rows), 0, w - 1)
-
-    for row in range(h):
-        col = int(np.clip(ridge[row], 0, w - 1))
-        cv2.circle(bg_colour, (col, row), 1, (0, 0, 255), -1)
-    _save('real_09_ridge_trace.png', bg_colour)
+    # Ridge-trace visualization removed (was part of Milky-Way/nebula mask)
+    # No ridge computation or drawing is performed in the PR harness.
 
     # ===== 7. IndiAllskyDenoise integration =====
     print('\n--- 7. IndiAllskyDenoise._build_protection_mask ---')
@@ -320,16 +285,16 @@ def run():
 
     print(textwrap.dedent(f"""\
 
-        PR images ({os.path.relpath(OUT_DIR, _project_root)}):
-            real_01_input.png               Original input photograph
-            real_02_star_mask.png           Star mask (black holes at stars, white sky)
-            real_06_overlay.png             Input + green protection contour (stars)
-            real_08a_wavelet.png            Denoised output: wavelet
-            real_08b_bilateral.png          Denoised output: bilateral
-            real_08c_gaussian_blur.png      Denoised output: gaussian_blur
-            real_08d_median_blur.png        Denoised output: median_blur
-            real_09_ridge_trace.png         Ridge line (red) on background
-        """))
+PR images ({os.path.relpath(OUT_DIR, _project_root)}):
+  real_01_input.png               Original input photograph
+  real_02_star_mask.png           Star mask (black holes at stars, white sky)
+    real_06_overlay.png             Input + green protection contour (stars)
+  real_08a_wavelet.png            Denoised output: wavelet
+  real_08b_bilateral.png          Denoised output: bilateral
+  real_08c_gaussian_blur.png      Denoised output: gaussian_blur
+  real_08d_median_blur.png        Denoised output: median_blur
+
+"""))
 
     if results.failed:
         print('** THERE WERE FAILURES — see above **')

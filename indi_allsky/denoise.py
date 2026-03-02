@@ -226,7 +226,11 @@ class IndiAllskyDenoise(object):
 
         orig_f = original.astype(numpy.float32)
         den_f = denoised.astype(numpy.float32)
-        result = sm * orig_f + (1.0 - sm) * den_f
+        # `star_mask` uses 1.0 = sky (unprotected), 0.0 = protected (stars).
+        # We want protected pixels to retain the original and sky to use
+        # the denoised value. Therefore blend as:
+        #   result = star_mask * denoised + (1 - star_mask) * original
+        result = sm * den_f + (1.0 - sm) * orig_f
         return numpy.clip(result, 0, dtype_max).astype(original.dtype)
 
     def _detail_mask(self, lum, threshold=None, dtype_max=1.0,
@@ -365,14 +369,25 @@ class IndiAllskyDenoise(object):
             return scidata
 
         strength = max(1, min(strength, 5))
-        ksize = strength * 2 + 1  # always odd: 3, 5, 7, 9, 11
+        # previously the kernel/blend was increased by 20%; reduce the
+        # effective strength now by ~15% (1.20 * 0.85 = 1.02)
+        base_ksize = strength * 2 + 1  # always odd: 3,5,7,9,11
+        # reduce median effective kernel by ~10% previously; apply an extra
+        # 7.5% reduction now (cumulative multiplier = 0.92 * 0.925)
+        ksize = int(round(base_ksize * (0.92 * 0.925)))
+        if ksize % 2 == 0:
+            ksize += 1
+        ksize = max(3, ksize)
 
         blurred = self._medianBlur(scidata, ksize)
 
         # Blend fraction: 30% at strength=1 → 80% at strength=5
         t = self._norm_strength()
-        blend = float(self.config.get('MEDIAN_BLEND', 0.35 + 0.57 * t))
-        blend = max(0.0, min(1.0, blend))
+        base_blend = float(self.config.get('MEDIAN_BLEND', 0.35 + 0.57 * t))
+        # reduce previous boost by ~15% (1.20 -> 1.02 effective)
+        # reduce median blend by ~10% previously; apply an extra 7.5%
+        # reduction now (cumulative multiplier = 0.92 * 0.925)
+        blend = max(0.0, min(1.0, base_blend * (0.92 * 0.925)))
 
         # --- adaptive blending using fast local variance map --------------------------------
         # Poisson noise in astro exposures benefits from reducing the
@@ -445,14 +460,19 @@ class IndiAllskyDenoise(object):
         # (overrides the whole map) or GAUSSIAN_SIGMA_MAP (per-level).
         default_sigma_map = {1: 1.0, 2: 1.8, 3: 3.0, 4: 4.2, 5: 5.8}
         sigma = float(self.config.get('GAUSSIAN_SIGMA', default_sigma_map.get(strength, 3.0)))
+        # reduce gaussian sigma by 15% previously; applied a 10% reduction
+        # earlier; now apply an extra 7.5% reduction (cumulative multiplier)
+        sigma = sigma * 0.85 * 0.9 * 0.925
 
         # legacy behaviour: direct blur with no downsampling
         blurred = cv2.GaussianBlur(scidata, (0, 0), sigma)
 
         # Blend fraction: 20% at strength=1 → 70% at strength=5
         t = self._norm_strength()
-        blend = float(self.config.get('GAUSSIAN_BLEND', 0.25 + 0.55 * t))
-        blend = max(0.0, min(1.0, blend))
+        base_blend = float(self.config.get('GAUSSIAN_BLEND', 0.25 + 0.55 * t))
+        # reduce gaussian blend by 15% previously; applied a 10% reduction
+        # earlier; now apply an extra 7.5% reduction (cumulative multiplier)
+        blend = max(0.0, min(1.0, base_blend * 0.85 * 0.9 * 0.925))
 
         # --- adaptive blending using fast local variance map --------------------------------
         adaptive_blend = blend
@@ -718,6 +738,10 @@ class IndiAllskyDenoise(object):
         # These directly multiply the BayesShrink threshold.
         default_scale_map = {1: 1.8, 2: 3.0, 3: 4.6, 4: 7.0, 5: 9.2}
         scale = float(self.config.get('WAVELET_SCALE', default_scale_map.get(strength, 4.6)))
+        # Reduce wavelet aggressiveness by ~15% then a further 5% per request
+        scale = float(scale) * 0.85
+        # additional 5% reduction
+        scale = float(scale) * 0.95
 
         # Determine dtype range for normalization
         if numpy.issubdtype(scidata.dtype, numpy.integer):

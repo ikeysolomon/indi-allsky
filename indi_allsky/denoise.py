@@ -305,9 +305,11 @@ class IndiAllskyDenoise(object):
         sigma_max = base_sigma * bil_scale_factor * (5.0 ** (bil_scale_exp - 1.0))
         sigma_color = int(max(1.0, sigma_min + (sigma_max - sigma_min) * (t ** bil_scale_exp)))
 
-        # If explicit override provided, respect it
+        # If explicit override provided, respect it; otherwise bump by 10%
         if 'BILATERAL_SIGMA_COLOR' in self.config:
             sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR'))
+        else:
+            sigma_color = int(max(1.0, sigma_color * 1.10))
 
         return max(1, sigma_color), max(1, sigma_space)
 
@@ -545,7 +547,8 @@ class IndiAllskyDenoise(object):
         # blend fraction like other algorithms
         t = self._norm_strength()
         blend = float(self.config.get('BILATERAL_BLEND', 0.25 + 0.55 * t))
-        blend = max(0.0, min(1.0, blend))
+        # increase bilateral blend by 10% to raise effective strength
+        blend = max(0.0, min(1.0, blend * 1.10))
 
         adaptive_blend = blend
         if bool(self.config.get('ADAPTIVE_BLEND', True)) and 0.0 < blend < 1.0:
@@ -742,6 +745,8 @@ class IndiAllskyDenoise(object):
         scale = float(scale) * 0.85
         # additional 5% reduction
         scale = float(scale) * 0.95
+        # bump wavelet strength by 10%
+        scale = float(scale) * 1.10
 
         # Determine dtype range for normalization
         if numpy.issubdtype(scidata.dtype, numpy.integer):

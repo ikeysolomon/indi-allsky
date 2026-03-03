@@ -18,6 +18,7 @@ Example usage::
 
 import cv2
 import numpy as np
+import os
 import functools
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -29,19 +30,39 @@ from astropy.convolution import Gaussian2DKernel
 
 # ``protect_denoiser`` lives in :mod:`denoise`; we expose a thin wrapper
 # here to preserve the old public API without introducing a circular import.
+
+# DIAL TO TWIDDLE: Star protection expansion in pixels
+# Change this value to adjust the size of protection circles around stars
+# in the denoised output. Larger values = bigger star protection zones.
+# This is the master control for overlay generation.
+DEFAULT_EXPAND_RADIUS: int = 4
+
+# Default parameters for star detection
+DEFAULT_PERCENTILE: float = 95.0           # Percentile threshold for star detection
+DEFAULT_THRESHOLD_SIGMA: float = 2.0        # SNR threshold: pixels N-sigma above background (neighbours)
+DEFAULT_FWHM: float = 5.0                   # Assumed star size in pixels (FWHM of PSF)
+DEFAULT_THRESHOLD_SIGMA_FAST: float = 2.0   # More aggressive SNR threshold for two-stage fast detection
+
+# Image processing constants
+SIGMA_CLIP_SIGMA: float = 3.0               # Sigma clipping threshold for background estimation
+FWHM_TO_STDDEV: float = 2.3548              # Conversion factor: FWHM = stddev * 2.3548
+FWHM_RADIUS_MULTIPLIER: int = 3             # Stamp radius = ceil(FWHM * multiplier)
+PROTECTED_PIXEL_THRESHOLD: float = 0.5      # Threshold for identifying protected pixels (stars)
+LAPLACIAN_KSIZE: int = 3                    # Kernel size for Laplacian edge detection
+DISTANCE_TRANSFORM_KSIZE: int = 5           # Kernel size for distance transform
+
 __all__ = [
     "star_mask",
     "fast_star_mask",
     "set_cache_size",
     "async_star_mask",
-    "protect_denoiser",
-]
+    ]
 
 _cache_max_entries = 8
 
 # LRU cache of star masks keyed by image bytes plus parameters
 @functools.lru_cache(maxsize=_cache_max_entries)
-def _cached_star(key: bytes, percentile: float, threshold_sigma: float, fwhm: float, shape):
+def _cached_star(key: bytes, percentile: float, threshold_sigma: float, fwhm: float, expand_radius: int | None, shape):
     # key is raw bytes; shape is needed to reshape back
     data = np.frombuffer(key, dtype=np.float32).reshape(shape)
     # profiling timers (micro-optimized regions)
@@ -51,7 +72,7 @@ def _cached_star(key: bytes, percentile: float, threshold_sigma: float, fwhm: fl
     try:
         from astropy.stats import sigma_clipped_stats
         t0 = time.perf_counter()
-        _, _, bkg_std = sigma_clipped_stats(data, sigma=3.0)
+        _, _, bkg_std = sigma_clipped_stats(data, sigma=SIGMA_CLIP_SIGMA)
         prof_sigma = time.perf_counter() - t0
     except Exception:
         t0 = time.perf_counter()
@@ -68,8 +89,8 @@ def _cached_star(key: bytes, percentile: float, threshold_sigma: float, fwhm: fl
         # Vectorized stamping: build impulse image and convolve with stamp
         stamp = _make_stamp(fwhm) if '_make_stamp' in globals() else None
         if stamp is None:
-            stddev = fwhm / 2.3548
-            radius = int(np.ceil(fwhm * 3))
+            stddev = fwhm / FWHM_TO_STDDEV
+            radius = int(np.ceil(fwhm * FWHM_RADIUS_MULTIPLIER))
             kernel = Gaussian2DKernel(x_stddev=stddev, x_size=2 * radius + 1,
                                       y_size=2 * radius + 1)
             stamp = (kernel.array / kernel.array.max()).astype(np.float32)
@@ -97,11 +118,32 @@ def _cached_star(key: bytes, percentile: float, threshold_sigma: float, fwhm: fl
         _last_profile['stamp_time'] = prof_stamp
         _last_profile['total_time'] = t_end - t_start
         _last_profile['n_stars'] = int(len(tbl)) if tbl is not None else 0
+        _last_profile['expand_radius'] = int(expand_radius) if expand_radius is not None else 0
     except Exception:
         pass
 
     # Return inverted mask: 1.0 = sky (unprotected), 0.0 = protected (stars)
-    return np.clip(1.0 - mask, 0.0, 1.0).astype(np.float32)
+    out = np.clip(1.0 - mask, 0.0, 1.0).astype(np.float32)
+
+    # Apply star protection dilation: controlled by DEFAULT_EXPAND_RADIUS (line 35).
+    # This expands the protected circle per-star to reduce denoising artifacts.
+    try:
+        if expand_radius and int(expand_radius) > 0:
+            r = int(expand_radius)
+            prot_bin = (out < PROTECTED_PIXEL_THRESHOLD).astype(np.uint8)
+            h, w = prot_bin.shape
+            max_r = max(h, w)
+            if r > max_r:
+                r = max_r
+            # Use distance-transform for all radii (consistent, efficient)
+            src = ((prot_bin == 0).astype(np.uint8) * 255)
+            dt = cv2.distanceTransform(src, cv2.DIST_L2, DISTANCE_TRANSFORM_KSIZE)
+            dil = (dt <= float(r)).astype(np.uint8)
+            out[dil.astype(bool)] = 0.0
+    except Exception:
+        pass
+
+    return out
 
 _executor = ThreadPoolExecutor(max_workers=2)
 
@@ -127,14 +169,14 @@ def set_cache_size(size: int):
     _cached_star.cache_clear()
     _cached_star = functools.lru_cache(maxsize=size)(_cached_star)
 
-
-def async_star_mask(img: np.ndarray, percentile: float = 99.0, threshold_sigma: float = 1.5, fwhm: float = 5.0):
+# Async helper to compute star mask without blocking caller; returns a Future. FWHM and other parameters can be passed via kwargs. See `star_mask` for details.
+def async_star_mask(img: np.ndarray, percentile: float = DEFAULT_PERCENTILE, threshold_sigma: float = DEFAULT_THRESHOLD_SIGMA, fwhm: float = DEFAULT_FWHM, expand_radius: int = 0):
     """Return a future computing ``star_mask(img,...)``."""
     return _executor.submit(star_mask, img, percentile=percentile,
-                             threshold_sigma=threshold_sigma, fwhm=fwhm)
+                             threshold_sigma=threshold_sigma, fwhm=fwhm, expand_radius=expand_radius)
 
 
-def star_mask(img: np.ndarray, percentile: float = 99.0, **pu_kwargs) -> np.ndarray:
+def star_mask(img: np.ndarray, percentile: float = DEFAULT_PERCENTILE, expand_radius: int | None = None, **pu_kwargs) -> np.ndarray:
     """Return a mask marking bright stars in ``img``.
 
     Parameters
@@ -147,13 +189,17 @@ def star_mask(img: np.ndarray, percentile: float = 99.0, **pu_kwargs) -> np.ndar
         but can be adjusted based on image characteristics.
     """
 
+    # if caller didn't provide a radius, use module default
+    if expand_radius is None:
+        expand_radius = DEFAULT_EXPAND_RADIUS
+
     # encode image bytes plus parameters to lookup
     key_bytes = img.astype(np.float32).tobytes()
     shape = img.shape
-    sig = pu_kwargs.get('threshold_sigma', 1.5)
-    fwhm = pu_kwargs.get('fwhm', 5.0)
-    # LRU cache call
-    return _cached_star(key_bytes, percentile, sig, fwhm, shape)
+    sig = pu_kwargs.get('threshold_sigma', DEFAULT_THRESHOLD_SIGMA)
+    fwhm = pu_kwargs.get('fwhm', DEFAULT_FWHM)
+    # LRU cache call (include expand_radius in cache key)
+    return _cached_star(key_bytes, percentile, sig, fwhm, int(expand_radius), shape)
 
 
 def _tile_median_background(img: np.ndarray, box_size: int = 128, filter_size=(5, 5)) -> np.ndarray:
@@ -192,21 +238,9 @@ def _tile_median_background(img: np.ndarray, box_size: int = 128, filter_size=(5
     ky = max(1, int(ky))
     bg = cv2.blur(med_up, (kx, ky))
     return bg.astype(np.float32)
-# Note: Nebula / Milky-Way nebulosity masking has been removed from the
-# public API. If needed in future, implement a separate module with a more
-# controlled set of parameters and optional auto-enable logic.
 
-
-def protect_denoiser(img: np.ndarray, denoiser, star_percentile: float = 99.0, nebula_percentile: float = 60.0, **denoise_kwargs) -> np.ndarray:
-    """Proxy to :func:`indi_allsky.denoise.protect_denoiser`.
-
-    This lives here solely for compatibility; the real implementation is in
-    ``denoise.py`` but importing it at module load time would create a
-    circular dependency (``denoise`` needs the mask functions).  The import is
-    therefore performed inside the function body.
-    """
-    from .denoise import protect_denoiser as _pd
-    return _pd(img, denoiser, star_percentile=star_percentile, nebula_percentile=nebula_percentile, **denoise_kwargs)
+# Note: Nebula / Milky-Way nebulosity masking has was experimented with but removed. 
+# If needed in future, implement a separate module due to the extreme number of variables needed. 
 
 
 def _make_stamp(fwhm: float) -> np.ndarray:
@@ -214,8 +248,8 @@ def _make_stamp(fwhm: float) -> np.ndarray:
     key = float(fwhm)
     if key in _kernel_cache:
         return _kernel_cache[key]
-    stddev = fwhm / 2.3548
-    radius = int(np.ceil(fwhm * 3))
+    stddev = fwhm / FWHM_TO_STDDEV
+    radius = int(np.ceil(fwhm * FWHM_RADIUS_MULTIPLIER))
     kernel = Gaussian2DKernel(x_stddev=stddev, x_size=2 * radius + 1,
                               y_size=2 * radius + 1)
     stamp = (kernel.array / kernel.array.max()).astype(np.float32)
@@ -224,8 +258,8 @@ def _make_stamp(fwhm: float) -> np.ndarray:
 
 
 def fast_star_mask(img: np.ndarray, downsample: int = 4, patch_size: int = 32,
-                   percentile: float = 99.0, threshold_sigma: float = 2.0,
-                   fwhm: float = 5.0, max_patches: int = 2000) -> np.ndarray:
+                   percentile: float = DEFAULT_PERCENTILE, threshold_sigma: float = DEFAULT_THRESHOLD_SIGMA_FAST,
+                   fwhm: float = DEFAULT_FWHM, max_patches: int = 2000, expand_radius: int | None = None) -> np.ndarray:
     """Fast two-stage star detection: coarse candidate selection on a
     downsampled Laplacian, then refine with `DAOStarFinder` on small
     full-resolution patches.
@@ -248,7 +282,7 @@ def fast_star_mask(img: np.ndarray, downsample: int = 4, patch_size: int = 32,
     small = cv2.resize(data, (wds, hds), interpolation=cv2.INTER_AREA)
 
     # Laplacian highlights point sources; find local maxima above percentile
-    lap = cv2.Laplacian(small, cv2.CV_32F, ksize=3)
+    lap = cv2.Laplacian(small, cv2.CV_32F, ksize=LAPLACIAN_KSIZE)
     # threshold at requested percentile on the downsampled Laplacian
     try:
         thr = float(np.percentile(lap, float(percentile)))
@@ -280,7 +314,7 @@ def fast_star_mask(img: np.ndarray, downsample: int = 4, patch_size: int = 32,
 
     # Estimate background std on downsampled image for thresholding
     try:
-        _, _, bkg_std = sigma_clipped_stats(small, sigma=3.0)
+        _, _, bkg_std = sigma_clipped_stats(small, sigma=SIGMA_CLIP_SIGMA)
     except Exception:
         bkg_std = float(np.std(small)) + 1e-9
     dao_thresh = threshold_sigma * bkg_std
@@ -317,4 +351,26 @@ def fast_star_mask(img: np.ndarray, downsample: int = 4, patch_size: int = 32,
                 continue
             mask[y0s:y1s, x0s:x1s] = np.maximum(mask[y0s:y1s, x0s:x1s], stamp[sy0:sy1, sx0:sx1])
 
-    return np.clip(1.0 - mask, 0.0, 1.0).astype(np.float32)
+    out = np.clip(1.0 - mask, 0.0, 1.0).astype(np.float32)
+
+    # Apply star protection dilation: controlled by DEFAULT_EXPAND_RADIUS (line 35).
+    # This expands the protected circle per-star to reduce denoising artifacts.
+    try:
+        if expand_radius is None:
+            expand_radius = DEFAULT_EXPAND_RADIUS
+        if expand_radius and int(expand_radius) > 0:
+            r = int(expand_radius)
+            prot_bin = (out < PROTECTED_PIXEL_THRESHOLD).astype(np.uint8)
+            h, w = prot_bin.shape
+            max_r = max(h, w)
+            if r > max_r:
+                r = max_r
+            # use distance transform for all radii to avoid magic numbers
+            src = ((prot_bin == 0).astype(np.uint8) * 255)
+            dt = cv2.distanceTransform(src, cv2.DIST_L2, DISTANCE_TRANSFORM_KSIZE)
+            dil = (dt <= float(r)).astype(np.uint8)
+            out[dil.astype(bool)] = 0.0
+    except Exception:
+        pass
+
+    return out

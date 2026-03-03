@@ -36,7 +36,6 @@ if _project_root not in sys.path:
 from indi_allsky import protection_masks as pm
 from indi_allsky.protection_masks import (
     star_mask,
-    protect_denoiser,
     _cached_star,
 )
 from indi_allsky.protection_masks import _tile_median_background
@@ -54,7 +53,11 @@ def _choose_image():
     p = argparse.ArgumentParser(description='real image PR validator')
     p.add_argument('image', nargs='?',
                    help='path to a test image (defaults to bundled test photo)')
+    p.add_argument('--expand-radius', type=int, default=None,
+                   help='optional: override star-mask expand_radius (pixels)')
     args = p.parse_args()
+    # store CLI-provided expand radius for callers regardless of image
+    _choose_image._expand_radius = args.expand_radius
     if args.image:
         if not os.path.isfile(args.image):
             print(f"ERROR: specified image not found: {args.image}")
@@ -75,6 +78,14 @@ def _choose_image():
     sys.exit(1)
 
 IMAGE_PATH = _choose_image()
+
+# Determine expand_radius: CLI argument overrides module default
+from indi_allsky import protection_masks as _pm
+_cli_expand = getattr(_choose_image, '_expand_radius', None)
+if _cli_expand is not None:
+    expand_radius = int(_cli_expand)
+else:
+    expand_radius = _pm.DEFAULT_EXPAND_RADIUS
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +185,7 @@ def run():
         min_sharpness=0.05,
         max_sharpness=10.0,
         max_elongation=4.0,
+        expand_radius=expand_radius,
     )
     t_star = time.perf_counter() - t0
 
@@ -253,7 +265,7 @@ def run():
     # No ridge computation or drawing is performed in the PR harness.
 
     # ===== 7. IndiAllskyDenoise integration =====
-    print('\n--- 7. IndiAllskyDenoise._build_protection_mask ---')
+    print('\n--- 7. IndiAllskyDenoise star_mask integration ---')
     from indi_allsky.denoise import IndiAllskyDenoise
 
     cfg = {
@@ -264,7 +276,7 @@ def run():
     }
     d = IndiAllskyDenoise(cfg, [False])
     t0 = time.perf_counter()
-    prot = d._build_protection_mask(img)
+    prot = d._star_mask(img)
     t_pipe = time.perf_counter() - t0
 
     results.check('pipeline mask shape', prot.shape == gray.shape)

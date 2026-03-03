@@ -1,7 +1,7 @@
 """Denoising utilities for indi-allsky.
 
 This module defines :class:`IndiAllskyDenoise`, a collection of filtering
-algorithms.  Star and nebula protection is delegated to
+algorithms.  Star protection is delegated to
 :mod:`indi_allsky.protection_masks`, ensuring consistent masking logic
 across the codebase.
 """
@@ -15,15 +15,22 @@ import concurrent.futures
 
 from . import constants
 
-from .protection_masks import star_mask as _pm_star
+from .protection_masks import star_mask
 
 # caches to avoid rebuilding small objects repeatedly
 _db4_wavelet = None  # will hold a pywt.Wavelet('db4') instance
 _wavelet_level_cache: dict[int,int] = {}  # min_dim -> max_level
 _hotpixel_kernel_cache: dict[int,numpy.ndarray] = {}  # radius -> kernel
 
-# use Astropy utilities for convolution and robust statistics
-from astropy.convolution import Box2DKernel, convolve
+# Shared thread pool to avoid creating executors on every call
+_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+# Hoisted constant maps to avoid reallocating them per-call
+_GAUSSIAN_SIGMA_MAP = {1: 1.0, 2: 1.8, 3: 3.0, 4: 4.2, 5: 5.8}
+_WAVELET_SCALE_MAP = {1: 1.8, 2: 3.0, 3: 4.6, 4: 7.0, 5: 9.2}
+_BILATERAL_TUNED_SIGMA = {1: 8, 2: 8, 3: 8, 4: 12, 5: 16}
+
+# use Astropy for robust statistics
 from astropy.stats import sigma_clipped_stats
 
 
@@ -71,8 +78,6 @@ class IndiAllskyDenoise(object):
         large global contrast changes.
         """
         try:
-            # Compute luminance using Rec.601-like weights on RGB, or
-            # identity for single-channel images.
             if orig.ndim == 3 and orig.shape[2] >= 3:
                 orig_lum = (0.299 * orig[:, :, 2].astype(numpy.float32) +
                             0.587 * orig[:, :, 1].astype(numpy.float32) +
@@ -92,13 +97,10 @@ class IndiAllskyDenoise(object):
 
             gain = orig_mean / (res_mean + 1e-9)
 
-            # Clip gain to avoid extreme global changes but allow modest
-            # correction to prevent perceived brightening/dimming.
             min_gain = float(self.config.get('DENOISE_MIN_LUM_GAIN', 0.92))
             max_gain = float(self.config.get('DENOISE_MAX_LUM_GAIN', 1.08))
             gain = max(min_gain, min(max_gain, gain))
 
-            # Apply gain uniformly to all channels
             res_f = result.astype(numpy.float32) * gain
             dtype_max = float(numpy.iinfo(result.dtype).max) if numpy.issubdtype(result.dtype, numpy.integer) else 1.0
             res_f = numpy.clip(res_f, 0.0, dtype_max).astype(result.dtype)
@@ -115,23 +117,18 @@ class IndiAllskyDenoise(object):
         return img.astype(numpy.float32)
 
     def _local_variance(self, img, ksize=3):
-        """Compute a local variance map using a fixed square window.
+        """Compute a local variance map using a fast OpenCV box blur.
 
-        The variance is computed on the luminance channel using the standard
-        E[x^2] - (E[x])^2 identity.  ``ksize`` is forced to an odd integer
-        >= 1.  Using :func:`astropy.convolution.convolve` with a box kernel
-        keeps the implementation simple and avoids OpenCV dependencies.
-        The returned array is float32, same height/width as ``img``
-        (single-channel).
+        Uses the identity E[x^2] - (E[x])^2 on the luminance channel and
+        relies on `cv2.blur` which is significantly faster than the
+        astropy Box2DKernel approach for typical image sizes.
         """
         if ksize % 2 == 0:
             ksize += 1
         lum = self._compute_luminance(img).astype(numpy.float32)
-        kernel = Box2DKernel(ksize)
-        mean = convolve(lum, kernel, normalize_kernel=True)
-        mean_sq = convolve(lum * lum, kernel, normalize_kernel=True)
+        mean = cv2.blur(lum, (ksize, ksize))
+        mean_sq = cv2.blur(lum * lum, (ksize, ksize))
         var = mean_sq - mean * mean
-        # negative values can arise from rounding; clamp
         numpy.clip(var, 0.0, None, out=var)
         return var
 
@@ -153,52 +150,11 @@ class IndiAllskyDenoise(object):
             pct = float(self.config.get('DENOISE_STAR_PERCENTILE', 99.0))
             sig = float(self.config.get('DENOISE_STAR_SIGMA', 5.0))
             fwhm = float(self.config.get('DENOISE_STAR_FWHM', 3.0))
-            return _pm_star(gray, percentile=pct, threshold_sigma=sig, fwhm=fwhm)
-        except Exception:
-            return numpy.zeros(img.shape[:2], dtype=numpy.float32)
-
-    def _nebula_mask(self, img, star_m=None):
-        """Return a nebula protection mask (float32) for ``img``.
-
-        ``star_m`` may be passed to subtract star pixels; if omitted the
-        mask is generated directly.  Configuration may provide
-        ``DENOISE_NEBULA_PERCENTILE`` (default 60.0) to tune sensitivity.
-        The implementation simply forwards to
-        :func:`indi_allsky.protection_masks.nebula_mask` and catches
-        exceptions, returning an empty mask on failure.
-        """
-        try:
-            from .protection_masks import nebula_mask as _pm_neb
-
-            if img.ndim == 3 and img.shape[2] >= 3:
-                from .denoise import IndiAllskyDenoise  # avoid circular but okay
-                # use same luminance helper
-                gray = self._compute_luminance(img)
-            else:
-                gray = img.astype(numpy.float32)
-
-            pct = float(self.config.get('DENOISE_NEBULA_PERCENTILE', 60.0))
-            return _pm_neb(gray, star_m=star_m, percentile=pct)
-        except Exception:
-            return numpy.zeros(img.shape[:2], dtype=numpy.float32)
-
-
-    def _build_protection_mask(self, img) -> numpy.ndarray:
-        """Compatibility helper: build joint protection mask for ``img``.
-
-        Returns a float32 mask in [0,1] combining star and nebula protection.
-        This mirrors the historical helper expected by tests and callers.
-        """
-        try:
-            # compute luminance for mask generators
-            if img.ndim == 3 and img.shape[2] >= 3:
-                gray = self._compute_luminance(img)
-            else:
-                gray = img.astype(numpy.float32)
-
-            s_m = self._star_mask(img)
-            # Nebula/combined protection removed — return star mask only
-            return s_m.astype(numpy.float32)
+            # expand_radius is the pixel "dial" to enlarge per-star protected
+            # region; read from config key DENOISE_STAR_PROTECT_RADIUS and
+            # forward to protection_masks.star_mask.
+            expand = int(self.config.get('DENOISE_STAR_PROTECT_RADIUS', 0))
+            return star_mask(gray, percentile=pct, threshold_sigma=sig, fwhm=fwhm, expand_radius=expand)
         except Exception:
             return numpy.zeros(img.shape[:2], dtype=numpy.float32)
 
@@ -233,42 +189,10 @@ class IndiAllskyDenoise(object):
         result = sm * den_f + (1.0 - sm) * orig_f
         return numpy.clip(result, 0, dtype_max).astype(original.dtype)
 
-    def _detail_mask(self, lum, threshold=None, dtype_max=1.0,
-                     lap_multiplier=3.0, bright_gate_frac=0.05):
-        """Compute a conservative detail mask (True where detail exists).
-
-        - `lum` should be float32 luminance image.
-        - `threshold` is optional brightness threshold used for gating.
-        - `dtype_max` is the maximum possible value for the dtype.
-        - `lap_multiplier` scales the median-abs-Laplacian to decide detail.
-        - `bright_gate_frac` is fraction of threshold/dtype_max used as gate.
-        """
-        try:
-            lap = cv2.Laplacian(lum, cv2.CV_32F, ksize=3)
-            lap_abs = numpy.abs(lap)
-            lap_median = numpy.median(lap_abs)
-            detail_thresh = max(lap_median * float(lap_multiplier), float(dtype_max) * 0.0005)
-
-            # Brightness gate: prefer using provided threshold; otherwise use
-            # a small fraction of the dtype range to avoid preserving noise.
-            if threshold is None:
-                bright_gate = float(dtype_max) * float(bright_gate_frac)
-            else:
-                bright_gate = max(float(threshold) * float(bright_gate_frac), float(dtype_max) * 0.005)
-
-            bright_pixels = lum > bright_gate
-            return (lap_abs > detail_thresh) & bright_pixels
-        except Exception:
-            return numpy.zeros_like(lum, dtype=bool)
-
     def _get_strength(self):
         """Return the effective denoise strength (int) respecting night/day config."""
-        if self.config.get('USE_NIGHT_COLOR', True):
+        if self.config.get('USE_NIGHT_COLOR', True) or self.night_av[constants.NIGHT_NIGHT]:
             return int(self.config.get('IMAGE_DENOISE_STRENGTH', 3))
-
-        if self.night_av[constants.NIGHT_NIGHT]:
-            return int(self.config.get('IMAGE_DENOISE_STRENGTH', 3))
-
         # daytime
         return int(self.config.get('IMAGE_DENOISE_STRENGTH_DAY', 3))
 
@@ -341,10 +265,9 @@ class IndiAllskyDenoise(object):
 
         # Multi-channel: process each channel independently and merge
         channels = cv2.split(img)
-        # use threads to blur each channel concurrently
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(channels)) as exe:
-            futures = [exe.submit(_blur_channel, ch) for ch in channels]
-            blurred = [f.result() for f in futures]
+        # submit per-channel work to shared thread pool
+        futures = [_thread_pool.submit(_blur_channel, ch) for ch in channels]
+        blurred = [f.result() for f in futures]
         return cv2.merge(blurred)
 
     # ------------------------------------------------------------------
@@ -418,6 +341,9 @@ class IndiAllskyDenoise(object):
         result_f32 = adaptive_blend * blurred.astype(numpy.float32) + (1.0 - adaptive_blend) * scidata.astype(numpy.float32)
         result = numpy.clip(result_f32, 0, dtype_max).astype(scidata.dtype)
 
+        # Match luminance to prevent perceived brightening/dimming
+        result = self._match_luminance(scidata, result)
+
         # Protect stars: blend star regions back to original
         result = self._apply_star_protection(scidata, result, dtype_max)
 
@@ -489,14 +415,13 @@ class IndiAllskyDenoise(object):
             adaptive_blend = blend * adapt
         # -------------------------------------------------------------------------------------
 
-        # compute blurred image; thread channels if colour
+        # compute blurred image; thread channels if colour using shared pool
         if scidata.ndim == 2 or scidata.shape[2] < 2:
             blurred = cv2.GaussianBlur(scidata, (0, 0), sigma)
         else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=scidata.shape[2]) as exe:
-                futures = [exe.submit(cv2.GaussianBlur, scidata[:, :, c], (0, 0), sigma)
-                           for c in range(scidata.shape[2])]
-                channels = [f.result() for f in futures]
+            futures = [_thread_pool.submit(cv2.GaussianBlur, scidata[:, :, c], (0, 0), sigma)
+                       for c in range(scidata.shape[2])]
+            channels = [f.result() for f in futures]
             blurred = numpy.stack(channels, axis=2)
 
         if numpy.issubdtype(scidata.dtype, numpy.integer):
@@ -506,6 +431,9 @@ class IndiAllskyDenoise(object):
 
         result_f32 = adaptive_blend * blurred.astype(numpy.float32) + (1.0 - adaptive_blend) * scidata.astype(numpy.float32)
         result = numpy.clip(result_f32, 0, dtype_max).astype(scidata.dtype)
+
+        # Match luminance to prevent perceived brightening/dimming
+        result = self._match_luminance(scidata, result)
 
         # Protect stars: blend star regions back to original
         result = self._apply_star_protection(scidata, result, dtype_max)
@@ -594,6 +522,9 @@ class IndiAllskyDenoise(object):
         result_f32 = adaptive_blend * denoised.astype(numpy.float32) + (1.0 - adaptive_blend) * scidata.astype(numpy.float32)
         result = numpy.clip(result_f32, 0, dtype_max).astype(scidata.dtype)
 
+        # Match luminance to prevent perceived brightening/dimming
+        result = self._match_luminance(scidata, result)
+
         result = self._apply_star_protection(scidata, result, dtype_max)
 
         avg_blend = float(numpy.mean(adaptive_blend)) if isinstance(adaptive_blend, numpy.ndarray) else adaptive_blend
@@ -616,101 +547,6 @@ class IndiAllskyDenoise(object):
     # ------------------------------------------------------------------
     # Algorithm: Wavelet Denoise (BayesShrink — frequency-domain, best quality)
     # ------------------------------------------------------------------
-    def hot_pixel(self, scidata):
-        """Remove isolated hot pixels while protecting stars.
-
-        We build a conservative "star" mask from a high percentile of
-        local brightness and dilate it by a small radius; any hot-pixel
-        candidates inside that mask are ignored to protect star cores.
-
-        This cannot provide a mathematical 100% guarantee (that would
-        require full source detection and modeling), but it makes the
-        filter extremely unlikely to touch real stars in practice.
-        """
-        # Opt-in guard: hot-pixel filter is disabled by default unless
-        # the runtime config explicitly enables it via `HOTPIXEL_ENABLE`.
-        if not bool(self.config.get('HOTPIXEL_ENABLE', False)):
-            return scidata
-
-        strength = self._get_strength()
-        if strength <= 0:
-            return scidata
-
-        # Per-dtype base threshold for a "hot" pixel
-        if scidata.dtype == numpy.uint8:
-            base_thresh = 15.0
-        elif scidata.dtype in (numpy.uint16, numpy.int16):
-            base_thresh = 15.0 * 257.0
-        else:
-            base_thresh = 15.0 / 255.0
-
-        # Make threshold slightly stronger with strength
-        thresh = float(base_thresh * (0.8 + 0.3 * (min(max(strength, 1), 5) - 1)))
-
-        # Candidate replacement value: small median (3x3)
-        local_med = self._medianBlur(scidata, 3)
-
-        # Use luminance to detect isolated hot pixels across color channels
-        if scidata.ndim == 3 and scidata.shape[2] >= 3:
-            lum = (0.299 * scidata[:, :, 2].astype(numpy.float32) +
-                   0.587 * scidata[:, :, 1].astype(numpy.float32) +
-                   0.114 * scidata[:, :, 0].astype(numpy.float32))
-            local_med_lum = (0.299 * local_med[:, :, 2].astype(numpy.float32) +
-                             0.587 * local_med[:, :, 1].astype(numpy.float32) +
-                             0.114 * local_med[:, :, 0].astype(numpy.float32))
-        else:
-            lum = scidata.astype(numpy.float32)
-            local_med_lum = local_med.astype(numpy.float32)
-
-        lum_diff = (lum - local_med_lum)
-        hot_mask_2d = lum_diff > thresh
-
-        # Require isolation via 3x3 neighbor count on the 2D hot mask
-        hot_u8 = hot_mask_2d.astype(numpy.uint8)
-        neigh_count = cv2.filter2D(hot_u8, -1, numpy.ones((3, 3), dtype=numpy.uint8))
-        isolated_2d = (neigh_count == 1)
-
-        # Build star-protect mask from a high brightness percentile
-        star_pct = int(self.config.get('HOTPIXEL_STAR_PERCENTILE', 95))
-        try:
-            star_threshold = float(numpy.percentile(lum, star_pct))
-        except Exception:
-            star_threshold = float(numpy.max(lum))
-
-        star_mask_2d = lum >= star_threshold
-        protect_radius = int(self.config.get('HOTPIXEL_PROTECT_RADIUS', 2))
-        if protect_radius in _hotpixel_kernel_cache:
-            kern = _hotpixel_kernel_cache[protect_radius]
-        else:
-            kern = numpy.ones((protect_radius * 2 + 1, protect_radius * 2 + 1), dtype=numpy.uint8)
-            _hotpixel_kernel_cache[protect_radius] = kern
-        star_mask_dil = cv2.dilate(star_mask_2d.astype(numpy.uint8), kern).astype(bool)
-
-        # Final 2D replacement mask
-        replace_mask_2d = hot_mask_2d & isolated_2d & (~star_mask_dil)
-
-        if not numpy.any(replace_mask_2d):
-            return scidata
-
-        result = scidata.copy()
-        if scidata.ndim == 3 and scidata.shape[2] >= 3:
-            # parallelise the per-channel replacement
-            with concurrent.futures.ThreadPoolExecutor(max_workers=scidata.shape[2]) as exe:
-                def do_channel(c):
-                    ch = result[:, :, c]
-                    med = local_med[:, :, c]
-                    ch[replace_mask_2d] = med[replace_mask_2d]
-                    result[:, :, c] = ch
-                futures = [exe.submit(do_channel, c) for c in range(scidata.shape[2])]
-                for f in futures: f.result()
-        else:
-            result[replace_mask_2d] = local_med[replace_mask_2d]
-
-        n_replaced = int(numpy.count_nonzero(replace_mask_2d))
-        logger.info('Applied hot-pixel filter (star-safe), strength=%d replaced=%d pixels', strength, n_replaced)
-
-        return result
-
     def wavelet(self, scidata):
         """Apply wavelet-based denoising with BayesShrink adaptive thresholding.
 
@@ -817,7 +653,9 @@ class IndiAllskyDenoise(object):
         if scidata.ndim == 2:
             result = _denoise_channel(scidata)
         else:
-            channels = [_denoise_channel(scidata[:, :, c]) for c in range(scidata.shape[2])]
+            # denoise channels in parallel using shared pool for speed
+            futures = [_thread_pool.submit(_denoise_channel, scidata[:, :, c]) for c in range(scidata.shape[2])]
+            channels = [f.result() for f in futures]
             result = numpy.stack(channels, axis=2)
 
         # Blend: 40% at strength=1 → 100% at strength=5
@@ -829,6 +667,9 @@ class IndiAllskyDenoise(object):
         den_f = result.astype(numpy.float32)
         blended = numpy.clip((blend * den_f) + ((1.0 - blend) * orig_f), 0, float(dtype_max)).astype(orig_dtype)
 
+        # Match luminance to prevent perceived brightening/dimming
+        blended = self._match_luminance(scidata, blended)
+
         # Protect stars: blend star regions back to original
         blended = self._apply_star_protection(scidata, blended, float(dtype_max))
 
@@ -837,3 +678,6 @@ class IndiAllskyDenoise(object):
                 levels, scale, blend, elapsed)
 
         return blended
+
+
+

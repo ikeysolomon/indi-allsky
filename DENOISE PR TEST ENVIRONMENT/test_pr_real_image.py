@@ -38,7 +38,6 @@ from indi_allsky.protection_masks import (
     star_mask,
     _cached_star,
 )
-from indi_allsky.protection_masks import _tile_median_background
 from scipy.ndimage import median_filter as _mfilt
 
 # ---------------------------------------------------------------------------

@@ -93,6 +93,12 @@ class IndiAllskyDenoise(object):
         self.config = config
         self.night_av = night_av
 
+    def _get_dtype_max(self, img):
+        """Return the maximum value for the image dtype."""
+        if numpy.issubdtype(img.dtype, numpy.integer):
+            return float(numpy.iinfo(img.dtype).max)
+        return 1.0
+
     def _match_luminance(self, orig, result):
         """Scale `result` to match the mean luminance of `orig` to avoid
         perceived brightening/dimming after denoising. Returns a copy.
@@ -263,6 +269,54 @@ class IndiAllskyDenoise(object):
         s = max(1, min(self._get_strength(), 5))
         return (float(s) - 1.0) / 4.0
 
+    def _compute_adaptive_blend(self, base_blend, original_image):
+        """Compute an adaptive blend map based on local image variance.
+        
+        Returns a blend array (or scalar) where high-variance regions
+        get reduced blend (variance-based fade), while smooth background
+        areas use the full nominal blend. Stars are masked completely
+        (no blend) in the separate star protection step via
+        _apply_star_protection().
+        """
+        if not bool(self.config.get('ADAPTIVE_BLEND', True)):
+            return base_blend
+        if base_blend <= 0.0 or base_blend >= 1.0:
+            return base_blend
+
+        ksize = int(self.config.get('LOCAL_STATS_KSIZE', 3))
+        var_map = self._local_variance(original_image, ksize)
+        mean_var = float(numpy.mean(var_map)) + 1e-9
+        var_norm = numpy.clip(var_map / mean_var, 0.0, 1.0)
+        adapt = 1.0 - var_norm
+
+        if original_image.ndim == 3:
+            adapt = adapt[:, :, numpy.newaxis]
+
+        return base_blend * adapt
+
+    def _blend_with_original(self, original, processed, blend_map, dtype_max):
+        """Blend processed image with original using blend_map.
+        
+        Args:
+            original: Original image
+            processed: Processed/denoised image
+            blend_map: Blend factor(s) in [0, 1]
+            dtype_max: Maximum value for output dtype
+        
+        Returns:
+            Blended result in original dtype
+        """
+        result_f32 = (blend_map * processed.astype(numpy.float32) +
+                     (1.0 - blend_map) * original.astype(numpy.float32))
+        return numpy.clip(result_f32, 0, dtype_max).astype(original.dtype)
+
+    def _finalize_denoise(self, original, processed, blend_map, dtype_max):
+        """Apply final denoising steps: blending, luminance matching, and star protection."""
+        result = self._blend_with_original(original, processed, blend_map, dtype_max)
+        result = self._match_luminance(original, result)
+        result = self._apply_star_protection(original, result, dtype_max)
+        return result
+
 
     def _get_bilateral_sigma(self):
         """Return (sigmaColor, sigmaSpace) for the bilateral filter."""
@@ -360,74 +414,99 @@ class IndiAllskyDenoise(object):
         Strength range: 1-5.
         """
         strength = self._get_strength()
-
         if strength <= 0:
             return scidata
 
-        # optional downsample to save CPU across all algorithms
+        # Downsample to save CPU, apply filter, then upscale
         down = self._get_downsample()
         img = self._maybe_shrink(scidata, down)
 
         strength = max(1, min(strength, 5))
-        base_ksize = strength * 2 + 1  # always odd: 3,5,7,9,11
-        # apply combined kernel-size adjustment constant
-        ksize = int(round(base_ksize * MEDIAN_KSIZE_ADJUST))
-        if ksize % 2 == 0:
-            ksize += 1
-        ksize = max(3, ksize)
+        ksize = self._compute_median_ksize(strength)
 
         blurred_small = self._medianBlur(img, ksize)
-        if down > 1:
-            blurred = cv2.resize(blurred_small,
-                                 (scidata.shape[1], scidata.shape[0]),
-                                 interpolation=cv2.INTER_LINEAR)
-        else:
-            blurred = blurred_small
+        blurred = (cv2.resize(blurred_small, (scidata.shape[1], scidata.shape[0]),
+                             interpolation=cv2.INTER_LINEAR)
+                  if down > 1 else blurred_small)
 
-        # Blend fraction: 30% at strength=1 → 80% at strength=5
-        t = self._norm_strength()
-        base_blend = float(self.config.get('MEDIAN_BLEND', 0.35 + 0.57 * t))
-        # apply combined blend adjustment constant
+        # Compute blend based on strength and user config
+        norm_strength = self._norm_strength()
+        base_blend = float(self.config.get('MEDIAN_BLEND', 0.35 + 0.57 * norm_strength))
         blend = max(0.0, min(1.0, base_blend * MEDIAN_BLEND_ADJUST))
 
-        # --- adaptive blending using fast local variance map --------------------------------
-        # Poisson noise in astro exposures benefits from reducing the
-        # blend fraction in regions of high local variance (stars,
-        # bright noise) while letting the nominal blend apply in smooth
-        # background areas.  A small fixed window variance map costs only
-        # two cv2.blur() calls and is thus essentially free.
-        adaptive_blend = blend
-        if bool(self.config.get('ADAPTIVE_BLEND', True)) and blend > 0.0 and blend < 1.0:
-            k = int(self.config.get('LOCAL_STATS_KSIZE', 3))
-            var_map = self._local_variance(scidata, k)
-            mean_var = float(numpy.mean(var_map)) + 1e-9
-            var_norm = numpy.clip(var_map / mean_var, 0.0, 1.0)
-            adapt = 1.0 - var_norm
-            if scidata.ndim == 3:
-                adapt = adapt[:, :, numpy.newaxis]
-            adaptive_blend = blend * adapt
-        # -------------------------------------------------------------------------------------
+        # Apply adaptive blending in high-variance regions (stars, bright noise)
+        adaptive_blend = self._compute_adaptive_blend(blend, scidata)
 
-        if numpy.issubdtype(scidata.dtype, numpy.integer):
-            dtype_max = float(numpy.iinfo(scidata.dtype).max)
-        else:
-            dtype_max = 1.0
+        # Finalize: blend, match luminance, protect stars
+        dtype_max = self._get_dtype_max(scidata)
+        result = self._finalize_denoise(scidata, blurred, adaptive_blend, dtype_max)
 
-        # blend using adaptive map if available
-        result_f32 = adaptive_blend * blurred.astype(numpy.float32) + (1.0 - adaptive_blend) * scidata.astype(numpy.float32)
-        result = numpy.clip(result_f32, 0, dtype_max).astype(scidata.dtype)
-
-        # Match luminance to prevent perceived brightening/dimming
-        result = self._match_luminance(scidata, result)
-
-        # Protect stars: blend star regions back to original
-        result = self._apply_star_protection(scidata, result, dtype_max)
-
-        # log average blend for diagnostics
+        # Log diagnostics
         avg_blend = float(numpy.mean(adaptive_blend)) if isinstance(adaptive_blend, numpy.ndarray) else adaptive_blend
-        logger.info('Applying median denoise, ksize=%d base_blend=%.2f avg_blend=%.2f', ksize, blend, avg_blend)
+        logger.info('Applying median denoise, ksize=%d base_blend=%.2f avg_blend=%.2f',
+                   ksize, blend, avg_blend)
 
         return result
+
+    def _compute_median_ksize(self, strength):
+        """Compute median blur kernel size from strength (1-5).
+        
+        Returns an odd integer >= 3, adjusted by MEDIAN_KSIZE_ADJUST constant.
+        """
+        base_ksize = strength * 2 + 1  # Always odd: 3, 5, 7, 9, 11
+        ksize = int(round(base_ksize * MEDIAN_KSIZE_ADJUST))
+        ksize = ksize + 1 if ksize % 2 == 0 else ksize
+        return max(3, ksize)
+
+    def _compute_gaussian_sigma(self, strength):
+        """Compute Gaussian blur sigma from strength (1-5).
+        
+        Returns adjusted sigma value, configurable per strength level
+        or globally via config keys.
+        """
+        default_sigma_map = {1: 1.0, 2: 1.8, 3: 3.0, 4: 4.2, 5: 5.8}
+        sigma = float(self.config.get('GAUSSIAN_SIGMA',
+                                      default_sigma_map.get(strength, 3.0)))
+        return sigma * GAUSSIAN_SIGMA_ADJUST
+
+    def _apply_gaussian_blur(self, img, sigma):
+        """Apply Gaussian blur to single or multi-channel image.
+        
+        Uses threading for multi-channel images to distribute work.
+        """
+        if img.ndim == 2 or img.shape[2] < 2:
+            return cv2.GaussianBlur(img, (0, 0), sigma)
+
+        # Multi-channel: blur each channel on thread pool
+        futures = [_thread_pool.submit(cv2.GaussianBlur, img[:, :, c], (0, 0), sigma)
+                  for c in range(img.shape[2])]
+        channels = [f.result() for f in futures]
+        return numpy.stack(channels, axis=2)
+
+    def _apply_bilateral_filter(self, img, diameter, sigma_color, sigma_space, dtype_max):
+        """Apply bilateral filter, handling dtype conversion if needed.
+        
+        Returns:
+            (filtered_image, needs_conversion_flag)
+        """
+        needs_conversion = img.dtype not in (numpy.uint8, numpy.float32)
+
+        if needs_conversion:
+            # bilateralFilter supports uint8 and float32.
+            # OpenCV float32 bilateral is optimized for 0.0-1.0 range.
+            # Normalize to 0-1, scale sigmaColor by 1/255 (user-facing sigma
+            # is calibrated for 0-255 range). sigmaSpace is in pixel units,
+            # no adjustment needed.
+            sigma_color_norm = float(sigma_color) / 255.0
+            img_f32 = img.astype(numpy.float32) / dtype_max
+            filtered_f32 = cv2.bilateralFilter(img_f32, diameter, sigma_color_norm,
+                                              float(sigma_space))
+            filtered = numpy.clip(numpy.rint(filtered_f32 * dtype_max),
+                                 0, float(dtype_max)).astype(img.dtype)
+        else:
+            filtered = cv2.bilateralFilter(img, diameter, sigma_color, sigma_space)
+
+        return filtered, needs_conversion
 
 
     # ------------------------------------------------------------------
@@ -454,74 +533,40 @@ class IndiAllskyDenoise(object):
         Strength range: 1-5.
         """
         strength = self._get_strength()
-
         if strength <= 0:
             return scidata
 
-        # downsample<br>
+        # Downsample to save CPU, apply filter, then upscale
         down = self._get_downsample()
         img = self._maybe_shrink(scidata, down)
 
         strength = max(1, min(strength, 5))
+        sigma = self._compute_gaussian_sigma(strength)
 
-        # Sigma per strength level.  Configurable via GAUSSIAN_SIGMA
-        # (overrides the whole map) or GAUSSIAN_SIGMA_MAP (per-level).
-        default_sigma_map = {1: 1.0, 2: 1.8, 3: 3.0, 4: 4.2, 5: 5.8}
-        sigma = float(self.config.get('GAUSSIAN_SIGMA', default_sigma_map.get(strength, 3.0)))
-        # apply global gaussian sigma adjustment
-        sigma = sigma * GAUSSIAN_SIGMA_ADJUST
+        # Blur single or multi-channel image
+        blurred_small = self._apply_gaussian_blur(img, sigma)
 
-        # perform blur on possibly reduced image
-        if img.ndim == 2 or img.shape[2] < 2:
-            blurred_small = cv2.GaussianBlur(img, (0, 0), sigma)
-        else:
-            futures = [_thread_pool.submit(cv2.GaussianBlur, img[:, :, c], (0, 0), sigma)
-                       for c in range(img.shape[2])]
-            channels = [f.result() for f in futures]
-            blurred_small = numpy.stack(channels, axis=2)
+        # Upscale if we downsampled
+        blurred = (cv2.resize(blurred_small, (scidata.shape[1], scidata.shape[0]),
+                             interpolation=cv2.INTER_LINEAR)
+                  if down > 1 else blurred_small)
 
-        if down > 1:
-            blurred = cv2.resize(blurred_small,
-                                 (scidata.shape[1], scidata.shape[0]),
-                                 interpolation=cv2.INTER_LINEAR)
-        else:
-            blurred = blurred_small
-
-        # Blend fraction: 20% at strength=1 → 70% at strength=5
-        t = self._norm_strength()
-        base_blend = float(self.config.get('GAUSSIAN_BLEND', 0.25 + 0.55 * t))
-        # apply global gaussian blend adjustment
+        # Compute blend based on strength and user config
+        norm_strength = self._norm_strength()
+        base_blend = float(self.config.get('GAUSSIAN_BLEND', 0.25 + 0.55 * norm_strength))
         blend = max(0.0, min(1.0, base_blend * GAUSSIAN_BLEND_ADJUST))
 
-        # --- adaptive blending using fast local variance map --------------------------------
-        adaptive_blend = blend
-        if bool(self.config.get('ADAPTIVE_BLEND', True)) and blend > 0.0 and blend < 1.0:
-            k = int(self.config.get('LOCAL_STATS_KSIZE', 3))
-            var_map = self._local_variance(scidata, k)
-            mean_var = float(numpy.mean(var_map)) + 1e-9
-            var_norm = numpy.clip(var_map / mean_var, 0.0, 1.0)
-            adapt = 1.0 - var_norm
-            if scidata.ndim == 3:
-                adapt = adapt[:, :, numpy.newaxis]
-            adaptive_blend = blend * adapt
-        # -------------------------------------------------------------------------------------
+        # Apply adaptive blending in high-variance regions
+        adaptive_blend = self._compute_adaptive_blend(blend, scidata)
 
-        if numpy.issubdtype(scidata.dtype, numpy.integer):
-            dtype_max = float(numpy.iinfo(scidata.dtype).max)
-        else:
-            dtype_max = 1.0
+        # Finalize: blend, match luminance, protect stars
+        dtype_max = self._get_dtype_max(scidata)
+        result = self._finalize_denoise(scidata, blurred, adaptive_blend, dtype_max)
 
-        result_f32 = adaptive_blend * blurred.astype(numpy.float32) + (1.0 - adaptive_blend) * scidata.astype(numpy.float32)
-        result = numpy.clip(result_f32, 0, dtype_max).astype(scidata.dtype)
-
-        # Match luminance to prevent perceived brightening/dimming
-        result = self._match_luminance(scidata, result)
-
-        # Protect stars: blend star regions back to original
-        result = self._apply_star_protection(scidata, result, dtype_max)
-
+        # Log diagnostics
         avg_blend = float(numpy.mean(adaptive_blend)) if isinstance(adaptive_blend, numpy.ndarray) else adaptive_blend
-        logger.info('Applying gaussian denoise, sigma=%.1f base_blend=%.2f avg_blend=%.2f', sigma, blend, avg_blend)
+        logger.info('Applying gaussian denoise, sigma=%.1f base_blend=%.2f avg_blend=%.2f',
+                   sigma, blend, avg_blend)
 
         return result
 
@@ -548,85 +593,45 @@ class IndiAllskyDenoise(object):
         if strength <= 0:
             return scidata
 
-        # downsample to accelerate filter
+        # Downsample to accelerate filter, apply filter, then upscale
         down = self._get_downsample()
         img = self._maybe_shrink(scidata, down)
 
         strength = max(1, min(strength, 5))
-
-        d = strength * 2 + 1
+        diameter = strength * 2 + 1
         sigma_color, sigma_space = self._get_bilateral_sigma()
 
-        # blend fraction like other algorithms
-        t = self._norm_strength()
-        blend = float(self.config.get('BILATERAL_BLEND', 0.25 + 0.55 * t))
-        # boost blend by fixed constant
-        blend = max(0.0, min(1.0, blend * BILATERAL_BLEND_BUMP))
+        # Compute blend based on strength and user config
+        norm_strength = self._norm_strength()
+        base_blend = float(self.config.get('BILATERAL_BLEND', 0.25 + 0.55 * norm_strength))
+        blend = max(0.0, min(1.0, base_blend * BILATERAL_BLEND_BUMP))
 
-        adaptive_blend = blend
-        if bool(self.config.get('ADAPTIVE_BLEND', True)) and 0.0 < blend < 1.0:
-            k = int(self.config.get('LOCAL_STATS_KSIZE', 3))
-            var_map = self._local_variance(scidata, k)
-            mean_var = float(numpy.mean(var_map)) + 1e-9
-            var_norm = numpy.clip(var_map / mean_var, 0.0, 1.0)
-            adapt = 1.0 - var_norm
-            if scidata.ndim == 3:
-                adapt = adapt[:, :, numpy.newaxis]
-            adaptive_blend = blend * adapt
+        # Apply adaptive blending in high-variance regions
+        adaptive_blend = self._compute_adaptive_blend(blend, scidata)
 
-        needs_conversion = img.dtype not in (numpy.uint8, numpy.float32)
-        
-        # Compute dtype_max once for use in blend and logging
-        if numpy.issubdtype(img.dtype, numpy.integer):
-            dtype_max = numpy.float32(numpy.iinfo(img.dtype).max)
-        else:
-            dtype_max = numpy.float32(1.0)
+        # Apply bilateral filter with dtype conversion if needed
+        dtype_max = self._get_dtype_max(img)
+        denoised_small, needs_conversion = self._apply_bilateral_filter(
+            img, diameter, sigma_color, sigma_space, dtype_max)
 
-        # perform filter on downsized image
-        if needs_conversion:
-            # bilateralFilter supports uint8 and float32.
-            # OpenCV float32 bilateral is optimized for 0.0-1.0 range.
-            # Normalize data to 0-1, scale sigmaColor to match (divide
-            # by 255 since user-facing sigma is calibrated for 0-255).
-            # sigmaSpace is in pixel units and needs no adjustment.
-            sigma_color_norm = float(sigma_color) / 255.0
-            img_f32 = img.astype(numpy.float32) / dtype_max
-            denoised_small_f32 = cv2.bilateralFilter(img_f32, d, sigma_color_norm, float(sigma_space))
-            denoised_small = numpy.clip(numpy.rint(denoised_small_f32 * dtype_max), 0, float(dtype_max)).astype(img.dtype)
-        else:
-            denoised_small = cv2.bilateralFilter(img, d, sigma_color, sigma_space)
+        # Upscale if we downsampled
+        denoised = (cv2.resize(denoised_small, (scidata.shape[1], scidata.shape[0]),
+                              interpolation=cv2.INTER_LINEAR)
+                   if down > 1 else denoised_small)
 
-        if down > 1:
-            denoised = cv2.resize(denoised_small,
-                                  (scidata.shape[1], scidata.shape[0]),
-                                  interpolation=cv2.INTER_LINEAR)
-        else:
-            denoised = denoised_small
+        # Finalize: blend, match luminance, protect stars
+        dtype_max_orig = self._get_dtype_max(scidata)
+        result = self._finalize_denoise(scidata, denoised, adaptive_blend, dtype_max_orig)
 
-        # blend with adaptive map and protect stars
-        if numpy.issubdtype(scidata.dtype, numpy.integer):
-            dtype_max = float(numpy.iinfo(scidata.dtype).max)
-        else:
-            dtype_max = 1.0
-
-        result_f32 = adaptive_blend * denoised.astype(numpy.float32) + (1.0 - adaptive_blend) * scidata.astype(numpy.float32)
-        result = numpy.clip(result_f32, 0, dtype_max).astype(scidata.dtype)
-
-        # Match luminance to prevent perceived brightening/dimming
-        result = self._match_luminance(scidata, result)
-
-        result = self._apply_star_protection(scidata, result, dtype_max)
-
+        # Log diagnostics
         avg_blend = float(numpy.mean(adaptive_blend)) if isinstance(adaptive_blend, numpy.ndarray) else adaptive_blend
-        log_msg = 'Applying bilateral denoise, d=%d sigmaColor=%d sigmaSpace=%d base_blend=%.2f avg_blend=%.2f'
+        log_msg = ('Applying bilateral denoise, d=%d sigmaColor=%d sigmaSpace=%d '
+                  'base_blend=%.2f avg_blend=%.2f')
         if needs_conversion:
             log_msg += ' (float32 converted)'
-        logger.info(log_msg, d, sigma_color, sigma_space, blend, avg_blend)
+        logger.info(log_msg, diameter, sigma_color, sigma_space, blend, avg_blend)
 
         return result
-
-
-        # end bilateral
 
     # ------------------------------------------------------------------
     # Algorithm: Non-local Means (patch-based)
@@ -780,19 +785,14 @@ class IndiAllskyDenoise(object):
         else:
             result = result_small
 
-        # Blend: 40% at strength=1 → 100% at strength=5
-        t = self._norm_strength()
-        blend = float(self.config.get('WAVELET_BLEND', 0.46 + 0.54 * t))
+        # Compute blend based on strength
+        norm_strength = self._norm_strength()
+        blend = float(self.config.get('WAVELET_BLEND', 0.46 + 0.54 * norm_strength))
         blend = max(0.0, min(1.0, blend))
 
-        orig_f = scidata.astype(numpy.float32)
-        den_f = result.astype(numpy.float32)
-        blended = numpy.clip((blend * den_f) + ((1.0 - blend) * orig_f), 0, float(dtype_max)).astype(orig_dtype)
-
-        # Match luminance to prevent perceived brightening/dimming
+        # Blend, match luminance, protect stars
+        blended = self._blend_with_original(scidata, result, blend, float(dtype_max))
         blended = self._match_luminance(scidata, blended)
-
-        # Protect stars: blend star regions back to original
         blended = self._apply_star_protection(scidata, blended, float(dtype_max))
 
         elapsed = time.time() - start_t
@@ -800,6 +800,3 @@ class IndiAllskyDenoise(object):
                 down, levels, scale, blend, elapsed)
 
         return blended
-
-
-

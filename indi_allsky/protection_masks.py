@@ -24,7 +24,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 # photutils imports; this package must be installed.
-from astropy.stats import sigma_clipped_stats
 from photutils.detection import DAOStarFinder
 from astropy.convolution import Gaussian2DKernel
 
@@ -60,57 +59,99 @@ __all__ = [
 
 _cache_max_entries = 8
 
+def _estimate_background_std(data: np.ndarray) -> float:
+    """Estimate background std using sigma clipping, with fallback to np.std."""
+    try:
+        from astropy.stats import sigma_clipped_stats
+        _, _, bkg_std = sigma_clipped_stats(data, sigma=SIGMA_CLIP_SIGMA)
+        return float(bkg_std)
+    except Exception:
+        return float(np.std(data))
+
+
+def _apply_star_dilation(mask: np.ndarray, expand_radius: int | None) -> np.ndarray:
+    """Expand star protection circles by distance transform.
+    
+    Args:
+        mask: float32 array with 1.0=sky, 0.0=protected
+        expand_radius: pixels to expand protection zone
+    
+    Returns:
+        Modified mask with expanded protected regions
+    """
+    if not expand_radius or int(expand_radius) <= 0:
+        return mask
+
+    try:
+        r = int(expand_radius)
+        # Protect all pixels within distance r from star cores
+        prot_bin = (mask < PROTECTED_PIXEL_THRESHOLD).astype(np.uint8)
+        h, w = prot_bin.shape
+        max_r = max(h, w)
+        if r > max_r:
+            r = max_r
+        src = ((prot_bin == 0).astype(np.uint8) * 255)
+        dt = cv2.distanceTransform(src, cv2.DIST_L2, DISTANCE_TRANSFORM_KSIZE)
+        dil = (dt <= float(r)).astype(np.uint8)
+        mask[dil.astype(bool)] = 0.0
+    except Exception:
+        pass
+
+    return mask
+
+
+def _paint_stars_from_table(tbl, shape: tuple, fwhm: float) -> np.ndarray:
+    """Paint detected stars as convolved impulses.
+    
+    Args:
+        tbl: Astropy table with xcentroid, ycentroid columns
+        shape: (height, width) of output mask
+        fwhm: full-width half-max of stars for stamp generation
+    
+    Returns:
+        float32 mask with painted stars (values 0-1+)
+    """
+    impulses = np.zeros(shape, dtype=np.float32)
+    if tbl is None or len(tbl) == 0:
+        return impulses
+
+    xs = np.rint(tbl['xcentroid']).astype(int)
+    ys = np.rint(tbl['ycentroid']).astype(int)
+    xs = np.clip(xs, 0, shape[1] - 1)
+    ys = np.clip(ys, 0, shape[0] - 1)
+    impulses[ys, xs] = 1.0
+
+    stamp = _make_stamp(fwhm)
+    mask = cv2.filter2D(impulses, -1, stamp, borderType=cv2.BORDER_CONSTANT)
+    return mask
+
+
 # LRU cache of star masks keyed by image bytes plus parameters
 @functools.lru_cache(maxsize=_cache_max_entries)
 def _cached_star(key: bytes, percentile: float, threshold_sigma: float, fwhm: float, expand_radius: int | None, shape):
     # key is raw bytes; shape is needed to reshape back
     data = np.frombuffer(key, dtype=np.float32).reshape(shape)
-    # profiling timers (micro-optimized regions)
+    # profiling timers
     t_start = time.perf_counter()
     prof_sigma = prof_dao = prof_stamp = 0.0
-    # Use robust sigma estimate to avoid bright sources inflating the std
-    try:
-        from astropy.stats import sigma_clipped_stats
-        t0 = time.perf_counter()
-        _, _, bkg_std = sigma_clipped_stats(data, sigma=SIGMA_CLIP_SIGMA)
-        prof_sigma = time.perf_counter() - t0
-    except Exception:
-        t0 = time.perf_counter()
-        bkg_std = float(np.std(data))
-        prof_sigma = time.perf_counter() - t0
 
+    # Estimate background std (robust against bright sources)
+    t0 = time.perf_counter()
+    bkg_std = _estimate_background_std(data)
+    prof_sigma = time.perf_counter() - t0
+
+    # Detect stars using DAOStarFinder
     t0 = time.perf_counter()
     daofind = DAOStarFinder(fwhm=fwhm, threshold=threshold_sigma * bkg_std)
     tbl = daofind(data)
     prof_dao = time.perf_counter() - t0
 
-    mask = np.zeros(shape, np.float32)
-    if tbl is not None and len(tbl) > 0:
-        # Vectorized stamping: build impulse image and convolve with stamp
-        stamp = _make_stamp(fwhm) if '_make_stamp' in globals() else None
-        if stamp is None:
-            stddev = fwhm / FWHM_TO_STDDEV
-            radius = int(np.ceil(fwhm * FWHM_RADIUS_MULTIPLIER))
-            kernel = Gaussian2DKernel(x_stddev=stddev, x_size=2 * radius + 1,
-                                      y_size=2 * radius + 1)
-            stamp = (kernel.array / kernel.array.max()).astype(np.float32)
+    # Paint detected stars as convolved impulses
+    t0 = time.perf_counter()
+    mask = _paint_stars_from_table(tbl, shape, fwhm)
+    prof_stamp = time.perf_counter() - t0
 
-        # Build impulses (1 at rounded centroid locations)
-        impulses = np.zeros(shape, dtype=np.float32)
-        xs = np.rint(tbl['xcentroid']).astype(int)
-        ys = np.rint(tbl['ycentroid']).astype(int)
-        # Clip to image bounds
-        xs = np.clip(xs, 0, shape[1] - 1)
-        ys = np.clip(ys, 0, shape[0] - 1)
-        impulses[ys, xs] = 1.0
-
-        t1 = time.perf_counter()
-        # Convolve impulses with stamp to paint stars; use OpenCV for speed
-        # cv2.filter2D will sum overlapping stamps; we'll clip later
-        mask = cv2.filter2D(impulses, -1, stamp, borderType=cv2.BORDER_CONSTANT)
-        prof_stamp = time.perf_counter() - t1
-
-    # profiling record for diagnostics (cached result of this call)
+    # Record profiling diagnostics (cached result of this call)
     t_end = time.perf_counter()
     try:
         _last_profile['sigma_time'] = prof_sigma
@@ -122,26 +163,11 @@ def _cached_star(key: bytes, percentile: float, threshold_sigma: float, fwhm: fl
     except Exception:
         pass
 
-    # Return inverted mask: 1.0 = sky (unprotected), 0.0 = protected (stars)
+    # Invert mask: 1.0 = sky (unprotected), 0.0 = protected (stars)
     out = np.clip(1.0 - mask, 0.0, 1.0).astype(np.float32)
 
-    # Apply star protection dilation: controlled by DEFAULT_EXPAND_RADIUS (line 35).
-    # This expands the protected circle per-star to reduce denoising artifacts.
-    try:
-        if expand_radius and int(expand_radius) > 0:
-            r = int(expand_radius)
-            prot_bin = (out < PROTECTED_PIXEL_THRESHOLD).astype(np.uint8)
-            h, w = prot_bin.shape
-            max_r = max(h, w)
-            if r > max_r:
-                r = max_r
-            # Use distance-transform for all radii (consistent, efficient)
-            src = ((prot_bin == 0).astype(np.uint8) * 255)
-            dt = cv2.distanceTransform(src, cv2.DIST_L2, DISTANCE_TRANSFORM_KSIZE)
-            dil = (dt <= float(r)).astype(np.uint8)
-            out[dil.astype(bool)] = 0.0
-    except Exception:
-        pass
+    # Expand star protection zones to reduce denoising artifacts
+    out = _apply_star_dilation(out, expand_radius)
 
     return out
 
@@ -200,47 +226,6 @@ def star_mask(img: np.ndarray, percentile: float = DEFAULT_PERCENTILE, expand_ra
     fwhm = pu_kwargs.get('fwhm', DEFAULT_FWHM)
     # LRU cache call (include expand_radius in cache key)
     return _cached_star(key_bytes, percentile, sig, fwhm, int(expand_radius), shape)
-
-
-def _tile_median_background(img: np.ndarray, box_size: int = 128, filter_size=(5, 5)) -> np.ndarray:
-    """Compute a coarse tiled median background and upsample to image size.
-
-    Divides the image into tiles of ``box_size`` and computes each tile's
-    median, then resizes and lightly blurs to produce a smooth background
-    map matching ``img``'s shape.  This lightweight helper is used for
-    visualisation and ridge-tracing in the PR test harness.
-    """
-    data = img if img.dtype == np.float32 else img.astype(np.float32)
-    h, w = data.shape
-    nbh = (h + box_size - 1) // box_size
-    nbc = (w + box_size - 1) // box_size
-    pad_h = nbh * box_size - h
-    pad_w = nbc * box_size - w
-    if pad_h or pad_w:
-        data_p = np.pad(data, ((0, pad_h), (0, pad_w)), mode='edge')
-    else:
-        data_p = data
-
-    # compute medians per tile
-    med = np.zeros((nbh, nbc), dtype=np.float32)
-    for i in range(nbh):
-        for j in range(nbc):
-            y0 = i * box_size
-            x0 = j * box_size
-            med[i, j] = float(np.median(data_p[y0:y0 + box_size, x0:x0 + box_size]))
-
-    # Upsample and crop
-    med_up = cv2.resize(med, (nbc * box_size, nbh * box_size), interpolation=cv2.INTER_LINEAR)
-    med_up = med_up[:h, :w]
-
-    kx, ky = filter_size if filter_size is not None else (3, 3)
-    kx = max(1, int(kx))
-    ky = max(1, int(ky))
-    bg = cv2.blur(med_up, (kx, ky))
-    return bg.astype(np.float32)
-
-# Note: Nebula / Milky-Way nebulosity masking was experimented with but removed. 
-# If needed in future, implement a separate module due to the extreme number of variables needed. 
 
 
 def _make_stamp(fwhm: float) -> np.ndarray:
@@ -313,10 +298,7 @@ def fast_star_mask(img: np.ndarray, downsample: int = 4, patch_size: int = 32,
     hh, hw = sh // 2, sw // 2
 
     # Estimate background std on downsampled image for thresholding
-    try:
-        _, _, bkg_std = sigma_clipped_stats(small, sigma=SIGMA_CLIP_SIGMA)
-    except Exception:
-        bkg_std = float(np.std(small)) + 1e-9
+    bkg_std = _estimate_background_std(small)
     dao_thresh = threshold_sigma * bkg_std
 
     daofind = DAOStarFinder(fwhm=fwhm, threshold=dao_thresh)
@@ -353,24 +335,9 @@ def fast_star_mask(img: np.ndarray, downsample: int = 4, patch_size: int = 32,
 
     out = np.clip(1.0 - mask, 0.0, 1.0).astype(np.float32)
 
-    # Apply star protection dilation: controlled by DEFAULT_EXPAND_RADIUS (line 35).
-    # This expands the protected circle per-star to reduce denoising artifacts.
-    try:
-        if expand_radius is None:
-            expand_radius = DEFAULT_EXPAND_RADIUS
-        if expand_radius and int(expand_radius) > 0:
-            r = int(expand_radius)
-            prot_bin = (out < PROTECTED_PIXEL_THRESHOLD).astype(np.uint8)
-            h, w = prot_bin.shape
-            max_r = max(h, w)
-            if r > max_r:
-                r = max_r
-            # use distance transform for all radii to avoid magic numbers
-            src = ((prot_bin == 0).astype(np.uint8) * 255)
-            dt = cv2.distanceTransform(src, cv2.DIST_L2, DISTANCE_TRANSFORM_KSIZE)
-            dil = (dt <= float(r)).astype(np.uint8)
-            out[dil.astype(bool)] = 0.0
-    except Exception:
-        pass
+    # Expand star protection zones to reduce denoising artifacts
+    if expand_radius is None:
+        expand_radius = DEFAULT_EXPAND_RADIUS
+    out = _apply_star_dilation(out, expand_radius)
 
     return out

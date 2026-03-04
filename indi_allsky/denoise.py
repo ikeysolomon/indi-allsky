@@ -322,6 +322,14 @@ class IndiAllskyDenoise(object):
             b8 = cv2.medianBlur(ch8, ksize)
             return (b8.astype(numpy.float32) / 255.0).astype(ch.dtype)
 
+        # Fast path for small kernels on small images: skip thread overhead
+        if ksize <= 5 and img.shape[0] < 512 and img.shape[1] < 512:
+            if img.ndim == 2:
+                return _blur_channel(img)
+            channels = cv2.split(img)
+            blurred = [_blur_channel(ch) for ch in channels]
+            return cv2.merge(blurred)
+
         # Single-channel image
         if img.ndim == 2:
             return _blur_channel(img)
@@ -498,15 +506,6 @@ class IndiAllskyDenoise(object):
             adaptive_blend = blend * adapt
         # -------------------------------------------------------------------------------------
 
-        # compute blurred image; thread channels if colour using shared pool
-        if scidata.ndim == 2 or scidata.shape[2] < 2:
-            blurred = cv2.GaussianBlur(scidata, (0, 0), sigma)
-        else:
-            futures = [_thread_pool.submit(cv2.GaussianBlur, scidata[:, :, c], (0, 0), sigma)
-                       for c in range(scidata.shape[2])]
-            channels = [f.result() for f in futures]
-            blurred = numpy.stack(channels, axis=2)
-
         if numpy.issubdtype(scidata.dtype, numpy.integer):
             dtype_max = float(numpy.iinfo(scidata.dtype).max)
         else:
@@ -576,6 +575,12 @@ class IndiAllskyDenoise(object):
             adaptive_blend = blend * adapt
 
         needs_conversion = img.dtype not in (numpy.uint8, numpy.float32)
+        
+        # Compute dtype_max once for use in blend and logging
+        if numpy.issubdtype(img.dtype, numpy.integer):
+            dtype_max = numpy.float32(numpy.iinfo(img.dtype).max)
+        else:
+            dtype_max = numpy.float32(1.0)
 
         # perform filter on downsized image
         if needs_conversion:
@@ -584,19 +589,11 @@ class IndiAllskyDenoise(object):
             # Normalize data to 0-1, scale sigmaColor to match (divide
             # by 255 since user-facing sigma is calibrated for 0-255).
             # sigmaSpace is in pixel units and needs no adjustment.
-            if numpy.issubdtype(img.dtype, numpy.integer):
-                dtype_max = numpy.float32(numpy.iinfo(img.dtype).max)
-            else:
-                dtype_max = numpy.float32(1.0)
-
             sigma_color_norm = float(sigma_color) / 255.0
             img_f32 = img.astype(numpy.float32) / dtype_max
-
-            logger.info('Applying bilateral denoise (float32 0-1), d=%d sigmaColor=%.4f sigmaSpace=%d base_blend=%.2f', d, sigma_color_norm, sigma_space, blend)
             denoised_small_f32 = cv2.bilateralFilter(img_f32, d, sigma_color_norm, float(sigma_space))
             denoised_small = numpy.clip(numpy.rint(denoised_small_f32 * dtype_max), 0, float(dtype_max)).astype(img.dtype)
         else:
-            logger.info('Applying bilateral denoise, d=%d sigmaColor=%d sigmaSpace=%d base_blend=%.2f', d, sigma_color, sigma_space, blend)
             denoised_small = cv2.bilateralFilter(img, d, sigma_color, sigma_space)
 
         if down > 1:
@@ -621,7 +618,10 @@ class IndiAllskyDenoise(object):
         result = self._apply_star_protection(scidata, result, dtype_max)
 
         avg_blend = float(numpy.mean(adaptive_blend)) if isinstance(adaptive_blend, numpy.ndarray) else adaptive_blend
-        logger.info('Applying bilateral denoise, d=%d sigmaColor=%d sigmaSpace=%d base_blend=%.2f avg_blend=%.2f', d, sigma_color, sigma_space, blend, avg_blend)
+        log_msg = 'Applying bilateral denoise, d=%d sigmaColor=%d sigmaSpace=%d base_blend=%.2f avg_blend=%.2f'
+        if needs_conversion:
+            log_msg += ' (float32 converted)'
+        logger.info(log_msg, d, sigma_color, sigma_space, blend, avg_blend)
 
         return result
 

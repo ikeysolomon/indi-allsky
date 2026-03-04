@@ -213,21 +213,23 @@ def run():
     # Nebula masking removed from pipeline (no diffuse-mask generated)
 
     # ===== 3. Star overlay (combined mask removed) =====
-    print('\n--- 3. Star overlay (combined removed) ---')
+    print('\n--- 2. Star overlay (combined removed) ---')
     # Use the star mask directly for contour/heatmap overlays
+    t0_overlay = time.perf_counter()
     overlay = _overlay_contour(img, 1.0 - s_mask, colour=(0, 255, 0), thickness=2)
     _save('real_06_overlay.png', overlay)
+    t_overlay = time.perf_counter() - t0_overlay
+    print(f'  Time: {t_overlay * 1000:.0f} ms')
 
     # heatmap overlays removed per request
 
-    # ===== 5. All denoise methods (strength 5) with protection =====
+    # ===== 3. All denoise methods (strength 5) with protection =====
     from indi_allsky.denoise import IndiAllskyDenoise
 
     denoise_cfg = {
         'IMAGE_DENOISE_STRENGTH': 5,
         'USE_NIGHT_COLOR': True,
         'DENOISE_PROTECT_STARS': True,
-        
         'DENOISE_STAR_PERCENTILE': 99.0,
         'DENOISE_STAR_SIGMA': 3.0,
         'DENOISE_STAR_FWHM': 4.5,
@@ -244,11 +246,13 @@ def run():
         ('gaussian_blur', d.gaussian_blur),
         ('median_blur',   d.median_blur),
     ]
+    timings = {}
     for idx, (name, fn) in enumerate(methods):
-        print(f'\n--- 5{chr(97+idx)}. {name} (strength 5) with protection ---')
+        print(f'\n--- 3{chr(97+idx)}. {name} (strength 5) with protection ---')
         t0 = time.perf_counter()
         denoised = fn(img.copy())
         elapsed = time.perf_counter() - t0
+        timings[name] = elapsed
 
         results.check(f'{name} output shape', denoised.shape == img.shape)
         results.check(f'{name} output dtype', denoised.dtype == img.dtype)
@@ -259,7 +263,9 @@ def run():
         # Save the denoised output itself (user requested methods returned)
         suffix = f'real_08{chr(97+idx)}_{name}.png'
         _save(suffix, denoised)
+        # report timing immediately after the section
         print(f'  Time: {elapsed * 1000:.0f} ms  ({n_diff:,} px changed)')
+
 
     # Ridge-trace visualization removed (was part of Milky-Way/nebula mask)
     # No ridge computation or drawing is performed in the PR harness.
@@ -322,6 +328,7 @@ PR images ({os.path.relpath(OUT_DIR, _project_root)}):
   real_08b_bilateral.png          Denoised output: bilateral
   real_08c_gaussian_blur.png      Denoised output: gaussian_blur
   real_08d_median_blur.png        Denoised output: median_blur
+
 
 """))
 

@@ -84,6 +84,7 @@ class IndiAllskyDenoise(object):
       * MEDIAN_BLEND
       * BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE
       * DENOISE_STAR_* (star protection parameters)
+      * DENOISE_DOWNSAMPLE (global integer shrink factor — see wavelet doc)
       * ADAPTIVE_BLEND (enable/disable variance‑based blend adaptivity)
       * LOCAL_STATS_KSIZE (window size for variance map, odd integer >=3)
     """
@@ -137,6 +138,33 @@ class IndiAllskyDenoise(object):
                     0.587 * img[:, :, 1].astype(numpy.float32) +
                     0.114 * img[:, :, 0].astype(numpy.float32))
         return img.astype(numpy.float32)
+
+    # ------------------------------------------------------------------
+    # downsampling helpers
+    # ------------------------------------------------------------------
+    def _get_downsample(self, for_wavelet: bool = False) -> int:
+        """Return integer downsample factor from config.
+
+        * ``DENOISE_DOWNSAMPLE`` is a general key that applies to all
+          algorithms.
+        * ``WAVELET_DOWNSAMPLE`` is honoured when ``for_wavelet`` is True
+          and takes precedence (for backwards compatibility).
+        """
+        if for_wavelet and 'WAVELET_DOWNSAMPLE' in self.config:
+            return int(self.config['WAVELET_DOWNSAMPLE'])
+        return int(self.config.get('DENOISE_DOWNSAMPLE', 1))
+
+    def _maybe_shrink(self, img: numpy.ndarray, factor: int) -> numpy.ndarray:
+        """Return a reduced version of ``img`` by ``factor``.
+
+        If ``factor`` &le; 1 the original array is returned.  Reduction uses
+        ``cv2.INTER_AREA``; caller must upsample the result later if
+        necessary.
+        """
+        if factor <= 1:
+            return img
+        h, w = img.shape[:2]
+        return cv2.resize(img, (w // factor, h // factor), interpolation=cv2.INTER_AREA)
 
     def _local_variance(self, img, ksize=3):
         """Compute a local variance map using a fast OpenCV box blur.
@@ -328,6 +356,10 @@ class IndiAllskyDenoise(object):
         if strength <= 0:
             return scidata
 
+        # optional downsample to save CPU across all algorithms
+        down = self._get_downsample()
+        img = self._maybe_shrink(scidata, down)
+
         strength = max(1, min(strength, 5))
         base_ksize = strength * 2 + 1  # always odd: 3,5,7,9,11
         # apply combined kernel-size adjustment constant
@@ -336,7 +368,13 @@ class IndiAllskyDenoise(object):
             ksize += 1
         ksize = max(3, ksize)
 
-        blurred = self._medianBlur(scidata, ksize)
+        blurred_small = self._medianBlur(img, ksize)
+        if down > 1:
+            blurred = cv2.resize(blurred_small,
+                                 (scidata.shape[1], scidata.shape[0]),
+                                 interpolation=cv2.INTER_LINEAR)
+        else:
+            blurred = blurred_small
 
         # Blend fraction: 30% at strength=1 → 80% at strength=5
         t = self._norm_strength()
@@ -412,6 +450,10 @@ class IndiAllskyDenoise(object):
         if strength <= 0:
             return scidata
 
+        # downsample<br>
+        down = self._get_downsample()
+        img = self._maybe_shrink(scidata, down)
+
         strength = max(1, min(strength, 5))
 
         # Sigma per strength level.  Configurable via GAUSSIAN_SIGMA
@@ -421,8 +463,21 @@ class IndiAllskyDenoise(object):
         # apply global gaussian sigma adjustment
         sigma = sigma * GAUSSIAN_SIGMA_ADJUST
 
-        # legacy behaviour: direct blur with no downsampling
-        blurred = cv2.GaussianBlur(scidata, (0, 0), sigma)
+        # perform blur on possibly reduced image
+        if img.ndim == 2 or img.shape[2] < 2:
+            blurred_small = cv2.GaussianBlur(img, (0, 0), sigma)
+        else:
+            futures = [_thread_pool.submit(cv2.GaussianBlur, img[:, :, c], (0, 0), sigma)
+                       for c in range(img.shape[2])]
+            channels = [f.result() for f in futures]
+            blurred_small = numpy.stack(channels, axis=2)
+
+        if down > 1:
+            blurred = cv2.resize(blurred_small,
+                                 (scidata.shape[1], scidata.shape[0]),
+                                 interpolation=cv2.INTER_LINEAR)
+        else:
+            blurred = blurred_small
 
         # Blend fraction: 20% at strength=1 → 70% at strength=5
         t = self._norm_strength()
@@ -491,9 +546,12 @@ class IndiAllskyDenoise(object):
         Lower sigmaColor preserves more edges.  Strength range: 1-5.
         """
         strength = self._get_strength()
-        
         if strength <= 0:
             return scidata
+
+        # downsample to accelerate filter
+        down = self._get_downsample()
+        img = self._maybe_shrink(scidata, down)
 
         strength = max(1, min(strength, 5))
 
@@ -517,29 +575,36 @@ class IndiAllskyDenoise(object):
                 adapt = adapt[:, :, numpy.newaxis]
             adaptive_blend = blend * adapt
 
-        needs_conversion = scidata.dtype not in (numpy.uint8, numpy.float32)
+        needs_conversion = img.dtype not in (numpy.uint8, numpy.float32)
 
+        # perform filter on downsized image
         if needs_conversion:
             # bilateralFilter supports uint8 and float32.
             # OpenCV float32 bilateral is optimized for 0.0-1.0 range.
             # Normalize data to 0-1, scale sigmaColor to match (divide
             # by 255 since user-facing sigma is calibrated for 0-255).
             # sigmaSpace is in pixel units and needs no adjustment.
-            if numpy.issubdtype(scidata.dtype, numpy.integer):
-                dtype_max = numpy.float32(numpy.iinfo(scidata.dtype).max)
+            if numpy.issubdtype(img.dtype, numpy.integer):
+                dtype_max = numpy.float32(numpy.iinfo(img.dtype).max)
             else:
                 dtype_max = numpy.float32(1.0)
 
             sigma_color_norm = float(sigma_color) / 255.0
-            scidata_f32 = scidata.astype(numpy.float32) / dtype_max
+            img_f32 = img.astype(numpy.float32) / dtype_max
 
             logger.info('Applying bilateral denoise (float32 0-1), d=%d sigmaColor=%.4f sigmaSpace=%d base_blend=%.2f', d, sigma_color_norm, sigma_space, blend)
-            denoised_f32 = cv2.bilateralFilter(scidata_f32, d, sigma_color_norm, float(sigma_space))
-
-            denoised = numpy.clip(numpy.rint(denoised_f32 * dtype_max), 0, float(dtype_max)).astype(scidata.dtype)
+            denoised_small_f32 = cv2.bilateralFilter(img_f32, d, sigma_color_norm, float(sigma_space))
+            denoised_small = numpy.clip(numpy.rint(denoised_small_f32 * dtype_max), 0, float(dtype_max)).astype(img.dtype)
         else:
             logger.info('Applying bilateral denoise, d=%d sigmaColor=%d sigmaSpace=%d base_blend=%.2f', d, sigma_color, sigma_space, blend)
-            denoised = cv2.bilateralFilter(scidata, d, sigma_color, sigma_space)
+            denoised_small = cv2.bilateralFilter(img, d, sigma_color, sigma_space)
+
+        if down > 1:
+            denoised = cv2.resize(denoised_small,
+                                  (scidata.shape[1], scidata.shape[0]),
+                                  interpolation=cv2.INTER_LINEAR)
+        else:
+            denoised = denoised_small
 
         # blend with adaptive map and protect stars
         if numpy.issubdtype(scidata.dtype, numpy.integer):
@@ -607,10 +672,11 @@ class IndiAllskyDenoise(object):
         # such as a Pi a factor‑2 reduction trades a small amount of detail for
         # roughly a 3× speedup in the core wavelet loop.  The denoised result is
         # up‑sampled back to the original size before blending and star
-        # protection.
-        down = int(self.config.get('WAVELET_DOWNSAMPLE', 1))
+        # protection.  The factor may be specified either via
+        # ``WAVELET_DOWNSAMPLE`` (old key) or the new general
+        # ``DENOISE_DOWNSAMPLE``; the helper handles precedence.
+        down = self._get_downsample(for_wavelet=True)
         if down > 1:
-            # compute target size (integer division)
             h, w = scidata.shape[:2]
             small = cv2.resize(scidata, (w // down, h // down), interpolation=cv2.INTER_LINEAR)
         else:

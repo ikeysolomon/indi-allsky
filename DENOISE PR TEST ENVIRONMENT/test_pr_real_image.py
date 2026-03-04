@@ -268,6 +268,23 @@ def run():
     print('\n--- 7. IndiAllskyDenoise star_mask integration ---')
     from indi_allsky.denoise import IndiAllskyDenoise
 
+    # verify that an empty configuration delegates entirely to the
+    # protection_masks.star_mask defaults (i.e. no hard-coded values).
+    # Use the same luminance conversion the wrapper applies so the
+    # comparison is apples-to-apples.
+    from indi_allsky.protection_masks import star_mask as _pm_star
+
+    cfg_empty = {
+        'DENOISE_PROTECT_STARS': True,
+    }
+    d_empty = IndiAllskyDenoise(cfg_empty, [False])
+    lum = d_empty._compute_luminance(img)   # wrapper's grayscale formula
+    baseline = _pm_star(lum)                # call library default directly
+    prot_empty = d_empty._star_mask(img)
+    results.check('wrapper uses library defaults',
+                  np.array_equal(prot_empty, baseline),
+                  'star-mask mismatch with default parameters')
+
     cfg = {
         'DENOISE_PROTECT_STARS': True,
         'DENOISE_STAR_PERCENTILE': 99.0,

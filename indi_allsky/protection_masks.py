@@ -239,7 +239,7 @@ def _tile_median_background(img: np.ndarray, box_size: int = 128, filter_size=(5
     bg = cv2.blur(med_up, (kx, ky))
     return bg.astype(np.float32)
 
-# Note: Nebula / Milky-Way nebulosity masking has was experimented with but removed. 
+# Note: Nebula / Milky-Way nebulosity masking was experimented with but removed. 
 # If needed in future, implement a separate module due to the extreme number of variables needed. 
 
 

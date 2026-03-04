@@ -84,7 +84,6 @@ class IndiAllskyDenoise(object):
       * MEDIAN_BLEND
       * BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE
       * DENOISE_STAR_* (star protection parameters)
-      * DENOISE_DOWNSAMPLE (global integer shrink factor — see wavelet doc)
       * ADAPTIVE_BLEND (enable/disable variance‑based blend adaptivity)
       * LOCAL_STATS_KSIZE (window size for variance map, odd integer >=3)
     """
@@ -145,32 +144,6 @@ class IndiAllskyDenoise(object):
                     0.114 * img[:, :, 0].astype(numpy.float32))
         return img.astype(numpy.float32)
 
-    # ------------------------------------------------------------------
-    # downsampling helpers
-    # ------------------------------------------------------------------
-    def _get_downsample(self, for_wavelet: bool = False) -> int:
-        """Return integer downsample factor from config.
-
-        * ``DENOISE_DOWNSAMPLE`` is a general key that applies to all
-          algorithms.
-        * ``WAVELET_DOWNSAMPLE`` is honoured when ``for_wavelet`` is True
-          and takes precedence (for backwards compatibility).
-        """
-        if for_wavelet and 'WAVELET_DOWNSAMPLE' in self.config:
-            return int(self.config['WAVELET_DOWNSAMPLE'])
-        return int(self.config.get('DENOISE_DOWNSAMPLE', 1))
-
-    def _maybe_shrink(self, img: numpy.ndarray, factor: int) -> numpy.ndarray:
-        """Return a reduced version of ``img`` by ``factor``.
-
-        If ``factor`` &le; 1 the original array is returned.  Reduction uses
-        ``cv2.INTER_AREA``; caller must upsample the result later if
-        necessary.
-        """
-        if factor <= 1:
-            return img
-        h, w = img.shape[:2]
-        return cv2.resize(img, (w // factor, h // factor), interpolation=cv2.INTER_AREA)
 
     def _local_variance(self, img, ksize=3):
         """Compute a local variance map using a fast OpenCV box blur.
@@ -638,10 +611,6 @@ class IndiAllskyDenoise(object):
 
         Wavelet: Daubechies-4 (db4), levels: auto (3-4), soft thresholding.
         Requires PyWavelets (pywt).  Strength range: 1-5.
-        The denoiser may optionally run on a downsampled copy of the image to
-        save CPU; set config key ``WAVELET_DOWNSAMPLE`` to an integer factor
-        (&gt;1) for this behaviour.  The result is upscaled before blending and
-        star protection, providing a tunable quality/speed trade-off.
         """
         start_t = time.time()
         strength = self._get_strength()
@@ -662,8 +631,8 @@ class IndiAllskyDenoise(object):
         # apply the simplified single adjustment constant (≈1.10)
         scale = float(scale) * WAVELET_SCALE_ADJUST
 
-        # Determine dtype range for normalization; use the downsampled image
-        # when computing levels etc, since we may be working on `small`.
+        # Determine dtype range for normalization based on the target image
+        # (always full resolution as `small` is simply the original).
         target = small
         if numpy.issubdtype(target.dtype, numpy.integer):
             dtype_max = float(numpy.iinfo(target.dtype).max)
@@ -673,7 +642,7 @@ class IndiAllskyDenoise(object):
         orig_dtype = target.dtype
 
         # Auto decomposition levels: 3-4 based on smallest image dimension
-        # if we downsampled use the smaller dimensions for level computation
+        # (downsampling no longer applies so we just use the full-size dims)
         min_dim = min(target.shape[0], target.shape[1])
         # cache wavelet object and level computation
         global _db4_wavelet

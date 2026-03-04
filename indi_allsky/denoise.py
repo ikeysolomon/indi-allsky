@@ -417,17 +417,11 @@ class IndiAllskyDenoise(object):
         if strength <= 0:
             return scidata
 
-        # Downsample to save CPU, apply filter, then upscale
-        down = self._get_downsample()
-        img = self._maybe_shrink(scidata, down)
-
+        # Process at full resolution to maintain image quality
         strength = max(1, min(strength, 5))
         ksize = self._compute_median_ksize(strength)
 
-        blurred_small = self._medianBlur(img, ksize)
-        blurred = (cv2.resize(blurred_small, (scidata.shape[1], scidata.shape[0]),
-                             interpolation=cv2.INTER_LINEAR)
-                  if down > 1 else blurred_small)
+        blurred = self._medianBlur(scidata, ksize)
 
         # Compute blend based on strength and user config
         norm_strength = self._norm_strength()
@@ -536,20 +530,12 @@ class IndiAllskyDenoise(object):
         if strength <= 0:
             return scidata
 
-        # Downsample to save CPU, apply filter, then upscale
-        down = self._get_downsample()
-        img = self._maybe_shrink(scidata, down)
-
+        # Process at full resolution to maintain image quality
         strength = max(1, min(strength, 5))
         sigma = self._compute_gaussian_sigma(strength)
 
         # Blur single or multi-channel image
-        blurred_small = self._apply_gaussian_blur(img, sigma)
-
-        # Upscale if we downsampled
-        blurred = (cv2.resize(blurred_small, (scidata.shape[1], scidata.shape[0]),
-                             interpolation=cv2.INTER_LINEAR)
-                  if down > 1 else blurred_small)
+        blurred = self._apply_gaussian_blur(scidata, sigma)
 
         # Compute blend based on strength and user config
         norm_strength = self._norm_strength()
@@ -593,10 +579,7 @@ class IndiAllskyDenoise(object):
         if strength <= 0:
             return scidata
 
-        # Downsample to accelerate filter, apply filter, then upscale
-        down = self._get_downsample()
-        img = self._maybe_shrink(scidata, down)
-
+        # Process at full resolution to maintain image quality
         strength = max(1, min(strength, 5))
         diameter = strength * 2 + 1
         sigma_color, sigma_space = self._get_bilateral_sigma()
@@ -610,18 +593,12 @@ class IndiAllskyDenoise(object):
         adaptive_blend = self._compute_adaptive_blend(blend, scidata)
 
         # Apply bilateral filter with dtype conversion if needed
-        dtype_max = self._get_dtype_max(img)
-        denoised_small, needs_conversion = self._apply_bilateral_filter(
-            img, diameter, sigma_color, sigma_space, dtype_max)
-
-        # Upscale if we downsampled
-        denoised = (cv2.resize(denoised_small, (scidata.shape[1], scidata.shape[0]),
-                              interpolation=cv2.INTER_LINEAR)
-                   if down > 1 else denoised_small)
+        dtype_max = self._get_dtype_max(scidata)
+        denoised, needs_conversion = self._apply_bilateral_filter(
+            scidata, diameter, sigma_color, sigma_space, dtype_max)
 
         # Finalize: blend, match luminance, protect stars
-        dtype_max_orig = self._get_dtype_max(scidata)
-        result = self._finalize_denoise(scidata, denoised, adaptive_blend, dtype_max_orig)
+        result = self._finalize_denoise(scidata, denoised, adaptive_blend, dtype_max)
 
         # Log diagnostics
         avg_blend = float(numpy.mean(adaptive_blend)) if isinstance(adaptive_blend, numpy.ndarray) else adaptive_blend
@@ -673,19 +650,8 @@ class IndiAllskyDenoise(object):
         if strength <= 0:
             return scidata
 
-        # Optional pre‑downsampling to reduce work.  On constrained hardware
-        # such as a Pi a factor‑2 reduction trades a small amount of detail for
-        # roughly a 3× speedup in the core wavelet loop.  The denoised result is
-        # up‑sampled back to the original size before blending and star
-        # protection.  The factor may be specified either via
-        # ``WAVELET_DOWNSAMPLE`` (old key) or the new general
-        # ``DENOISE_DOWNSAMPLE``; the helper handles precedence.
-        down = self._get_downsample(for_wavelet=True)
-        if down > 1:
-            h, w = scidata.shape[:2]
-            small = cv2.resize(scidata, (w // down, h // down), interpolation=cv2.INTER_LINEAR)
-        else:
-            small = scidata
+        # Process at full resolution to maintain image quality
+        small = scidata
 
         strength = max(1, min(strength, 5))
 
@@ -778,12 +744,8 @@ class IndiAllskyDenoise(object):
             channels = [f.result() for f in futures]
             result_small = numpy.stack(channels, axis=2)
 
-        # if we downsampled, rescale back to original size before blending
-        if down > 1:
-            h, w = scidata.shape[:2]
-            result = cv2.resize(result_small, (w, h), interpolation=cv2.INTER_LINEAR)
-        else:
-            result = result_small
+        # Use the denoised result directly
+        result = result_small
 
         # Compute blend based on strength
         norm_strength = self._norm_strength()
@@ -796,7 +758,7 @@ class IndiAllskyDenoise(object):
         blended = self._apply_star_protection(scidata, blended, float(dtype_max))
 
         elapsed = time.time() - start_t
-        logger.info('Applied wavelet denoise (BayesShrink) down=%d levels=%d scale=%.2f blend=%.2f time=%.3fs',
-                down, levels, scale, blend, elapsed)
+        logger.info('Applied wavelet denoise (BayesShrink) levels=%d scale=%.2f blend=%.2f time=%.3fs',
+                levels, scale, blend, elapsed)
 
         return blended

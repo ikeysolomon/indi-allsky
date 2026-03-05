@@ -261,7 +261,22 @@ class IndiAllskyDenoise(object):
         return numpy.clip(result, 0, dtype_max).astype(original.dtype)
 
     def _get_strength(self):
-        """Return the effective denoise strength (int) respecting night/day config."""
+        """Return the effective denoise strength (int) respecting night/day config.
+
+        Also warn if the capture interval for the current period is unusually
+        short.  Denoising is not recommended when frames arrive faster than
+        approximately five seconds, and we emit a log message so the problem
+        can be diagnosed after the fact.
+        """
+        # determine current period according to night/day flag
+        if self.night_av[constants.NIGHT_NIGHT]:
+            period = float(self.config.get('EXPOSURE_PERIOD', 0))
+            # only warn when operating at night
+            if period > 0 and period < 5.0:
+                logger.warning('Denoise not recommended if capture interval < 5s, (%.2fs)', period)
+        else:
+            period = float(self.config.get('EXPOSURE_PERIOD_DAY', 0))
+
         if self.config.get('USE_NIGHT_COLOR', True) or self.night_av[constants.NIGHT_NIGHT]:
             return int(self.config.get('IMAGE_DENOISE_STRENGTH', 3))
         # daytime

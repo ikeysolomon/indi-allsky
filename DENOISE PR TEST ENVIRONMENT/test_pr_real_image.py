@@ -284,6 +284,33 @@ def run():
     # Ridge-trace visualization removed (was part of Milky-Way/nebula mask)
     # No ridge computation or drawing is performed in the PR harness.
 
+    # ===== 5. interval warning logging =====
+    print('\n--- 5. interval warning logging ---')
+    import io
+    import logging
+    from indi_allsky import constants as _const
+
+    # temporarily shorten the night interval and capture log output
+    original_period = d.config.get('EXPOSURE_PERIOD')
+    d.config['EXPOSURE_PERIOD'] = 3.0
+
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setLevel(logging.WARNING)
+    logger = logging.getLogger('indi_allsky')
+    logger.addHandler(handler)
+
+    # run one denoise call (gaussian is representative)
+    _ = d.gaussian_blur(img.copy())
+
+    logger.removeHandler(handler)
+    warn_log = buf.getvalue()
+    results.check('interval warning logged', 'denoise not recommended' in warn_log.lower())
+
+    # restore configuration
+    if original_period is not None:
+        d.config['EXPOSURE_PERIOD'] = original_period
+
     # ===== 4. Daytime gating for star mask =====
     # The denoiser should skip the relatively expensive star-mask step
     # between 05:00 and 16:59.  We verify that by monkey‑patching both the

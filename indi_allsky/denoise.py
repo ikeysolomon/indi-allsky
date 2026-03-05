@@ -12,6 +12,7 @@ import logging
 import time
 import pywt
 import concurrent.futures
+import datetime
 
 from . import constants
 
@@ -99,26 +100,40 @@ class IndiAllskyDenoise(object):
         return 1.0
 
     def _match_luminance(self, orig, result):
-        """Scale `result` to match the mean luminance of `orig` to avoid
-        perceived brightening/dimming after denoising. Returns a copy.
+        """Apply a small global gain to ``result`` so that its mean
+        luminance matches ``orig``.
 
-        The applied gain is clipped to a small range to avoid introducing
-        large global contrast changes.
+        This compensates for the slight darkening or brightening that
+        frequently accompanies spatial filtering.  We compute only the
+        *means* of the two images rather than creating full luminance
+        arrays – this is significantly cheaper on large colour frames.
+        The gain is clamped according to configuration keys
+        ``DENOISE_MIN_LUM_GAIN``/``DENOISE_MAX_LUM_GAIN`` to avoid large
+        contrast shifts.
+
+        The routine always returns a new array; on failure it simply
+        returns ``result`` unchanged.
         """
         try:
+            # compute channel means instead of full luminance images
             if orig.ndim == 3 and orig.shape[2] >= 3:
-                orig_lum = (0.299 * orig[:, :, 2].astype(numpy.float32) +
-                            0.587 * orig[:, :, 1].astype(numpy.float32) +
-                            0.114 * orig[:, :, 0].astype(numpy.float32))
-                res_lum = (0.299 * result[:, :, 2].astype(numpy.float32) +
-                           0.587 * result[:, :, 1].astype(numpy.float32) +
-                           0.114 * result[:, :, 0].astype(numpy.float32))
+                # channel order is B, G, R in our data; weights follow
+                # Rec.601 luma coefficients (R=0.299, G=0.587, B=0.114).
+                # note the original code used orig[:, :, 2] for R, hence
+                # the weighted combination below.
+                orig_means = [orig[:, :, c].astype(numpy.float32).mean()
+                              for c in range(3)]
+                res_means = [result[:, :, c].astype(numpy.float32).mean()
+                             for c in range(3)]
+                orig_mean = (0.114 * orig_means[0] +
+                             0.587 * orig_means[1] +
+                             0.299 * orig_means[2])
+                res_mean = (0.114 * res_means[0] +
+                            0.587 * res_means[1] +
+                            0.299 * res_means[2])
             else:
-                orig_lum = orig.astype(numpy.float32)
-                res_lum = result.astype(numpy.float32)
-
-            orig_mean = float(numpy.mean(orig_lum))
-            res_mean = float(numpy.mean(res_lum))
+                orig_mean = float(orig.astype(numpy.float32).mean())
+                res_mean = float(result.astype(numpy.float32).mean())
 
             if res_mean <= 1e-6:
                 return result
@@ -129,6 +144,7 @@ class IndiAllskyDenoise(object):
             max_gain = float(self.config.get('DENOISE_MAX_LUM_GAIN', 1.08))
             gain = max(min_gain, min(max_gain, gain))
 
+            # apply gain and clip
             res_f = result.astype(numpy.float32) * gain
             dtype_max = float(numpy.iinfo(result.dtype).max) if numpy.issubdtype(result.dtype, numpy.integer) else 1.0
             res_f = numpy.clip(res_f, 0.0, dtype_max).astype(result.dtype)
@@ -200,12 +216,26 @@ class IndiAllskyDenoise(object):
             return numpy.zeros(img.shape[:2], dtype=numpy.float32)
 
 
+    def _is_star_mask_time(self) -> bool:
+        """Return ``True`` when the current local hour should allow star masking.
+
+        The rule is hardwired to 17:00–05:00.  Having a separate method makes it
+        easy to override during tests without touching the global
+        ``datetime`` module (which is immutable).
+        """
+        now = datetime.datetime.now()
+        return (now.hour >= 17) or (now.hour < 5)
+
     def _apply_star_protection(self, original, denoised, dtype_max):
         """Blend star regions back to the original, preserving point sources.
 
         If DENOISE_PROTECT_STARS is False (or the star mask is empty)
         the denoised image is returned unchanged.
         """
+        # daytime gating: only apply star protection during the night window.
+        if not self._is_star_mask_time():
+            return denoised
+
         if not bool(self.config.get('DENOISE_PROTECT_STARS', True)):
             return denoised
 
@@ -721,10 +751,10 @@ class IndiAllskyDenoise(object):
         blend = float(self.config.get('WAVELET_BLEND', 0.46 + 0.54 * norm_strength))
         blend = max(0.0, min(1.0, blend))
 
-        # Blend, match luminance, protect stars
-        blended = self._blend_with_original(scidata, result, blend, float(dtype_max))
-        blended = self._match_luminance(scidata, blended)
-        blended = self._apply_star_protection(scidata, blended, float(dtype_max))
+        # Blend, match luminance and protect stars using the shared
+        # finalization helper so that any future improvements (eg. a more
+        # efficient luminance matcher) automatically apply here.
+        blended = self._finalize_denoise(scidata, result, blend, float(dtype_max))
 
         elapsed = time.time() - start_t
         logger.info('Applied wavelet denoise (BayesShrink) levels=%d scale=%.2f blend=%.2f time=%.3fs',

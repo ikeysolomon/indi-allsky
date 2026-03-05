@@ -259,6 +259,21 @@ def run():
         results.check(f'{name} image modified', not np.array_equal(denoised, img),
                       f'{n_diff:,} pixels differ')
 
+        # ensure mean luminance is preserved (within a tolerance) so denoising
+        # doesn't globally brighten/darken the frame
+        def mean_lum(image):
+            if image.ndim == 3 and image.shape[2] >= 3:
+                # use the same Rec.601 weights as denoise._compute_luminance
+                return (0.299 * image[:, :, 2].mean() +
+                        0.587 * image[:, :, 1].mean() +
+                        0.114 * image[:, :, 0].mean())
+            return float(image.mean())
+        orig_mean = mean_lum(img)
+        den_mean = mean_lum(denoised)
+        diff = abs(orig_mean - den_mean)
+        results.check(f'{name} luminance match', diff < (orig_mean * 0.02 + 1e-6),
+                      f'orig={orig_mean:.3f} den={den_mean:.3f} diff={diff:.3f}')
+
         # Save the denoised output itself (user requested methods returned)
         suffix = f'real_08{chr(97+idx)}_{name}.png'
         _save(suffix, denoised)
@@ -268,6 +283,40 @@ def run():
 
     # Ridge-trace visualization removed (was part of Milky-Way/nebula mask)
     # No ridge computation or drawing is performed in the PR harness.
+
+    # ===== 4. Daytime gating for star mask =====
+    # The denoiser should skip the relatively expensive star-mask step
+    # between 05:00 and 16:59.  We verify that by monkey‑patching both the
+    # clock and the mask generator and ensuring the latter is only
+    # invoked at night.
+    print('\n--- 4. star mask daytime gate ---')
+    img_small = np.zeros((8, 8, 3), dtype=np.uint8)
+    den_small = img_small.copy()
+    dtype_max = 255.0
+
+    orig_star = d._star_mask
+    try:
+        called = False
+        def fake_mask(img):
+            nonlocal called
+            called = True
+            return orig_star(img)
+        d._star_mask = fake_mask
+
+        # daytime → helper returns False
+        d._is_star_mask_time = lambda: False
+        _ = d._apply_star_protection(img_small, den_small, dtype_max)
+        results.check('daytime star-mask skipped', not called)
+
+        # night → helper returns True
+        called = False
+        d._is_star_mask_time = lambda: True
+        _ = d._apply_star_protection(img_small, den_small, dtype_max)
+        results.check('night star-mask executed', called)
+    finally:
+        d._star_mask = orig_star
+        # restore original helper (not strictly needed but tidy)
+        delattr(d, '_is_star_mask_time')
 
     # ===== 7. IndiAllskyDenoise integration =====
     print('\n--- 7. IndiAllskyDenoise star_mask integration ---')

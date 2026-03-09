@@ -74,28 +74,47 @@ class paho_mqtt(GenericFileTransfer):
         from paho.mqtt import MQTTException
 
 
-        local_file = kwargs['local_file']
+        # The caller (usually miscUpload/uploader) builds a job dictionary and
+        # passes it in via kwargs.  We do _not_ read anything from a log file
+        # here – all values arrive in-memory from that job object.
+        #
+        # Typical keys:
+        #   * base_topic: root MQTT topic under which to publish
+        #   * qos: quality-of-service level
+        #   * mq_data: dict of additional scalar values to send as retained
+        #              messages (each key becomes a sub-topic)
+        #   * publish_image: boolean flag indicating that a file should be
+        #                    published as well
+        #   * image_topic: suffix topic for the image payload.  the name is a
+        #                  historical artifact from when this method only handled
+        #                  image uploads; it simply becomes the second component
+        #                  of the topic string (e.g. "indi-allsky/latest").
+        #
+        # For the new push-alert logic we also send non-image messages using the
+        # same mechanism, so the term "image_topic" can be misleading even
+        # though it’s still the value expected by callers.
+        local_file = kwargs.get('local_file', '')
         base_topic = kwargs['base_topic']
         qos        = kwargs['qos']
-        mq_data    = kwargs['mq_data']
-        image_topic = kwargs['image_topic']
-        publish_image = kwargs['publish_image']
-
-        local_file_p = Path(local_file)
-
+        mq_data    = kwargs.get('mq_data', {})
+        image_topic = kwargs.get('image_topic', '')
+        publish_image = kwargs.get('publish_image', False)
 
         message_list = list()
 
-        # publish image
-        if publish_image:
-            with io.open(local_file_p, 'rb') as f_localfile:
-                message_list.append({
-                    'topic'    : '/'.join((base_topic, image_topic)),
-                    'payload'  : f_localfile.read(),  # this requires paho-mqtt >= v2.0.0
-                    'qos'      : qos,
-                    'retain'   : True,
-                })
-
+        # publish image if requested and file is provided
+        if publish_image and local_file:
+            local_file_p = Path(local_file)
+            try:
+                with io.open(local_file_p, 'rb') as f_localfile:
+                    message_list.append({
+                        'topic'    : '/'.join((base_topic, image_topic)),
+                        'payload'  : f_localfile.read(),  # this requires paho-mqtt >= v2.0.0
+                        'qos'      : qos,
+                        'retain'   : True,
+                    })
+            except Exception as e:
+                logger.error('Error reading mqtt image file: %s', e)
 
         for k, v in mq_data.items():
             message_list.append({

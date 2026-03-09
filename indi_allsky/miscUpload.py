@@ -934,6 +934,31 @@ class miscUpload(object):
             'local_file'  : str(upload_filename),
             'image_topic' : image_topic,
             'metadata'    : mq_data,
+            'publish_image': True,
+        }
+
+        mqtt_task = IndiAllSkyDbTaskQueueTable(
+            queue=TaskQueueQueue.UPLOAD,
+            state=TaskQueueState.QUEUED,
+            data=jobdata,
+        )
+        db.session.add(mqtt_task)
+        db.session.commit()
+
+        self.upload_q.put({'task_id' : mqtt_task.id})
+
+    def mqtt_publish_message(self, topic, mq_data):
+        """Send a generic MQTT message (no file) on specified sub-topic.
+        """
+        if not self.config.get('MQTTPUBLISH', {}).get('ENABLE'):
+            return
+
+        jobdata = {
+            'action'      : constants.TRANSFER_MQTT,
+            'local_file'  : '',
+            'image_topic' : topic,
+            'metadata'    : mq_data,
+            'publish_image': False,
         }
 
         mqtt_task = IndiAllSkyDbTaskQueueTable(

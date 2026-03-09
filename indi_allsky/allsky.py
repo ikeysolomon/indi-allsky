@@ -468,20 +468,26 @@ class IndiAllSky(object):
         self.image_worker_idx += 1
 
         logger.info('Starting Image-%d worker', self.image_worker_idx)
+        from .image import WorkerContext
+
+        ctx = WorkerContext(
+            error_q=self.image_error_q,
+            image_q=self.image_q,
+            upload_q=self.upload_q,
+            position_av=self.position_av,
+            exposure_av=self.exposure_av,
+            gain_av=self.gain_av,
+            binning_av=self.binning_av,
+            sensors_temp_av=self.sensors_temp_av,
+            sensors_user_av=self.sensors_user_av,
+            night_av=self.night_av,
+            astro_av=self.astro_av,
+        )
+
         self.image_worker = ImageWorker(
             self.image_worker_idx,
             self.config,
-            self.image_error_q,
-            self.image_q,
-            self.upload_q,
-            self.position_av,
-            self.exposure_av,
-            self.gain_av,
-            self.binning_av,
-            self.sensors_temp_av,
-            self.sensors_user_av,
-            self.night_av,
-            self.astro_av,
+            ctx,
         )
         self.image_worker.start()
 

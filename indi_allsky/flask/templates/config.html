@@ -6529,6 +6529,88 @@ var camera_id = {{ camera_id }};
         <div class="col-sm-8"></div>
     </div>
 
+    <hr>
+    <h5>Push Alert Settings</h5>
+    <div class="form-group row">
+        <div class="col-sm-2">
+            {{ form_config.MQTTPUBLISH__PUSH_ENABLE.label }}
+        </div>
+        <div class="col-sm-2">
+            <div class="form-switch">
+                {{ form_config.MQTTPUBLISH__PUSH_ENABLE(class='form-check-input') }}
+                <div id="MQTTPUBLISH__PUSH_ENABLE-error" class="invalid-feedback text-danger" style="display: none;"></div>
+            </div>
+        </div>
+        <div class="col-sm-8">Enable sending push alerts via MQTT when model triggers</div>
+    </div>
+    <div class="form-group row">
+        <div class="col-sm-2">
+            {{ form_config.MQTTPUBLISH__PUSH_TOPIC.label(class='col-form-label') }}
+        </div>
+        <div class="col-sm-4">
+            {{ form_config.MQTTPUBLISH__PUSH_TOPIC(class='form-control bg-secondary') }}
+            <div id="MQTTPUBLISH__PUSH_TOPIC-error" class="invalid-feedback text-danger" style="display: none;"></div>
+        </div>
+        <div class="col-sm-6">Sub-topic under base topic to publish alerts</div>
+    </div>
+    <div class="form-group row">
+        <div class="col-sm-2">
+            {{ form_config.MQTTPUBLISH__PUSH_HISTORY_HOURS.label(class='col-form-label') }}
+        </div>
+        <div class="col-sm-4">
+            {{ form_config.MQTTPUBLISH__PUSH_HISTORY_HOURS(class='form-control bg-secondary') }}
+            <div id="MQTTPUBLISH__PUSH_HISTORY_HOURS-error" class="invalid-feedback text-danger" style="display: none;"></div>
+        </div>
+        <div class="col-sm-6">How many hours of past sensor data to retain</div>
+    </div>
+    <div class="form-group row">
+        <div class="col-sm-2">
+            {{ form_config.MQTTPUBLISH__PUSH_COOLDOWN_S.label(class='col-form-label') }}
+        </div>
+        <div class="col-sm-4">
+            {{ form_config.MQTTPUBLISH__PUSH_COOLDOWN_S(class='form-control bg-secondary') }}
+            <div id="MQTTPUBLISH__PUSH_COOLDOWN_S-error" class="invalid-feedback text-danger" style="display: none;"></div>
+        </div>
+        <div class="col-sm-6">Minimum seconds between identical alerts (dedup cooldown)</div>
+    </div>
+    <div class="form-group row">
+        <div class="col-sm-2">
+            {{ form_config.MQTTPUBLISH__PUSH_MAX_PER_HOUR.label(class='col-form-label') }}
+        </div>
+        <div class="col-sm-4">
+            {{ form_config.MQTTPUBLISH__PUSH_MAX_PER_HOUR(class='form-control bg-secondary') }}
+            <div id="MQTTPUBLISH__PUSH_MAX_PER_HOUR-error" class="invalid-feedback text-danger" style="display: none;"></div>
+        </div>
+        <div class="col-sm-6">Maximum alerts allowed per hour (rate limit)</div>
+    </div>
+    <div class="form-group row">
+        <div class="col-sm-2">
+            {{ form_config.MQTTPUBLISH__PUSH_MODEL.label(class='col-form-label') }}
+        </div>
+        <div class="col-sm-8">
+            {{ form_config.MQTTPUBLISH__PUSH_MODEL(class='form-control bg-secondary', placeholder='e.g. current["stars"]<10 and current["sensor_user_2"]>80') }}
+            <div id="MQTTPUBLISH__PUSH_MODEL-error" class="invalid-feedback text-danger" style="display: none;"></div>
+            <small class="form-text text-muted">
+                Available fields include:<br>
+                • <code>current['stars']</code> – number of stars detected<br>
+                • <code>current['sensor_user_X']</code> – user sensor slots (replace X with the slot number) and compare with operators (`>`, `<`, `==`, etc.) plus a numeric value.<br>
+                {% if sensor_slot_labels %}
+                Configured sensor slots:
+                <ul style="margin:0; padding-left:1.2em;">
+                    {% for slot, label in sensor_slot_labels %}
+                    <li><code>{{ slot }}</code> — {{ label }}</li>
+                    {% endfor %}
+                </ul>
+                {% else %}
+                Common assignments include 2=pressure, 3=humidity, 4=lightning (10 km count), etc.
+                {% endif %}
+                The <code>history</code> list contains past (timestamp,data) tuples.<br>
+                The model can reference configured variables: <code>PUSH_HISTORY_HOURS</code>, <code>PUSH_HISTORY_SECONDS</code>, <code>PUSH_COOLDOWN_S</code>, and <code>PUSH_MAX_PER_HOUR</code> so you don't need hard-coded numbers.
+            </small>
+        </div>
+        <div class="col-sm-2">Python expression using <code>history</code> and <code>current</code></div>
+    </div>
+
 </div><!-- end filetransfer tab -->
 <div class="tab-pane fade" id="nav-youtube" role="tabpanel" aria-labelledby="nav-youtube-tab">
 

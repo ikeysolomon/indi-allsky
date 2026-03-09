@@ -2627,6 +2627,12 @@ class ConfigView(FormView):
             'MQTTPUBLISH__TLS'               : self.indi_allsky_config.get('MQTTPUBLISH', {}).get('TLS', True),
             'MQTTPUBLISH__CERT_BYPASS'       : self.indi_allsky_config.get('MQTTPUBLISH', {}).get('CERT_BYPASS', True),
             'MQTTPUBLISH__PUBLISH_IMAGE'     : self.indi_allsky_config.get('MQTTPUBLISH', {}).get('PUBLISH_IMAGE', True),
+            'MQTTPUBLISH__PUSH_ENABLE'        : self.indi_allsky_config.get('MQTTPUBLISH', {}).get('PUSH_ENABLE', False),
+            'MQTTPUBLISH__PUSH_TOPIC'         : self.indi_allsky_config.get('MQTTPUBLISH', {}).get('PUSH_TOPIC', ''),
+            'MQTTPUBLISH__PUSH_HISTORY_HOURS' : self.indi_allsky_config.get('MQTTPUBLISH', {}).get('PUSH_HISTORY_HOURS', 3),
+            'MQTTPUBLISH__PUSH_COOLDOWN_S'    : self.indi_allsky_config.get('MQTTPUBLISH', {}).get('PUSH_COOLDOWN_S', 900),
+            'MQTTPUBLISH__PUSH_MAX_PER_HOUR'  : self.indi_allsky_config.get('MQTTPUBLISH', {}).get('PUSH_MAX_PER_HOUR', 6),
+            'MQTTPUBLISH__PUSH_MODEL'         : self.indi_allsky_config.get('MQTTPUBLISH', {}).get('PUSH_MODEL', ''),
             'SYNCAPI__ENABLE'                : self.indi_allsky_config.get('SYNCAPI', {}).get('ENABLE', False),
             'SYNCAPI__BASEURL'               : self.indi_allsky_config.get('SYNCAPI', {}).get('BASEURL', 'https://example.com/indi-allsky'),
             'SYNCAPI__USERNAME'              : self.indi_allsky_config.get('SYNCAPI', {}).get('USERNAME', ''),
@@ -3137,6 +3143,31 @@ class ConfigView(FormView):
         admin_network_text = '\n'.join(network_list)
         form_data['ADMIN_NETWORKS_FLASK'] = admin_network_text
 
+        # Build a mapping of configured user sensor slots -> human labels
+        sensor_slot_labels = {}
+        try:
+            temp_sensor = self.indi_allsky_config.get('TEMP_SENSOR', {}) or {}
+            for key, val in temp_sensor.items():
+                if key.endswith('_USER_VAR_SLOT') and val:
+                    # key example: 'A_USER_VAR_SLOT' -> prefix 'A'
+                    prefix = key.split('_USER_VAR_SLOT')[0]
+                    label_key = prefix + '_LABEL'
+                    label = temp_sensor.get(label_key) or val
+                    sensor_slot_labels[val] = label
+
+            charts = self.indi_allsky_config.get('CHARTS', {}) or {}
+            for i in range(1, 10):
+                cs_key = f'CUSTOM_SLOT_{i}'
+                cs = charts.get(cs_key)
+                if cs:
+                    # prefer an existing label from temp_sensor, otherwise use the slot name
+                    sensor_slot_labels.setdefault(cs, sensor_slot_labels.get(cs, cs))
+        except Exception:
+            sensor_slot_labels = {}
+
+        # convert to a sorted list of (slot, label) tuples for template friendliness
+        context['sensor_slot_labels'] = sorted(sensor_slot_labels.items())
+
         context['form_config'] = IndiAllskyConfigForm(data=form_data)
 
         return context
@@ -3634,6 +3665,11 @@ class AjaxConfigView(BaseView):
         self.indi_allsky_config['MQTTPUBLISH']['QOS']                   = int(request.json['MQTTPUBLISH__QOS'])
         self.indi_allsky_config['MQTTPUBLISH']['TLS']                   = bool(request.json['MQTTPUBLISH__TLS'])
         self.indi_allsky_config['MQTTPUBLISH']['CERT_BYPASS']           = bool(request.json['MQTTPUBLISH__CERT_BYPASS'])
+        # push alert settings
+        self.indi_allsky_config['MQTTPUBLISH']['PUSH_ENABLE']            = bool(request.json.get('MQTTPUBLISH__PUSH_ENABLE', False))
+        self.indi_allsky_config['MQTTPUBLISH']['PUSH_TOPIC']             = str(request.json.get('MQTTPUBLISH__PUSH_TOPIC', ''))
+        self.indi_allsky_config['MQTTPUBLISH']['PUSH_HISTORY_HOURS']     = int(request.json.get('MQTTPUBLISH__PUSH_HISTORY_HOURS', 0))
+        self.indi_allsky_config['MQTTPUBLISH']['PUSH_MODEL']             = str(request.json.get('MQTTPUBLISH__PUSH_MODEL', ''))
         self.indi_allsky_config['MQTTPUBLISH']['PUBLISH_IMAGE']         = bool(request.json['MQTTPUBLISH__PUBLISH_IMAGE'])
         self.indi_allsky_config['SYNCAPI']['ENABLE']                    = bool(request.json['SYNCAPI__ENABLE'])
         self.indi_allsky_config['SYNCAPI']['BASEURL']                   = str(request.json['SYNCAPI__BASEURL'])

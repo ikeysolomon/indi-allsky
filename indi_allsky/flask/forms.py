@@ -2668,6 +2668,31 @@ def MQTTPUBLISH__QOS_validator(form, field):
         raise ValidationError('Invalid QoS')
 
 
+def MQTTPUBLISH__PUSH_TOPIC_validator(form, field):
+    # topic component for alerts (no leading/trailing slashes, no spaces or MQTT wildcards)
+    if not field.data:
+        raise ValidationError('Push topic cannot be empty')
+    if re.search(r'^\/|\/$', field.data):
+        raise ValidationError('Push topic cannot start or end with slash')
+    if re.search(r'[\s#+\*]', field.data):
+        raise ValidationError('Push topic contains invalid characters')
+
+
+def MQTTPUBLISH__PUSH_HISTORY_HOURS_validator(form, field):
+    if not isinstance(field.data, int) or field.data < 0:
+        raise ValidationError('History hours must be a non-negative integer')
+
+
+def MQTTPUBLISH__PUSH_COOLDOWN_S_validator(form, field):
+    if not isinstance(field.data, int) or field.data < 0:
+        raise ValidationError('Cooldown seconds must be a non-negative integer')
+
+
+def MQTTPUBLISH__PUSH_MAX_PER_HOUR_validator(form, field):
+    if not isinstance(field.data, int) or field.data < 0:
+        raise ValidationError('Max per hour must be a non-negative integer')
+
+
 def SYNCAPI__BASEURL_validator(form, field):
     try:
         r = urlparse(field.data)
@@ -4698,6 +4723,13 @@ class IndiAllskyConfigForm(FlaskForm):
     MQTTPUBLISH__TLS                 = BooleanField('Use TLS')
     MQTTPUBLISH__CERT_BYPASS         = BooleanField('Disable Certificate Validation')
     MQTTPUBLISH__PUBLISH_IMAGE       = BooleanField('Enable Image Publishing')
+    # push alerts configuration
+    MQTTPUBLISH__PUSH_ENABLE         = BooleanField('Enable MQTT Push Alerts')
+    MQTTPUBLISH__PUSH_TOPIC          = StringField('Push Topic', validators=[MQTTPUBLISH__PUSH_TOPIC_validator])
+    MQTTPUBLISH__PUSH_HISTORY_HOURS  = IntegerField('History (hours)', validators=[DataRequired(), MQTTPUBLISH__PUSH_HISTORY_HOURS_validator])
+    MQTTPUBLISH__PUSH_COOLDOWN_S     = IntegerField('Dedup Cooldown (s)', validators=[DataRequired(), MQTTPUBLISH__PUSH_COOLDOWN_S_validator])
+    MQTTPUBLISH__PUSH_MAX_PER_HOUR   = IntegerField('Max Alerts / Hour', validators=[DataRequired(), MQTTPUBLISH__PUSH_MAX_PER_HOUR_validator])
+    MQTTPUBLISH__PUSH_MODEL          = TextAreaField('Push Model (Python expression)', render_kw={'rows':3})
     SYNCAPI__ENABLE                  = BooleanField('Enable Sync API')
     SYNCAPI__BASEURL                 = StringField('URL', validators=[SYNCAPI__BASEURL_validator], render_kw={'autocomplete' : 'new-password'})  # prevent saving BASEURL as username
     SYNCAPI__USERNAME                = StringField('Username', validators=[SYNCAPI__USERNAME_validator], render_kw={'autocomplete' : 'new-password'})

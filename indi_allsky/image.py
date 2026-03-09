@@ -7,6 +7,8 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 import time
+import math
+from collections import deque
 import functools
 import tempfile
 import shutil
@@ -18,8 +20,11 @@ import logging
 import traceback
 #from pprint import pformat
 
+# multiprocessing
 from multiprocessing import Process
 from multiprocessing import Queue
+from dataclasses import dataclass
+from typing import Any, List
 #from threading import Thread
 import queue
 
@@ -68,41 +73,154 @@ class ImageWorker(Process):
     auto_gain_exposure_cutoff_level_low = 80  # percent of max exposure
 
 
-    def __init__(
-        self,
-        idx,
-        config,
-        error_q,
-        image_q,
-        upload_q,
-        position_av,
-        exposure_av,
-        gain_av,
-        binning_av,
-        sensors_temp_av,
-        sensors_user_av,
-        night_av,
-        astro_av,
-    ):
+    def __init__(self, idx, config, ctx):
+        """Initialize ImageWorker.
+
+        Args:
+            idx: worker index
+            config: configuration dict
+            ctx: WorkerContext containing queues and availability arrays
+        """
         super(ImageWorker, self).__init__()
 
         self.name = 'Image-{0:d}'.format(idx)
 
         self.config = config
 
-        self.error_q = error_q
-        self.image_q = image_q
-        self.upload_q = upload_q
+        # context object with queues and availability arrays
+        self._ctx = ctx
+        self.error_q = ctx.error_q
+        self.image_q = ctx.image_q
+        self.upload_q = ctx.upload_q
 
-        self.position_av = position_av
-        self.exposure_av = exposure_av
-        self.gain_av = gain_av
-        self.binning_av = binning_av
+        self.position_av = ctx.position_av
+        self.exposure_av = ctx.exposure_av
+        self.gain_av = ctx.gain_av
+        self.binning_av = ctx.binning_av
 
-        self.sensors_temp_av = sensors_temp_av  # 0 ccd_temp
-        self.sensors_user_av = sensors_user_av
-        self.night_av = night_av
-        self.astro_av = astro_av
+        self.sensors_temp_av = ctx.sensors_temp_av  # 0 ccd_temp
+        self.sensors_user_av = ctx.sensors_user_av
+        self.night_av = ctx.night_av
+        self.astro_av = ctx.astro_av
+
+        # worker runtime state and helpers
+        self.filename_t = 'ccd{0:d}_{1:s}.{2:s}'
+
+        self.adsb_worker = None
+        self.adsb_worker_idx = 0
+        self.adsb_aircraft_q = None
+        self.adsb_aircraft_list = []
+
+        self.generate_mask_base = True
+
+        self.target_adu_found = False
+        self.current_adu_target = 0
+        self.hist_adu = []
+
+        self.sqm_value = 0
+
+        self.image_count = 0
+        self.metadata_count = 0
+
+        self.image_processor = ImageProcessor(
+            self.config,
+            self.position_av,
+            self.gain_av,
+            self.binning_av,
+            self.sensors_temp_av,
+            self.sensors_user_av,
+            self.night_av,
+            self.astro_av,
+        )
+
+        self._miscDb = miscDb(self.config)
+        self._miscUpload = miscUpload(
+            self.config,
+            self.upload_q,
+            self.night_av,
+        )
+
+
+        self._gain_step = None  # calculate on first image
+        self.auto_gain_step_list = None  # list of fixed gain values
+        self.auto_gain_exposure_cutoff_low = None
+        self.auto_gain_exposure_cutoff_mid = None
+        self.auto_gain_exposure_cutoff_high = None
+
+
+        self.image_save_hook_process = None  # used for both pre- and post-hooks
+        self.image_save_hook_process_start = 0
+        self.pre_hook_datajson_name_p = None
+
+
+        self.next_save_fits_offset = self.config.get('IMAGE_SAVE_FITS_PERIOD', 7200)
+        self.next_save_fits_time = time.time() + self.next_save_fits_offset
+
+        self._libcamera_raw = False
+
+        if self.config.get('IMAGE_FOLDER'):
+            self.image_dir = Path(self.config['IMAGE_FOLDER']).absolute()
+        else:
+            self.image_dir = Path(__file__).parent.parent.joinpath('html', 'images').absolute()
+
+
+        varlib_folder = self.config.get('VARLIB_FOLDER', '/var/lib/indi-allsky')
+        self.varlib_folder_p = Path(varlib_folder)
+
+
+        self._shutdown = False
+
+
+@dataclass
+class WorkerContext:
+    error_q: Any
+    image_q: Any
+    upload_q: Any
+    position_av: Any
+    exposure_av: Any
+    gain_av: Any
+    binning_av: Any
+    sensors_temp_av: Any
+    sensors_user_av: Any
+    night_av: Any
+    astro_av: Any
+
+
+class PushHistoryCache:
+    """Bounded, deque-backed time-windowed cache for push history.
+
+    Uses a `collections.deque` with a configurable `maxlen` to bound memory.
+    """
+    def __init__(self, max_entries=None):
+        self.max_entries = int(max_entries) if max_entries else None
+        # deque(maxlen=None) behaves as unbounded; prefer bounded when possible
+        self._entries = deque(maxlen=self.max_entries)
+
+    def append(self, ts, data):
+        # store integer-second timestamps to avoid sub-second noise
+        self._entries.append((int(ts), data.copy()))
+
+    def get_recent(self, seconds_window):
+        if seconds_window <= 0:
+            return list(self._entries)
+        cutoff = int(time.time()) - int(seconds_window)
+        return [(ts, d) for ts, d in self._entries if ts >= cutoff]
+
+    def prune(self, seconds_window):
+        if seconds_window <= 0:
+            return
+        cutoff = int(time.time()) - int(seconds_window)
+        # pop left until entries are within window
+        while self._entries and self._entries[0][0] < cutoff:
+            self._entries.popleft()
+
+    def resize(self, max_entries):
+        max_entries = int(max_entries) if max_entries else None
+        if max_entries == self.max_entries:
+            return
+        entries = list(self._entries)
+        self.max_entries = max_entries
+        self._entries = deque(entries, maxlen=self.max_entries)
 
         self.filename_t = 'ccd{0:d}_{1:s}.{2:s}'
 
@@ -1034,10 +1152,160 @@ class ImageWorker(Process):
             self._miscUpload.syncapi_image(image_entry, image_metadata)  # syncapi before s3
             self._miscUpload.s3_upload_image(image_entry, image_metadata)
             self._miscUpload.mqtt_publish_image(upload_filename, mq_topic_latest, mqtt_data)
+            # evaluate push alerts after data has been published
+            try:
+                self._check_push_alerts(mqtt_data)
+            except Exception:
+                logger.exception('error while checking push alerts')
             self._miscUpload.upload_image(image_entry)
 
             self.upload_metadata(i_ref, adu, adu_average)
 
+
+    def _check_push_alerts(self, mqtt_data):
+        """Keep a sliding window of recent mqtt_data and evaluate user model.
+
+        The model expression is evaluated with local variables:
+            history : list of (timestamp, data) tuples
+            current : the most recent mqtt_data dict
+        The expression should return truthy when an alert should fire.
+        """
+        if not self.config.get('MQTTPUBLISH', {}).get('PUSH_ENABLE', False):
+            return
+
+        now = int(time.time())
+
+        # compute history window in seconds
+        hours = int(self.config.get('MQTTPUBLISH', {}).get('PUSH_HISTORY_HOURS', 0))
+        seconds_window = hours * 3600
+
+        # Determine max entries based on maximum exposure configured for this worker
+        try:
+            exposure_max = float(self.exposure_av[constants.EXPOSURE_MAX])
+            if exposure_max <= 0:
+                raise ValueError()
+        except Exception:
+            exposure_max = float(self.config.get('EXPOSURE_PERIOD', 60))
+
+        raw_entries = seconds_window / max(1.0, exposure_max)
+        max_entries = math.ceil(raw_entries * 1.2)  # 20% padding
+        max_entries = max(10, max_entries)
+        # allow explicit override from config
+        cfg_override = self.config.get('MQTTPUBLISH', {}).get('PUSH_HISTORY_MAX_ENTRIES')
+        if cfg_override:
+            try:
+                max_entries = int(cfg_override)
+            except Exception:
+                pass
+
+        # initialise or resize bounded cache
+        if getattr(self, '_push_cache', None) is None:
+            self._push_cache = PushHistoryCache(max_entries=max_entries)
+        else:
+            self._push_cache.resize(max_entries)
+
+        # append current sample (cache will make a shallow copy)
+        self._push_cache.append(now, mqtt_data)
+        # prune by timestamp window
+        self._push_cache.prune(seconds_window)
+        # fetch history for evaluation
+        history = self._push_cache.get_recent(seconds_window)
+
+        model = self.config.get('MQTTPUBLISH', {}).get('PUSH_MODEL', '').strip()
+        if not model:
+            return
+
+        # provide helper functions for trend detection in the eval context
+        def _get_series(slot, window_s=None):
+            """Return list of (ts, value) for given slot from history within optional window (seconds)."""
+            now_ts = time.time()
+            series = []
+            cutoff_ts = now_ts - window_s if window_s else 0
+            for ts, d in history:
+                if ts < cutoff_ts:
+                    continue
+                # support nested access for 'sensor_user_X' or other keys
+                if slot in d and isinstance(d[slot], (int, float)):
+                    series.append((ts, float(d[slot])))
+            return series
+
+        def trend_slope(slot, window_s=None):
+            s = _get_series(slot, window_s)
+            if len(s) < 2:
+                return 0.0
+            # use integer-second timestamps to avoid sub-second resolution noise
+            xs = numpy.array([int(t) for t, v in s], dtype=float)
+            ys = numpy.array([v for t, v in s], dtype=float)
+            # normalize xs to seconds relative to first sample to improve conditioning
+            xs0 = xs - xs[0]
+            try:
+                p = numpy.polyfit(xs0, ys, 1)
+                slope_per_second = float(p[0])  # value per second
+                slope = slope_per_second * 60.0  # convert to value per minute
+            except Exception:
+                slope = 0.0
+            return slope
+
+        def increasing(slot, window_s=None, min_slope=0.0):
+            return trend_slope(slot, window_s) > float(min_slope)
+
+        def decreasing(slot, window_s=None, min_slope=0.0):
+            return trend_slope(slot, window_s) < -float(min_slope)
+
+        # read rate-limit config values and expose them to the model context
+        cooldown = int(self.config.get('MQTTPUBLISH', {}).get('PUSH_COOLDOWN_S', 0))
+        max_per_hour = int(self.config.get('MQTTPUBLISH', {}).get('PUSH_MAX_PER_HOUR', 0))
+        # evaluate expression with helper functions available
+        triggered = False
+        try:
+            ctx = {
+                'history': history,
+                'current': mqtt_data,
+                'time': time,
+                'trend_slope': trend_slope,
+                'increasing': increasing,
+                'decreasing': decreasing,
+                'PUSH_HISTORY_HOURS': hours,
+                'PUSH_HISTORY_SECONDS': int(hours * 3600),
+                'PUSH_COOLDOWN_S': cooldown,
+                'PUSH_MAX_PER_HOUR': max_per_hour,
+            }
+            triggered = bool(eval(model, {}, ctx))
+        except Exception as e:
+            logger.error('Push model evaluation error: %s', e)
+            triggered = False
+
+        last_state = getattr(self, '_push_last_state', False)
+
+        # only act on rising edge
+        if triggered and not last_state:
+            now_ts = time.time()
+            # enforce cooldown (seconds between alerts)
+            cooldown = int(self.config.get('MQTTPUBLISH', {}).get('PUSH_COOLDOWN_S', 0))
+            last_sent = getattr(self, '_push_last_sent_ts', 0)
+            if cooldown and (now_ts - last_sent) < cooldown:
+                logger.info('Push alert suppressed by cooldown (%ds remaining)', int(cooldown - (now_ts - last_sent)))
+            else:
+                # enforce max per hour
+                max_per_hour = int(self.config.get('MQTTPUBLISH', {}).get('PUSH_MAX_PER_HOUR', 0))
+                sent_list = getattr(self, '_push_alert_timestamps', [])
+                # purge old entries beyond 1 hour
+                hour_cutoff = now_ts - 3600
+                sent_list = [t for t in sent_list if t >= hour_cutoff]
+                if max_per_hour and len(sent_list) >= max_per_hour:
+                    logger.info('Push alert suppressed by hourly limit (%d/hour)', max_per_hour)
+                else:
+                    # send alert message
+                    alert_topic = self.config.get('MQTTPUBLISH', {}).get('PUSH_TOPIC', 'alert')
+                    alert_data = {'alert': 'push', 'timestamp': datetime.utcnow().isoformat()}
+                    alert_data.update(mqtt_data)
+                    self._miscUpload.mqtt_publish_message(alert_topic, alert_data)
+                    # record send
+                    sent_list.append(now_ts)
+                    self._push_alert_timestamps = sent_list
+                    self._push_last_sent_ts = now_ts
+        # update last_state
+        self._push_last_state = triggered
 
     def decdeg2dms(self, dd):
         is_positive = dd >= 0

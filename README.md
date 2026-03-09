@@ -666,6 +666,19 @@ indi-allsky supports publishing all sky data to an MQTT service for monitoring.
 
 For more info, see the wiki page: https://github.com/aaronwmorris/indi-allsky/wiki/MQTT-Broker-Publishing
 
+### Push Alerts via MQTT
+
+A new push notification subsystem allows you to send MQTT messages whenever a user-defined model of sensor measurements and star counts indicates rain may be approaching.  Alerts are disabled by default and can be configured under the **MQTT** tab of the web interface.
+
+- **Enable MQTT Push Alerts** – turn the feature on/off
+- **Push Topic** – sub‑topic (under the base topic) where alert messages are published
+- **History (hours)** – how many hours of past MQTT samples are retained for trend analysis (default 3)
+- **Push Model** – a Python expression evaluated with `history` (list of `(timestamp,data)` tuples) and `current` (latest data).  Return truthy to fire an alert.
+
+The message payload contains the current sensor values and a timestamp; subscribers (for example, a gateway to Telegram) can react accordingly.
+
+For examples and usage tips see the new wiki section or issue discussion.
+
 
 ## Blogs, Articles, and Links
 

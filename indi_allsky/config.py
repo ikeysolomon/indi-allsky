@@ -528,6 +528,13 @@ class IndiAllSkyConfigBase(object):
             "TLS"                    : True,
             "CERT_BYPASS"            : True,
             "PUBLISH_IMAGE"          : True,
+            # push alert settings
+            "PUSH_ENABLE"            : False,
+            "PUSH_TOPIC"             : "alert",  # sub-topic to publish push messages under base topic
+            "PUSH_HISTORY_HOURS"     : 3,      # how many hours of sensor data to keep for regression
+            "PUSH_MODEL"             : "",     # python expression evaluated with locals 'history' and 'current'
+            "PUSH_COOLDOWN_S"        : 900,    # minimum seconds between identical alerts (dedup cooldown)
+            "PUSH_MAX_PER_HOUR"      : 6,      # maximum alerts allowed per hour
         },
         "SYNCAPI" : {
             "ENABLE"                 : False,

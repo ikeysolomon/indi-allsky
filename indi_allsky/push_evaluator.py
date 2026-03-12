@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 import logging
 import ast
+import numpy
 from typing import Callable
 
 import numpy
@@ -16,6 +17,7 @@ from .push_history import PushHistoryCache
 
 logger = logging.getLogger('indi_allsky')
 
+from .utils import get_series, trend_slope as util_trend_slope, increasing as util_increasing, decreasing as util_decreasing
 
 class UnsafeExpression(Exception):
     pass
@@ -56,6 +58,9 @@ class PushEvaluator:
         self._push_last_state = False
         # publisher can be a callable (topic, data) or an object with publish()
         self.publisher = publisher
+        # optional persistent state callbacks: functions (key)->str and (key,val)
+        self.state_get = None
+        self.state_set = None
 
     def _call_publisher(self, topic, payload):
         if not self.publisher:
@@ -67,27 +72,16 @@ class PushEvaluator:
                 self.publisher.publish(topic, payload)
         except Exception:
             logger.exception('Error publishing push alert')
+            return get_series(history, slot, window_s)
 
     def evaluate_and_send(self, mqtt_data: dict):
-        if not self.config.get('MQTTPUBLISH', {}).get('PUSH_ENABLE', False):
-            return
-
-        now = int(time.time())
-
-        hours = int(self.config.get('MQTTPUBLISH', {}).get('PUSH_HISTORY_HOURS', 0))
-        seconds_window = hours * 3600
-
-        # derive max_entries heuristically or fallback to config
-        exposure_max = float(self.config.get('EXPOSURE_PERIOD', 60))
-        raw_entries = seconds_window / max(1.0, exposure_max)
-        max_entries = int(max(10, (raw_entries * 1.2)))
-        cfg_override = self.config.get('MQTTPUBLISH', {}).get('PUSH_HISTORY_MAX_ENTRIES')
+            return util_trend_slope(history, slot, window_s)
         if cfg_override:
             try:
-                max_entries = int(cfg_override)
+            return util_increasing(history, slot, window_s, min_slope)
             except Exception:
                 pass
-
+            return util_decreasing(history, slot, window_s, min_slope)
         if self._push_cache is None:
             self._push_cache = PushHistoryCache(max_entries=max_entries)
         else:
@@ -162,6 +156,21 @@ class PushEvaluator:
             logger.error('Push model evaluation error: %s', e)
             triggered = False
 
+        # load persisted state when available
+        try:
+            if self.state_get:
+                last_sent_s = self.state_get('PUSH_LAST_SENT_TS')
+                if last_sent_s:
+                    self._push_last_sent_ts = float(last_sent_s)
+                sent_list_s = self.state_get('PUSH_ALERT_TIMESTAMPS')
+                if sent_list_s:
+                    import json
+
+                    self._push_alert_timestamps = json.loads(sent_list_s)
+        except Exception:
+            # ignore persistence errors and continue with in-memory state
+            pass
+
         last_state = self._push_last_state
 
         if triggered and not last_state:
@@ -183,5 +192,14 @@ class PushEvaluator:
                     sent_list.append(now_ts)
                     self._push_alert_timestamps = sent_list
                     self._push_last_sent_ts = now_ts
+                    # persist if handlers provided
+                    try:
+                        if self.state_set:
+                            import json
+
+                            self.state_set('PUSH_ALERT_TIMESTAMPS', json.dumps(self._push_alert_timestamps))
+                            self.state_set('PUSH_LAST_SENT_TS', str(self._push_last_sent_ts))
+                    except Exception:
+                        logger.exception('Failed to persist push state')
 
         self._push_last_state = triggered

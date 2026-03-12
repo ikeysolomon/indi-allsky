@@ -59,3 +59,20 @@ class NotificationManager:
 def add_notification(*args, **kwargs):
     """Convenience function for quick calls."""
     return NotificationManager().add_notification(*args, **kwargs)
+
+
+# Publisher registry for pluggable backends
+_PUBLISHERS = {}
+
+
+def register_publisher(name, publisher):
+    """Register a publisher instance under `name`."""
+    _PUBLISHERS[name] = publisher
+
+
+def get_publisher(name):
+    return _PUBLISHERS.get(name)
+
+
+def list_publishers():
+    return list(_PUBLISHERS.keys())

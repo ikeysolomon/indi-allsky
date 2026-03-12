@@ -144,8 +144,14 @@ class ImageWorker(Process):
         try:
             from .publishers import MQTTPublisher
             from .push_evaluator import PushEvaluator
-            publisher = MQTTPublisher(self._miscUpload)
+            publisher = MQTTPublisher(self._miscUpload, upload_q=self.upload_q, config=self.config)
             self._push_evaluator = PushEvaluator(self.config, publisher=publisher)
+            # wire persistent state handlers to use miscDb state storage
+            try:
+                self._push_evaluator.set_state_handlers(self._miscDb.getState, self._miscDb.setState)
+            except Exception:
+                # miscDb may not be fully available in some contexts
+                pass
         except Exception:
             self._push_evaluator = None
 

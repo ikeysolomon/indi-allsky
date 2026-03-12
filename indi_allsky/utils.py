@@ -1,4 +1,54 @@
-import math
+"""Small reusable utilities for push evaluation and history analysis.
+
+These helpers operate on the `history` sequence used by PushEvaluator and
+other components. Keeping them here makes them testable and reusable.
+"""
+from typing import List, Tuple, Optional
+import numpy as np
+
+def get_series(history: List[Tuple[float, dict]], slot: str, window_s: Optional[float] = None, now_ts: Optional[float] = None):
+    """Return a list of (ts, value) tuples for numeric values of `slot` in history.
+
+    history is expected to be an iterable of (ts, payload) as produced by
+    `PushHistoryCache.get_recent()` or similar. If `window_s` is provided the
+    returned series will include only entries with ts >= now - window_s.
+    """
+    if now_ts is None:
+        now_ts = __import__('time').time()
+    cutoff_ts = now_ts - window_s if window_s else 0
+    series = []
+    for ts, d in history:
+        if ts < cutoff_ts:
+            continue
+        if slot in d and isinstance(d[slot], (int, float)):
+            series.append((ts, float(d[slot])))
+    return series
+
+def trend_slope(history: List[Tuple[float, dict]], slot: str, window_s: Optional[float] = None):
+    """Estimate trend slope (per minute) for a numeric slot in the history.
+
+    Returns a float slope (units per minute). If insufficient data or an
+    error occurs, returns 0.0.
+    """
+    s = get_series(history, slot, window_s)
+    if len(s) < 2:
+        return 0.0
+    xs = np.array([int(t) for t, v in s], dtype=float)
+    ys = np.array([v for t, v in s], dtype=float)
+    xs0 = xs - xs[0]
+    try:
+        p = np.polyfit(xs0, ys, 1)
+        slope_per_second = float(p[0])
+        slope = slope_per_second * 60.0
+    except Exception:
+        slope = 0.0
+    return slope
+
+def increasing(history: List[Tuple[float, dict]], slot: str, window_s: Optional[float] = None, min_slope: float = 0.0):
+    return trend_slope(history, slot, window_s) > float(min_slope)
+
+def decreasing(history: List[Tuple[float, dict]], slot: str, window_s: Optional[float] = None, min_slope: float = 0.0):
+    return trend_slope(history, slot, window_s) < -float(min_slope)import math
 from datetime import datetime
 from datetime import timedelta
 import logging

@@ -18,8 +18,8 @@ sys.path.append(str(Path(__file__).parent.absolute().parent))
 
 from indi_allsky.flask import create_app
 from indi_allsky.config import IndiAllSkyConfig
-from indi_allsky.flask.miscDb import miscDb
 from indi_allsky.flask.models import NotificationCategory
+from indi_allsky.notifications import NotificationManager
 
 # setup flask context for db access
 app = create_app()
@@ -53,7 +53,7 @@ class AddNotification(object):
         self.config = self._config_obj.config
 
 
-        self._miscDb = miscDb(self.config)
+        self._manager = NotificationManager(self.config)
 
 
     def main(self, category_str, item, message, expire_minutes):
@@ -64,7 +64,7 @@ class AddNotification(object):
             sys.exit(1)
 
 
-        self._miscDb.addNotification(
+        self._manager.add_notification(
             category,
             item,
             message,

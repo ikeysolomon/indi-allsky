@@ -1004,33 +1004,11 @@ class miscDb(object):
 
 
     def addNotification(self, category, item, notification, expire=timedelta(hours=12)):
-        now = datetime.now()
+        # Delegate notification creation to the central NotificationManager
+        from ..notifications import NotificationManager
 
-        # look for existing notification
-        notice = IndiAllSkyDbNotificationTable.query\
-            .filter(IndiAllSkyDbNotificationTable.item == item)\
-            .filter(IndiAllSkyDbNotificationTable.category == category)\
-            .filter(IndiAllSkyDbNotificationTable.expireDate > now)\
-            .first()
-
-        if notice:
-            logger.warning('Not adding existing notification')
-            return
-
-
-        new_notice = IndiAllSkyDbNotificationTable(
-            item=item,
-            category=category,
-            notification=str(notification)[:255],  # truncate to 255 characters
-            expireDate=now + expire,
-        )
-
-        db.session.add(new_notice)
-        db.session.commit()
-
-        logger.info('Added %s notification: %d', category.value, new_notice.id)
-
-        return new_notice
+        mgr = NotificationManager(self.config)
+        return mgr.add_notification(category, item, notification, expire=expire)
 
 
     def setState(self, key, value, encrypted=False):

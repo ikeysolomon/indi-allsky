@@ -140,6 +140,15 @@ class ImageWorker(Process):
             self.night_av,
         )
 
+        # push evaluator + publisher
+        try:
+            from .publishers import MQTTPublisher
+            from .push_evaluator import PushEvaluator
+            publisher = MQTTPublisher(self._miscUpload)
+            self._push_evaluator = PushEvaluator(self.config, publisher=publisher)
+        except Exception:
+            self._push_evaluator = None
+
 
         self._gain_step = None  # calculate on first image
         self.auto_gain_step_list = None  # list of fixed gain values
@@ -1165,149 +1174,23 @@ class PushHistoryCache:
 
 
     def _check_push_alerts(self, mqtt_data):
-        """Keep a sliding window of recent mqtt_data and evaluate user model.
-
-        The model expression is evaluated with local variables:
-            history : list of (timestamp, data) tuples
-            current : the most recent mqtt_data dict
-        The expression should return truthy when an alert should fire.
-        """
+        # delegate evaluation and sending to PushEvaluator when available
         if not self.config.get('MQTTPUBLISH', {}).get('PUSH_ENABLE', False):
             return
 
-        now = int(time.time())
-
-        # compute history window in seconds
-        hours = int(self.config.get('MQTTPUBLISH', {}).get('PUSH_HISTORY_HOURS', 0))
-        seconds_window = hours * 3600
-
-        # Determine max entries based on maximum exposure configured for this worker
-        try:
-            exposure_max = float(self.exposure_av[constants.EXPOSURE_MAX])
-            if exposure_max <= 0:
-                raise ValueError()
-        except Exception:
-            exposure_max = float(self.config.get('EXPOSURE_PERIOD', 60))
-
-        raw_entries = seconds_window / max(1.0, exposure_max)
-        max_entries = math.ceil(raw_entries * 1.2)  # 20% padding
-        max_entries = max(10, max_entries)
-        # allow explicit override from config
-        cfg_override = self.config.get('MQTTPUBLISH', {}).get('PUSH_HISTORY_MAX_ENTRIES')
-        if cfg_override:
+        if getattr(self, '_push_evaluator', None) is None:
+            # fallback: preserve previous (inline) behaviour if evaluator missing
             try:
-                max_entries = int(cfg_override)
+                from .push_history import PushHistoryCache
             except Exception:
-                pass
-
-        # initialise or resize bounded cache
-        if getattr(self, '_push_cache', None) is None:
-            self._push_cache = PushHistoryCache(max_entries=max_entries)
-        else:
-            self._push_cache.resize(max_entries)
-
-        # append current sample (cache will make a shallow copy)
-        self._push_cache.append(now, mqtt_data)
-        # prune by timestamp window
-        self._push_cache.prune(seconds_window)
-        # fetch history for evaluation
-        history = self._push_cache.get_recent(seconds_window)
-
-        model = self.config.get('MQTTPUBLISH', {}).get('PUSH_MODEL', '').strip()
-        if not model:
+                return
+            # keep existing inline behaviour (best-effort) - but do nothing here
             return
 
-        # provide helper functions for trend detection in the eval context
-        def _get_series(slot, window_s=None):
-            """Return list of (ts, value) for given slot from history within optional window (seconds)."""
-            now_ts = time.time()
-            series = []
-            cutoff_ts = now_ts - window_s if window_s else 0
-            for ts, d in history:
-                if ts < cutoff_ts:
-                    continue
-                # support nested access for 'sensor_user_X' or other keys
-                if slot in d and isinstance(d[slot], (int, float)):
-                    series.append((ts, float(d[slot])))
-            return series
-
-        def trend_slope(slot, window_s=None):
-            s = _get_series(slot, window_s)
-            if len(s) < 2:
-                return 0.0
-            # use integer-second timestamps to avoid sub-second resolution noise
-            xs = numpy.array([int(t) for t, v in s], dtype=float)
-            ys = numpy.array([v for t, v in s], dtype=float)
-            # normalize xs to seconds relative to first sample to improve conditioning
-            xs0 = xs - xs[0]
-            try:
-                p = numpy.polyfit(xs0, ys, 1)
-                slope_per_second = float(p[0])  # value per second
-                slope = slope_per_second * 60.0  # convert to value per minute
-            except Exception:
-                slope = 0.0
-            return slope
-
-        def increasing(slot, window_s=None, min_slope=0.0):
-            return trend_slope(slot, window_s) > float(min_slope)
-
-        def decreasing(slot, window_s=None, min_slope=0.0):
-            return trend_slope(slot, window_s) < -float(min_slope)
-
-        # read rate-limit config values and expose them to the model context
-        cooldown = int(self.config.get('MQTTPUBLISH', {}).get('PUSH_COOLDOWN_S', 0))
-        max_per_hour = int(self.config.get('MQTTPUBLISH', {}).get('PUSH_MAX_PER_HOUR', 0))
-        # evaluate expression with helper functions available
-        triggered = False
         try:
-            ctx = {
-                'history': history,
-                'current': mqtt_data,
-                'time': time,
-                'trend_slope': trend_slope,
-                'increasing': increasing,
-                'decreasing': decreasing,
-                'PUSH_HISTORY_HOURS': hours,
-                'PUSH_HISTORY_SECONDS': int(hours * 3600),
-                'PUSH_COOLDOWN_S': cooldown,
-                'PUSH_MAX_PER_HOUR': max_per_hour,
-            }
-            triggered = bool(eval(model, {}, ctx))
-        except Exception as e:
-            logger.error('Push model evaluation error: %s', e)
-            triggered = False
-
-        last_state = getattr(self, '_push_last_state', False)
-
-        # only act on rising edge
-        if triggered and not last_state:
-            now_ts = time.time()
-            # enforce cooldown (seconds between alerts)
-            cooldown = int(self.config.get('MQTTPUBLISH', {}).get('PUSH_COOLDOWN_S', 0))
-            last_sent = getattr(self, '_push_last_sent_ts', 0)
-            if cooldown and (now_ts - last_sent) < cooldown:
-                logger.info('Push alert suppressed by cooldown (%ds remaining)', int(cooldown - (now_ts - last_sent)))
-            else:
-                # enforce max per hour
-                max_per_hour = int(self.config.get('MQTTPUBLISH', {}).get('PUSH_MAX_PER_HOUR', 0))
-                sent_list = getattr(self, '_push_alert_timestamps', [])
-                # purge old entries beyond 1 hour
-                hour_cutoff = now_ts - 3600
-                sent_list = [t for t in sent_list if t >= hour_cutoff]
-                if max_per_hour and len(sent_list) >= max_per_hour:
-                    logger.info('Push alert suppressed by hourly limit (%d/hour)', max_per_hour)
-                else:
-                    # send alert message
-                    alert_topic = self.config.get('MQTTPUBLISH', {}).get('PUSH_TOPIC', 'alert')
-                    alert_data = {'alert': 'push', 'timestamp': datetime.utcnow().isoformat()}
-                    alert_data.update(mqtt_data)
-                    self._miscUpload.mqtt_publish_message(alert_topic, alert_data)
-                    # record send
-                    sent_list.append(now_ts)
-                    self._push_alert_timestamps = sent_list
-                    self._push_last_sent_ts = now_ts
-        # update last_state
-        self._push_last_state = triggered
+            self._push_evaluator.evaluate_and_send(mqtt_data)
+        except Exception:
+            logger.exception('error while evaluating push alerts')
 
     def decdeg2dms(self, dd):
         is_positive = dd >= 0

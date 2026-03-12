@@ -690,6 +690,8 @@ class PushHistoryCache:
         # adu value may be updated below
 
 
+        self.image_processor.denoise()
+
         self.image_processor.stretch()
 
 

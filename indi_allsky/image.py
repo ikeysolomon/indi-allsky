@@ -140,7 +140,6 @@ class ImageWorker(Process):
             self.night_av,
         )
 
-        # push evaluator + publisher
         try:
             from .rainOrRefrain import MQTTPublisher, PushEvaluator
             publisher = MQTTPublisher(self._miscUpload, upload_q=self.upload_q, config=self.config)

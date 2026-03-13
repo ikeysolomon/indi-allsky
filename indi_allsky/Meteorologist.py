@@ -21,6 +21,25 @@ DEFAULT_HIGH_CLOUD_AFTER_HOUR = 17
 from typing import Dict, Iterable, List, Optional
 from datetime import datetime, timedelta
 
+# Prefer the project's canonical date calcs from `utils.py` (ephem-based).
+# Lazy-load the heavy `utils` implementation to avoid importing `ephem`
+# at module import time.
+_IndiAllSkyDateCalcs_cls = None
+def _get_IndiAllSkyDateCalcs():
+    global _IndiAllSkyDateCalcs_cls
+    if _IndiAllSkyDateCalcs_cls is None:
+        from .utils import IndiAllSkyDateCalcs as _Cls
+        _IndiAllSkyDateCalcs_cls = _Cls
+    return _IndiAllSkyDateCalcs_cls
+
+def IndiAllSkyDateCalcs(*args, **kwargs):
+    """Factory that lazily instantiates the canonical IndiAllSkyDateCalcs.
+
+    Call like a class: `IndiAllSkyDateCalcs(config, position_av)` -> instance.
+    """
+    cls = _get_IndiAllSkyDateCalcs()
+    return cls(*args, **kwargs)
+
 class MoistureMonitorCache:
     """Bounded, deque-backed time-windowed cache for push history."""
     def __init__(self, max_entries=None):
@@ -56,20 +75,8 @@ class MoistureMonitorCache:
         self._entries = deque(entries, maxlen=self.max_entries)
 
 
-class IndiAllSkyDateCalcs:
-    """Minimal date calcs: returns current date and a 3-hour transition."""
-    def __init__(self, config=None, position_av=None):
-        self.config = config
-        self.position_av = position_av
-
-    def calcDayDate(self, now: datetime):
-        return now.date()
-
-    def getDayDate(self):
-        return datetime.now().date()
-
-    def getNextDayNightTransition(self):
-        return datetime.now() + timedelta(hours=3)
+# `IndiAllSkyDateCalcs` is provided by `indi_allsky.utils` (imported above).
+# A thin wrapper used to be here; prefer the canonical implementation there.
 
 
 class DataPackager:

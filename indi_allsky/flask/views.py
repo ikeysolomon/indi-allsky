@@ -8118,6 +8118,8 @@ class JsonImageProcessingView(JsonView):
 
             image_processor.stack()  # this populates self.image
 
+            image_processor.denoise()
+
             image_processor.stretch()
 
             if p_config['NIGHT_CONTRAST_ENHANCE']:

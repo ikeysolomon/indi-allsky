@@ -23,7 +23,7 @@ import queue
 from . import constants
 from . import camera as camera_module
 
-from .utils import IndiAllSkyDateCalcs
+from .date_calcs import IndiAllSkyDateCalcs
 
 from .flask.models import TaskQueueQueue
 from .flask.models import TaskQueueState

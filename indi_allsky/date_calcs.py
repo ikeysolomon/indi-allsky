@@ -1,56 +1,28 @@
-"""Small reusable utilities for push evaluation and history analysis.
-
-These helpers operate on the `history` sequence used by PushEvaluator and
-other components. Keeping them here makes them testable and reusable.
 """
-from typing import List, Tuple, Optional
-import numpy as np
+`date_calcs.py` — Workflow role
+--------------------------------
+This module contains `IndiAllSkyDateCalcs`, a small set of calendar and
+sun-position helpers used by runtime components to determine the
+operational "day" boundaries and next day/night transitions.
 
-def get_series(history: List[Tuple[float, dict]], slot: str, window_s: Optional[float] = None, now_ts: Optional[float] = None):
-    """Return a list of (ts, value) tuples for numeric values of `slot` in history.
+Workflow placement:
+- This module is *not* part of the sensor-analysis pipeline itself. It
+    belongs to the scheduling / bookkeeping layer that provides a
+    canonical notion of the current day and the next day/night transition.
+- A future `DataPackager` (workflow component) will use these helpers to
+    align and interpret timestamped log entries when building the
+    per-sensor histories passed to `rain_detection_models`.
 
-    history is expected to be an iterable of (ts, payload) as produced by
-    `PushHistoryCache.get_recent()` or similar. If `window_s` is provided the
-    returned series will include only entries with ts >= now - window_s.
-    """
-    if now_ts is None:
-        now_ts = __import__('time').time()
-    cutoff_ts = now_ts - window_s if window_s else 0
-    series = []
-    for ts, d in history:
-        if ts < cutoff_ts:
-            continue
-        if slot in d and isinstance(d[slot], (int, float)):
-            series.append((ts, float(d[slot])))
-    return series
+Where log history maps to analysis inputs:
+- The code that packages log history into per-sensor sequences should
+    call into `date_calcs` when it needs to convert a timestamp into a
+    day-boundary or to compute utc/local offsets for time-windowing.
+    See `indi_allsky/workflows.py:DataPackager` (planned) for the exact
+    mapping logic.
+"""
 
-def trend_slope(history: List[Tuple[float, dict]], slot: str, window_s: Optional[float] = None):
-    """Estimate trend slope (per minute) for a numeric slot in the history.
-
-    Returns a float slope (units per minute). If insufficient data or an
-    error occurs, returns 0.0.
-    """
-    s = get_series(history, slot, window_s)
-    if len(s) < 2:
-        return 0.0
-    xs = np.array([int(t) for t, v in s], dtype=float)
-    ys = np.array([v for t, v in s], dtype=float)
-    xs0 = xs - xs[0]
-    try:
-        p = np.polyfit(xs0, ys, 1)
-        slope_per_second = float(p[0])
-        slope = slope_per_second * 60.0
-    except Exception:
-        slope = 0.0
-    return slope
-
-def increasing(history: List[Tuple[float, dict]], slot: str, window_s: Optional[float] = None, min_slope: float = 0.0):
-    return trend_slope(history, slot, window_s) > float(min_slope)
-
-def decreasing(history: List[Tuple[float, dict]], slot: str, window_s: Optional[float] = None, min_slope: float = 0.0):
-    return trend_slope(history, slot, window_s) < -float(min_slope)import math
-from datetime import datetime
-from datetime import timedelta
+import math
+from datetime import datetime, timedelta
 import logging
 
 import ephem

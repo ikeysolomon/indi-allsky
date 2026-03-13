@@ -33,7 +33,7 @@ from .scnr import IndiAllskyScnr
 from .denoise import IndiAllskyDenoise
 from .stack import IndiAllskyStacker
 from .overlay.cardinalDirsLabel import IndiAllskyCardinalDirsLabel
-from .utils import IndiAllSkyDateCalcs
+from .date_calcs import IndiAllSkyDateCalcs
 from .overlay.moonOverlay import IndiAllSkyMoonOverlay
 from .overlay.lightgraphOverlay import IndiAllSkyLightgraphOverlay
 from .overlay.imageOverlay import IndiAllSkyImageOverlay

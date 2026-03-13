@@ -142,8 +142,7 @@ class ImageWorker(Process):
 
         # push evaluator + publisher
         try:
-            from .publishers import MQTTPublisher
-            from .push_evaluator import PushEvaluator
+            from .rainOrRefrain import MQTTPublisher, PushEvaluator
             publisher = MQTTPublisher(self._miscUpload, upload_q=self.upload_q, config=self.config)
             self._push_evaluator = PushEvaluator(self.config, publisher=publisher)
             # wire persistent state handlers to use miscDb state storage
@@ -200,108 +199,6 @@ class WorkerContext:
     night_av: Any
     astro_av: Any
 
-
-class PushHistoryCache:
-    """Bounded, deque-backed time-windowed cache for push history.
-
-    Uses a `collections.deque` with a configurable `maxlen` to bound memory.
-    """
-    def __init__(self, max_entries=None):
-        self.max_entries = int(max_entries) if max_entries else None
-        # deque(maxlen=None) behaves as unbounded; prefer bounded when possible
-        self._entries = deque(maxlen=self.max_entries)
-
-    def append(self, ts, data):
-        # store integer-second timestamps to avoid sub-second noise
-        self._entries.append((int(ts), data.copy()))
-
-    def get_recent(self, seconds_window):
-        if seconds_window <= 0:
-            return list(self._entries)
-        cutoff = int(time.time()) - int(seconds_window)
-        return [(ts, d) for ts, d in self._entries if ts >= cutoff]
-
-    def prune(self, seconds_window):
-        if seconds_window <= 0:
-            return
-        cutoff = int(time.time()) - int(seconds_window)
-        # pop left until entries are within window
-        while self._entries and self._entries[0][0] < cutoff:
-            self._entries.popleft()
-
-    def resize(self, max_entries):
-        max_entries = int(max_entries) if max_entries else None
-        if max_entries == self.max_entries:
-            return
-        entries = list(self._entries)
-        self.max_entries = max_entries
-        self._entries = deque(entries, maxlen=self.max_entries)
-
-        self.filename_t = 'ccd{0:d}_{1:s}.{2:s}'
-
-        self.adsb_worker = None
-        self.adsb_worker_idx = 0
-        self.adsb_aircraft_q = None
-        self.adsb_aircraft_list = []
-
-        self.generate_mask_base = True
-
-        self.target_adu_found = False
-        self.current_adu_target = 0
-        self.hist_adu = []
-
-        self.sqm_value = 0
-
-        self.image_count = 0
-        self.metadata_count = 0
-
-        self.image_processor = ImageProcessor(
-            self.config,
-            self.position_av,
-            self.gain_av,
-            self.binning_av,
-            self.sensors_temp_av,
-            self.sensors_user_av,
-            self.night_av,
-            self.astro_av,
-        )
-
-        self._miscDb = miscDb(self.config)
-        self._miscUpload = miscUpload(
-            self.config,
-            self.upload_q,
-            self.night_av,
-        )
-
-
-        self._gain_step = None  # calculate on first image
-        self.auto_gain_step_list = None  # list of fixed gain values
-        self.auto_gain_exposure_cutoff_low = None
-        self.auto_gain_exposure_cutoff_mid = None
-        self.auto_gain_exposure_cutoff_high = None
-
-
-        self.image_save_hook_process = None  # used for both pre- and post-hooks
-        self.image_save_hook_process_start = 0
-        self.pre_hook_datajson_name_p = None
-
-
-        self.next_save_fits_offset = self.config.get('IMAGE_SAVE_FITS_PERIOD', 7200)
-        self.next_save_fits_time = time.time() + self.next_save_fits_offset
-
-        self._libcamera_raw = False
-
-        if self.config.get('IMAGE_FOLDER'):
-            self.image_dir = Path(self.config['IMAGE_FOLDER']).absolute()
-        else:
-            self.image_dir = Path(__file__).parent.parent.joinpath('html', 'images').absolute()
-
-
-        varlib_folder = self.config.get('VARLIB_FOLDER', '/var/lib/indi-allsky')
-        self.varlib_folder_p = Path(varlib_folder)
-
-
-        self._shutdown = False
 
 
     @property
@@ -1198,9 +1095,9 @@ class PushHistoryCache:
             return
 
         if getattr(self, '_push_evaluator', None) is None:
-            # fallback: preserve previous (inline) behaviour if evaluator missing
+            # fallback: preserve previous behaviour if evaluator missing
             try:
-                from .push_history import PushHistoryCache
+                from .Meteorologist import MoistureMonitorCache
             except Exception:
                 return
             # keep existing inline behaviour (best-effort) - but do nothing here

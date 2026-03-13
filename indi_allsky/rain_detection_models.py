@@ -1,320 +1,110 @@
-"""
-rain_detection_models.py
+"""Analysis primitives for rain detection.
 
-Analysis workflow role
-----------------------
-This module contains the analysis primitives and small feature-extraction
-pipeline used by the rain-detection workflow. It is intentionally
-focused on transforming per-sensor histories (sequences of numeric
-values or `(timestamp, value)` pairs) into model-ready features and
-signals. Typical workflow:
-
-- `DataPackager` (a workflow component, planned in
-    `indi_allsky/workflows.py`) will build a mapping of canonical sensor
-    names to histories (e.g. `{'humidity': [(ts,v), ...], 'rain': [...], ...}`)
-    by reading the log history (the same tuples that `PushEvaluator` uses).
-- `AnalysisWorkflow` calls into this module with that `sensor_histories`
-    mapping. `prepare_model_input()` flattens per-sensor features; the
-    various `compute_*` helpers produce decision signals and weighted
-    scores.
-
-Where log history maps to analysis inputs:
-- The canonical conversion is `history (iterable of (ts,payload))`
-    -> `get_series()` (in `workflows.py` / `DataPackager`) -> per-sensor `(ts, value)` lists.
-    `DataPackager` is responsible for calling `get_series()` for each
-    configured sensor slot and providing the result to the functions in
-    this module. See `prepare_model_input()` for the expected mapping
-    shape: `Dict[str, Iterable]` where each value is either a list of
-    values or a list of `(ts, value)` pairs.
-
-Design intent:
-- Keep analysis pure and dependency-free. This module should not
-    access global runtime arrays or config; it accepts explicit data
-    structures so it can be tested in isolation and reused across
-    multiple workflows (MQTT push, internal alerting, web UI signals).
+This module provides pure, testable functions that accept per-sensor
+histories (mapping sensor -> list of (ts, value) tuples) and produce
+features, spike detections and a weighted rain score. State (history
+cache and packaging) is owned by `Meteorologist`.
 """
 from typing import List, Tuple, Dict, Iterable, Optional
-import math
 import statistics
-import time
 
-# Module-level constants (hoisted defaults)
-# Default window sizes (in number of samples) used for computing windowed stats
-DEFAULT_WINDOWS: Tuple[int, ...] = (3, 5, 15)
-# Threshold used to classify slope as increasing/decreasing/stable
-DEFAULT_POS_THRESHOLD: float = 1e-6
-# Default feature to use when computing weighted rain score
-DEFAULT_FEATURE_KEY: str = 'overall_mean'
-
-# Supported sensor keys (common environmental sensors used in rain detection)
-DEFAULT_SUPPORTED_SENSORS: Tuple[str, ...] = ('humidity', 'lightning', 'dew_point', 'pressure', 'rain')
-
-# Default per-sensor weights (used when no explicit weights provided)
-# Explicitly list each supported sensor with default weight 1.0
-DEFAULT_SENSOR_WEIGHTS: Dict[str, float] = {
-    'humidity': 1.0,
-    'lightning': 1.0,
-    'dew_point': 1.0,
-    'pressure': 1.0,
+# Include `high_cloud` as a first-class feature (not a physical sensor)
+DEFAULT_SENSOR_WEIGHTS = {
     'rain': 1.0,
+    'humidity': 0.5,
+    'pressure': 0.2,
+    'dew_point': 0.3,
+    'lightning': 2.0,
+    # weight for high_cloud: higher means high-cloud presence contributes more to
+    # the computed rain score. Value is configurable via callers/config.
+    'high_cloud': 0.4,
 }
-
-def _unpack_history(history: Iterable) -> Tuple[List[float], Optional[List[float]]]:
-    """
-    Normalize history input into (values, times).
-
-    Accepts either:
-    - a sequence of numbers [v0, v1, ...]
-    - a sequence of (timestamp, value) pairs [(t0, v0), (t1, v1), ...]
-
-    Returns (values, times) where times is None if not provided.
-    """
-    history = list(history)
-    if not history:
-        return [], None
-    first = history[0]
-    if isinstance(first, (list, tuple)) and len(first) >= 2:
-        times = [float(t) for t, _ in history]
-        values = [float(v) for _, v in history]
-        return values, times
-    else:
-        values = [float(v) for v in history]
-        return values, None
+DEFAULT_FEATURE_KEY = 'overall_mean'
 
 
-def linear_slope(values: List[float], times: Optional[List[float]] = None) -> float:
-    """
-    Compute slope of `values` over `times` using simple linear regression
-    (least-squares). If `times` is None, uses integer indices as x.
-
-    Returns slope (change in value per unit time/index). Returns 0.0
-    for empty or constant-series inputs.
-    """
-    if not values:
-        return 0.0
-    n = len(values)
-    if times is None:
-        x = list(range(n))
-    else:
-        x = list(times)
-    if len(x) != n:
-        raise ValueError("times and values must have same length")
-    mean_x = statistics.mean(x)
-    mean_y = statistics.mean(values)
-    num = 0.0
-    den = 0.0
-    for xi, yi in zip(x, values):
-        dx = xi - mean_x
-        num += dx * (yi - mean_y)
-        den += dx * dx
-    if den == 0.0:
-        return 0.0
+def linear_slope(series: List[Tuple[int, float]]) -> Optional[float]:
+    if not series or len(series) < 2:
+        return None
+    n = len(series)
+    xs = [float(s[0]) for s in series]
+    ys = [float(s[1]) for s in series]
+    x_mean = sum(xs) / n
+    y_mean = sum(ys) / n
+    num = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys))
+    den = sum((x - x_mean) ** 2 for x in xs)
+    if den == 0:
+        return None
     return num / den
 
 
-def slope_trend(values: List[float], times: Optional[List[float]] = None, *,
-                pos_threshold: float = DEFAULT_POS_THRESHOLD, neg_threshold: Optional[float] = None) -> str:
-    """
-    Classify the trend of `values` as 'increasing', 'decreasing', or 'stable'.
-
-    Thresholds control sensitivity; by default a very small threshold is
-    used (suitable for raw sensor units). Set `neg_threshold` to override
-    the negative threshold; otherwise it is `-pos_threshold`.
-    """
-    if neg_threshold is None:
-        neg_threshold = -pos_threshold
-    s = linear_slope(values, times)
-    if s > pos_threshold:
-        return 'increasing'
-    if s < neg_threshold:
-        return 'decreasing'
-    return 'stable'
+def moving_stats(series: List[Tuple[int, float]]) -> Dict[str, Optional[float]]:
+    if not series:
+        return {'min': None, 'max': None, 'mean': None, 'median': None}
+    vals = [v for _, v in series]
+    s = sorted(vals)
+    n = len(s)
+    mean = sum(s) / n
+    median = s[n // 2] if n % 2 == 1 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+    return {'min': s[0], 'max': s[-1], 'mean': mean, 'median': median}
 
 
-def moving_stats(values: List[float]) -> Dict[str, float]:
-    """Return basic statistics for a sequence of values."""
-    if not values:
-        return {'mean': 0.0, 'median': 0.0, 'std': 0.0, 'min': 0.0, 'max': 0.0}
-    mean = statistics.mean(values)
-    try:
-        std = statistics.pstdev(values)
-    except Exception:
-        std = 0.0
-    return {
-        'mean': mean,
-        'median': statistics.median(values),
-        'std': std,
-        'min': min(values),
-        'max': max(values),
-    }
+def detect_recent_spike(long_series: List[Tuple[int, float]], short_series: List[Tuple[int, float]],
+                        absolute_delta: float = 0.5, multiplier: float = 2.0) -> bool:
+    if not short_series or not long_series:
+        return False
+    long_stats = moving_stats(long_series)
+    short_stats = moving_stats(short_series)
+    if long_stats['median'] is None or short_stats['median'] is None:
+        return False
+    if short_stats['median'] - long_stats['median'] >= absolute_delta:
+        return True
+    if long_stats['median'] > 0 and (short_stats['median'] / (long_stats['median'] or 1.0)) >= multiplier:
+        return True
+    return False
 
 
-def analyze_past_sensor_data(history: Iterable, windows: Tuple[int, ...] = DEFAULT_WINDOWS) -> Dict[str, float]:
-    """
-    Given a sensor history (values or (time, value) pairs), compute
-    a set of descriptive features suitable for model input or rules.
-
-    Features produced include moving stats over multiple windows, the
-    overall slope, recent delta, and counts of positive/negative changes.
-
-    Returns a flat dict of feature_name -> value.
-    """
-    values, times = _unpack_history(history)
-    features: Dict[str, float] = {}
-    n = len(values)
-    # overall stats
-    features.update({f'overall_{k}': v for k, v in moving_stats(values).items()})
-    features['overall_slope'] = linear_slope(values, times)
-    # recent delta (last value minus value before that)
-    if n >= 2:
-        features['recent_delta'] = values[-1] - values[-2]
-    else:
-        features['recent_delta'] = 0.0
-    # changes count
-    pos = 0
-    neg = 0
-    for a, b in zip(values, values[1:]):
-        if b > a:
-            pos += 1
-        elif b < a:
-            neg += 1
-    features['count_increases'] = float(pos)
-    features['count_decreases'] = float(neg)
-
-    # windowed stats
-    for w in windows:
-        if w <= 0:
-            continue
-        key = f'last_{w}'
-        segment = values[-w:] if n >= w else values
-        stats = moving_stats(segment)
-        features.update({f'{key}_{k}': v for k, v in stats.items()})
-        features[f'{key}_slope'] = linear_slope(segment, None if times is None else times[-len(segment):])
-
-    return features
-
-
-def prepare_model_input(sensor_histories: Dict[str, Iterable]) -> Dict[str, float]:
-    """
-    Given a mapping of sensor name -> history, produce a flattened feature
-    dictionary combining features for each sensor. The output keys are
-    prefixed by the sensor name (e.g. `rain_mean`, `humidity_last_5_std`).
-
-    This function centralizes which sensors and features are passed to
-    downstream models and can be extended as model needs evolve.
-    """
-    model_input: Dict[str, float] = {}
-    for sensor, hist in sensor_histories.items():
-        feats = analyze_past_sensor_data(hist)
-        for k, v in feats.items():
-            model_input[f'{sensor}_{k}'] = float(v)
-    return model_input
-
-
-def compute_weighted_rain_score(
-    sensor_histories: Dict[str, Iterable],
-    sensor_weights: Optional[Dict[str, float]] = None,
-    include: Optional[Iterable[str]] = None,
-    feature_key: str = DEFAULT_FEATURE_KEY,
-    normalize: bool = True,
-) -> Dict[str, object]:
-    """
-    Compute a weighted rain score from multiple sensor histories.
-
-    - `sensor_histories`: mapping sensor name -> history (values or (time,value)).
-    - `sensor_weights`: optional mapping sensor -> weight. Missing sensors get weight 1.0.
-    - `include`: optional iterable of sensor names to include; others are ignored.
-    - `feature_key`: which feature from `analyze_past_sensor_data` to use (e.g. 'overall_mean', 'last_5_mean', 'recent_delta').
-    - `normalize`: if True, divides weighted sum by total weight to produce weighted average.
-
-    Returns a dict with numeric `score` and a `breakdown` per sensor.
-    """
+def compute_weighted_rain_score(sensor_histories: Dict[str, List[Tuple[int, float]]],
+                                sensor_weights: Optional[Dict[str, float]] = None,
+                                include: Optional[Iterable[str]] = None,
+                                feature_key: str = DEFAULT_FEATURE_KEY,
+                                normalize: bool = True,
+                                # numeric representation for high_cloud (0.0..1.0),
+                                # or boolean which will be converted: True->1.0, False->0.0
+                                high_cloud_value: Optional[float] = None) -> Dict[str, object]:
     breakdown: Dict[str, Dict[str, float]] = {}
     total_weight = 0.0
     weighted_sum = 0.0
     include_set = set(include) if include is not None else None
-
-    # use default weights when none provided
     weights = sensor_weights if sensor_weights is not None else DEFAULT_SENSOR_WEIGHTS
 
     for sensor, hist in sensor_histories.items():
         if include_set is not None and sensor not in include_set:
             continue
         weight = float(weights.get(sensor, 1.0))
-        feats = analyze_past_sensor_data(hist)
-        val = float(feats.get(feature_key, 0.0))
+        stats = moving_stats(hist)
+        val = float(stats.get('mean') or 0.0) if feature_key == 'overall_mean' else float(stats.get('median') or 0.0)
         wval = weight * val
         breakdown[sensor] = {'value': val, 'weight': weight, 'weighted': wval}
         total_weight += weight
         weighted_sum += wval
 
+    # Treat `high_cloud` as a feature if a numeric value was provided. This lets
+    # callers (or Meteorologist) pass a high_cloud degree alongside sensor histories.
+    if ('high_cloud' in weights) and (high_cloud_value is not None):
+        if include_set is None or 'high_cloud' in include_set:
+            hv = float(high_cloud_value) if not isinstance(high_cloud_value, bool) else (1.0 if high_cloud_value else 0.0)
+            hweight = float(weights.get('high_cloud', 1.0))
+            hwval = hweight * hv
+            breakdown['high_cloud'] = {'value': hv, 'weight': hweight, 'weighted': hwval}
+            total_weight += hweight
+            weighted_sum += hwval
+
     score = weighted_sum / total_weight if (normalize and total_weight > 0) else weighted_sum
     return {'score': float(score), 'breakdown': breakdown, 'total_weight': float(total_weight)}
 
 
-def detect_recent_spike(
-    history: Iterable,
-    now_ts: Optional[float] = None,
-    long_window_s: int = 3 * 3600,
-    short_window_s: int = 30 * 60,
-    spike_multiplier: float = 2.0,
-    absolute_delta: Optional[float] = None,
-) -> Dict[str, object]:
-    """
-    Detect whether recent readings spike compared to a longer-term window.
-
-    - `history`: iterable of values or (timestamp, value) pairs (timestamps expected as seconds since epoch).
-    - `now_ts`: reference timestamp (defaults to last timestamp in history or current time).
-    - `long_window_s`, `short_window_s`: windows in seconds.
-    - `spike_multiplier`: short_mean > long_mean * spike_multiplier flags a spike.
-    - `absolute_delta`: optional absolute difference threshold: short_mean - long_mean > absolute_delta also flags spike.
-
-    Returns a dict with `short_mean`, `long_mean`, `delta`, `ratio`, and boolean `is_spike`.
-    """
-    values, times = _unpack_history(history)
-    if not values:
-        return {'short_mean': 0.0, 'long_mean': 0.0, 'delta': 0.0, 'ratio': 0.0, 'is_spike': False}
-
-    # prefer timestamped histories for precise windows
-    if times:
-        now = float(now_ts) if now_ts is not None else float(times[-1])
-        short_vals = [v for t, v in zip(times, values) if t >= now - short_window_s]
-        long_vals = [v for t, v in zip(times, values) if t >= now - long_window_s]
-    else:
-        # fallback: treat windows as sample counts (short=3, long= max(15, short*5))
-        short_count = max(1, min(len(values), 3))
-        long_count = max(short_count, min(len(values), 15))
-        short_vals = values[-short_count:]
-        long_vals = values[-long_count:]
-
-    def mean_or_zero(seq: List[float]) -> float:
-        try:
-            return float(statistics.mean(seq)) if seq else 0.0
-        except Exception:
-            return 0.0
-
-    short_mean = mean_or_zero(short_vals)
-    long_mean = mean_or_zero(long_vals)
-    delta = short_mean - long_mean
-    ratio = (short_mean / long_mean) if (long_mean and long_mean != 0.0) else (float('inf') if short_mean else 0.0)
-
-    is_spike = False
-    if long_mean and short_mean > long_mean * float(spike_multiplier):
-        is_spike = True
-    if absolute_delta is not None and delta > float(absolute_delta):
-        is_spike = True
-
-    return {
-        'short_mean': short_mean,
-        'long_mean': long_mean,
-        'delta': delta,
-        'ratio': ratio,
-        'is_spike': bool(is_spike),
-    }
-
-
 def compute_weighted_rain_score_with_recent_priority(
-    sensor_histories: Dict[str, Iterable],
+    sensor_histories: Dict[str, List[Tuple[int, float]]],
     sensor_weights: Optional[Dict[str, float]] = None,
     include: Optional[Iterable[str]] = None,
     feature_key: str = DEFAULT_FEATURE_KEY,
@@ -322,112 +112,161 @@ def compute_weighted_rain_score_with_recent_priority(
     long_window_s: int = 3 * 3600,
     short_window_s: int = 30 * 60,
     spike_multiplier: float = 2.0,
-    absolute_delta: Optional[float] = None,
-    spike_weight_boost: float = 2.0,
+    absolute_delta: float = 0.5,
+    spike_weight_boost: float = 1.5,
+    # optional star/cloud signals
+    star_count: Optional[int] = None,
+    high_cloud: Optional[bool] = None,
+    # Multiplier applied when high_cloud is True. Default >1 boosts rain-likelihood.
+    high_cloud_multiplier: float = 1.2,
+    # Slope-based humidity/pressure signals (see below) ---------------------------------
+    # window (seconds) to consider for slope comparison (short window)
+    slope_window_s: int = 30 * 60,
+    # normalization deltas: delta across `slope_window_s` that maps -> 1.0
+    hum_delta_norm: float = 0.5,
+    pres_delta_norm: float = 1.0,
+    # relative weights for humidity/pressure slope signals when boosting score
+    hum_slope_weight: float = 0.25,
+    pres_slope_weight: float = 0.25,
+    # when both signals are above a threshold, apply an extra combined multiplier
+    slope_combined_multiplier: float = 1.3,
+    slope_signal_threshold: float = 0.5,
 ) -> Dict[str, object]:
-    """
-    Like `compute_weighted_rain_score` but detects recent spikes per sensor
-    and increases their effective weight when a spike is present.
+    # build per-sensor long/short series
+    details = {}
+    long_histories = {}
+    short_histories = {}
+    now = None
+    for k, series in sensor_histories.items():
+        if series:
+            now = series[-1][0]
+            long_cut = now - long_window_s
+            short_cut = now - short_window_s
+            long_histories[k] = [(t, v) for t, v in series if t >= long_cut]
+            short_histories[k] = [(t, v) for t, v in series if t >= short_cut]
+        else:
+            long_histories[k] = []
+            short_histories[k] = []
 
-    Returns the same dict as `compute_weighted_rain_score` with additional
-    `spike_info` per sensor included in the breakdown.
-    """
-    breakdown: Dict[str, Dict[str, float]] = {}
-    total_weight = 0.0
-    weighted_sum = 0.0
-    include_set = set(include) if include is not None else None
+    spike_detected = detect_recent_spike(long_histories.get('rain', []), short_histories.get('rain', []),
+                                         absolute_delta=absolute_delta, multiplier=spike_multiplier)
 
-    # use default weights when none provided
-    weights = sensor_weights if sensor_weights is not None else DEFAULT_SENSOR_WEIGHTS
+    # derive a numeric high_cloud_value for inclusion in the weighted score
+    # Note: `high_cloud` may be provided as a numeric degree in [0..1] or
+    # as a boolean; numeric values are accepted and clamped, allowing callers
+    # (e.g., `Meteorologist`) to pass a graded cloudiness signal.
+    high_cloud_value = None
+    if high_cloud is not None:
+        # If the caller supplies a numeric degree (0..1), use it (clamped).
+        if isinstance(high_cloud, (int, float)):
+            try:
+                hv = float(high_cloud)
+                high_cloud_value = max(0.0, min(1.0, hv))
+            except Exception:
+                high_cloud_value = None
+        else:
+            # boolean-like -> numeric
+            high_cloud_value = 1.0 if bool(high_cloud) else 0.0
 
-    for sensor, hist in sensor_histories.items():
-        if include_set is not None and sensor not in include_set:
-            continue
-        base_weight = float(weights.get(sensor, 1.0))
+    base = compute_weighted_rain_score(sensor_histories, sensor_weights, include, feature_key, normalize,
+                                       high_cloud_value=high_cloud_value)
+    score = float(base.get('score', 0.0))
+    if spike_detected:
+        score *= spike_weight_boost
+    # --- Slope-based humidity & pressure boosting ---
+    # Compute short vs long slopes for humidity and pressure. If the short
+    # slope exceeds the long slope (for humidity) or is more negative than
+    # the long slope (for pressure), derive a normalized signal in [0,1].
+    try:
+        hum_short_slope = linear_slope(short_histories.get('humidity', []) or [])
+        hum_long_slope = linear_slope(long_histories.get('humidity', []) or [])
+    except Exception:
+        hum_short_slope = hum_long_slope = None
+    try:
+        pres_short_slope = linear_slope(short_histories.get('pressure', []) or [])
+        pres_long_slope = linear_slope(long_histories.get('pressure', []) or [])
+    except Exception:
+        pres_short_slope = pres_long_slope = None
 
-        # detect spike using timestamps when available
-        spike_info = detect_recent_spike(hist, long_window_s=long_window_s, short_window_s=short_window_s,
-                                        spike_multiplier=spike_multiplier, absolute_delta=absolute_delta)
+    def _delta_over_window(short_s, long_s):
+        if short_s is None:
+            return 0.0
+        long_s = long_s or 0.0
+        # delta across window (slope * window) -> approximate change
+        return float(short_s - long_s) * float(slope_window_s)
 
-        effective_weight = base_weight * (float(spike_weight_boost) if spike_info.get('is_spike') else 1.0)
+    hum_delta = max(0.0, _delta_over_window(hum_short_slope, hum_long_slope))
+    pres_delta = max(0.0, -_delta_over_window(pres_short_slope, pres_long_slope))
 
-        feats = analyze_past_sensor_data(hist)
-        val = float(feats.get(feature_key, 0.0))
-        wval = effective_weight * val
-        breakdown[sensor] = {
-            'value': val,
-            'base_weight': base_weight,
-            'effective_weight': effective_weight,
-            'weighted': wval,
-            'spike_info': spike_info,
-        }
-        total_weight += effective_weight
-        weighted_sum += wval
+    # normalize to 0..1 using provided norms
+    hum_sig = max(0.0, min(1.0, hum_delta / float(hum_delta_norm))) if hum_delta is not None else 0.0
+    pres_sig = max(0.0, min(1.0, pres_delta / float(pres_delta_norm))) if pres_delta is not None else 0.0
 
-    score = weighted_sum / total_weight if (normalize and total_weight > 0) else weighted_sum
-    return {'score': float(score), 'breakdown': breakdown, 'total_weight': float(total_weight)}
+    # apply additive weighting to final score
+    slope_boost = 1.0 + (hum_slope_weight * hum_sig) + (pres_slope_weight * pres_sig)
+    # stronger combined effect if both signals exceed threshold
+    if hum_sig >= float(slope_signal_threshold) and pres_sig >= float(slope_signal_threshold):
+        slope_boost *= float(slope_combined_multiplier)
+    try:
+        score = float(score) * float(slope_boost)
+    except Exception:
+        score = float(score)
+    # Apply optional high-cloud multiplier: if a positive `high_cloud_value` is
+    # present, scale the final score. This is distinct from treating high_cloud
+    # as a feature in the weighted sum — both are intentionally supported.
+    used_multiplier = None
+    if high_cloud_value is not None and high_cloud_value > 0.0:
+        try:
+            used_multiplier = float(high_cloud_multiplier)
+            score = float(score) * used_multiplier
+        except Exception:
+            used_multiplier = 1.2
+            score = float(score) * used_multiplier
+    details['spike'] = spike_detected
+    details['base'] = base
+    details['star_count'] = int(star_count) if star_count is not None else None
+    details['high_cloud'] = True if (high_cloud_value is not None and high_cloud_value > 0.0) else False
+    details['high_cloud_value'] = float(high_cloud_value) if high_cloud_value is not None else None
+    details['high_cloud_multiplier'] = float(used_multiplier) if used_multiplier is not None else None
+    details['slope'] = {
+        'humidity': {'short_slope': hum_short_slope, 'long_slope': hum_long_slope, 'delta': hum_delta, 'signal': hum_sig},
+        'pressure': {'short_slope': pres_short_slope, 'long_slope': pres_long_slope, 'delta': pres_delta, 'signal': pres_sig},
+        'slope_boost': slope_boost,
+    }
+    details['long'] = {k: moving_stats(v) for k, v in long_histories.items()}
+    details['short'] = {k: moving_stats(v) for k, v in short_histories.items()}
+    return {'score': score, 'spike': spike_detected, 'details': details}
 
 
 def available_feature_keys() -> List[str]:
-    """Return a list of common feature keys produced by analyze_past_sensor_data."""
-    # This reflects the keys used by analyze_past_sensor_data by default.
-    keys = [
-        'overall_mean', 'overall_median', 'overall_std', 'overall_min', 'overall_max', 'overall_slope',
-        'recent_delta', 'count_increases', 'count_decreases'
-    ]
-    for w in DEFAULT_WINDOWS:
-        keys.extend([f'last_{w}_mean', f'last_{w}_median', f'last_{w}_std', f'last_{w}_min', f'last_{w}_max', f'last_{w}_slope'])
-    return keys
+    return list(DEFAULT_SENSOR_WEIGHTS.keys())
 
 
-__all__ = [
-    'linear_slope',
-    'slope_trend',
-    'analyze_past_sensor_data',
-    'prepare_model_input',
-    'compute_weighted_rain_score',
-    'detect_recent_spike',
-    'compute_weighted_rain_score_with_recent_priority',
-    'available_feature_keys',
-    'trend_slope',
-    'increasing',
-    'decreasing',
-]
-
-def trend_slope(history: Iterable, slot: str, window_s: Optional[float] = None) -> float:
-    """Estimate trend slope (per minute) for a numeric `slot` in a push-style history.
-
-    `history` is an iterable of (ts, payload) tuples. This helper extracts
-    the numeric series for `slot` and computes slope using `linear_slope`.
-    Returns slope in units per minute. If insufficient data, returns 0.0.
-    """
-    # extract series
-    series = []
+def analyze_past_sensor_data(history: Iterable, windows: Tuple[int, ...] = (3, 5, 15)) -> Dict[str, float]:
+    values = []
+    times = []
     for item in history:
-        if not item:
-            continue
-        try:
-            ts, payload = item
-        except Exception:
-            continue
-        if isinstance(payload, dict) and slot in payload and isinstance(payload[slot], (int, float)):
-            series.append((float(ts), float(payload[slot])))
-    if len(series) < 2:
-        return 0.0
-    xs = [float(t) for t, v in series]
-    ys = [float(v) for t, v in series]
-    base = xs[0]
-    offset_times = [x - base for x in xs]
-    try:
-        slope_per_second = linear_slope(ys, offset_times)
-        return slope_per_second * 60.0
-    except Exception:
-        return 0.0
+        if isinstance(item, tuple) and len(item) >= 2:
+            times.append(float(item[0]))
+            values.append(float(item[1]))
+        else:
+            values.append(float(item))
+    features: Dict[str, float] = {}
+    if not values:
+        return features
+    features['overall_mean'] = float(statistics.mean(values))
+    features['overall_median'] = float(statistics.median(values))
+    features['recent_delta'] = float(values[-1] - values[-2]) if len(values) >= 2 else 0.0
+    for w in windows:
+        seg = values[-w:] if len(values) >= w else values
+        features[f'last_{w}_mean'] = float(statistics.mean(seg)) if seg else 0.0
+    return features
 
 
-def increasing(history: Iterable, slot: str, window_s: Optional[float] = None, min_slope: float = 0.0) -> bool:
-    return trend_slope(history, slot, window_s) > float(min_slope)
-
-
-def decreasing(history: Iterable, slot: str, window_s: Optional[float] = None, min_slope: float = 0.0) -> bool:
-    return trend_slope(history, slot, window_s) < -float(min_slope)
+def prepare_model_input(sensor_histories: Dict[str, Iterable]) -> Dict[str, float]:
+    model_input: Dict[str, float] = {}
+    for sensor, hist in sensor_histories.items():
+        feats = analyze_past_sensor_data(hist)
+        for k, v in feats.items():
+            model_input[f'{sensor}_{k}'] = float(v)
+    return model_input

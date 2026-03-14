@@ -4,6 +4,31 @@ This module provides pure, testable functions that accept per-sensor
 histories (mapping sensor -> list of (ts, value) tuples) and produce
 features, spike detections and a weighted rain score. State (history
 cache and packaging) is owned by `Meteorologist`.
+
+Model overview (high level)
+----------------------------
+- Cloud cover: treated as a numeric degree (0.0..1.0) and applied as a
+    multiplier to the final score; higher cloudiness increases the
+    reported rain-likelihood.
+- Lightning: treated as a boolean switch when configured (see
+    `MQTTPUBLISH.PUSH_LIGHTNING_KM` in config). When enabled, callers
+    (e.g., `Meteorologist`) should set a lightning presence flag if the
+    sensor reports strikes within the configured distance; lightning is
+    used as a determinant (boolean) rather than a numeric spike feature.
+- Rain: exposed as a boolean presence indicator (recent short-window
+    sensor value > 0). Rain is available both as a boolean determinant
+    and as a numeric feature in the weighted sum (depending on config).
+- Trend & spike analysis: slope and spike detectors run primarily on
+    `humidity` and `pressure` (short vs long windows). These signals
+    are used to boost the score when rapid changes or spikes indicate a
+    likely precipitation event.
+
+Normalization note
+------------------
+Sensor magnitudes have different units/ranges (pressure ~1000 hPa,
+humidity 0-100%, lightning 0-1). Callers or the module should normalize
+per-sensor values into a comparable 0..1 range before applying weights
+so large-magnitude sensors do not dominate the weighted sum.
 """
 from typing import List, Tuple, Dict, Iterable, Optional
 import statistics
@@ -61,6 +86,30 @@ def detect_recent_spike(long_series: List[Tuple[int, float]], short_series: List
     if long_stats['median'] > 0 and (short_stats['median'] / (long_stats['median'] or 1.0)) >= multiplier:
         return True
     return False
+
+
+def detect_recent_spikes_map(long_histories: Dict[str, List[Tuple[int, float]]],
+                             short_histories: Dict[str, List[Tuple[int, float]]],
+                             thresholds: Optional[Dict[str, Dict[str, float]]] = None) -> Dict[str, bool]:
+    """Detect recent spikes per-sensor using `detect_recent_spike`.
+
+    thresholds: mapping sensor -> {'absolute_delta': float, 'multiplier': float}
+    Returns a dict sensor->bool.
+    """
+    if thresholds is None:
+        thresholds = {
+            'humidity': {'absolute_delta': 0.8, 'multiplier': 1.5},
+            'pressure': {'absolute_delta': 0.2, 'multiplier': 1.5},
+        }
+    result: Dict[str, bool] = {}
+    for sensor, params in thresholds.items():
+        try:
+            abs_d = float(params.get('absolute_delta', 0.5))
+            mult = float(params.get('multiplier', 2.0))
+            result[sensor] = detect_recent_spike(long_histories.get(sensor, []), short_histories.get(sensor, []), absolute_delta=abs_d, multiplier=mult)
+        except Exception:
+            result[sensor] = False
+    return result
 
 
 def compute_weighted_rain_score(sensor_histories: Dict[str, List[Tuple[int, float]]],
@@ -148,8 +197,26 @@ def compute_weighted_rain_score_with_recent_priority(
             long_histories[k] = []
             short_histories[k] = []
 
-    spike_detected = detect_recent_spike(long_histories.get('rain', []), short_histories.get('rain', []),
-                                         absolute_delta=absolute_delta, multiplier=spike_multiplier)
+    # Spike detection: prefer humidity/pressure slope-based spikes. Treat rain
+    # and lightning as boolean presence flags (determinants) rather than
+    # primary spike detectors.
+    per_sensor_spikes = detect_recent_spikes_map(long_histories, short_histories)
+    hum_spike = bool(per_sensor_spikes.get('humidity', False))
+    pres_spike = bool(per_sensor_spikes.get('pressure', False))
+    spike_detected = bool(hum_spike or pres_spike)
+
+    # Determine boolean presence for rain and lightning from short-window
+    # recent values (fast indicator): present if latest short value > 0
+    def _latest_present(series: List[Tuple[int, float]]) -> bool:
+        try:
+            if not series:
+                return False
+            return bool(float(series[-1][1]) > 0)
+        except Exception:
+            return False
+
+    rain_present = _latest_present(short_histories.get('rain', []) or [])
+    lightning_present = _latest_present(short_histories.get('lightning', []) or [])
 
     # derive a numeric high_cloud_value for inclusion in the weighted score
     # Note: `high_cloud` may be provided as a numeric degree in [0..1] or
@@ -191,9 +258,12 @@ def compute_weighted_rain_score_with_recent_priority(
     def _delta_over_window(short_s, long_s):
         if short_s is None:
             return 0.0
-        long_s = long_s or 0.0
+        # Preserve negative long_s values (important for pressure behavior).
+        # Only substitute 0.0 when long_s is actually None; do not use
+        # truthiness which would collapse negative slopes to zero.
+        long_s_val = 0.0 if long_s is None else float(long_s)
         # delta across window (slope * window) -> approximate change
-        return float(short_s - long_s) * float(slope_window_s)
+        return float(short_s - long_s_val) * float(slope_window_s)
 
     hum_delta = max(0.0, _delta_over_window(hum_short_slope, hum_long_slope))
     pres_delta = max(0.0, -_delta_over_window(pres_short_slope, pres_long_slope))
@@ -222,10 +292,12 @@ def compute_weighted_rain_score_with_recent_priority(
         except Exception:
             used_multiplier = 1.2
             score = float(score) * used_multiplier
-    details['spike'] = spike_detected
+    details['spike'] = {'humidity': hum_spike, 'pressure': pres_spike, 'any': spike_detected}
+    details['rain_present'] = rain_present
+    details['lightning_present'] = lightning_present
     details['base'] = base
     details['star_count'] = int(star_count) if star_count is not None else None
-    details['high_cloud'] = True if (high_cloud_value is not None and high_cloud_value > 0.0) else False
+    details['high_cloud'] = (high_cloud_value is not None and high_cloud_value > 0.0)
     details['high_cloud_value'] = float(high_cloud_value) if high_cloud_value is not None else None
     details['high_cloud_multiplier'] = float(used_multiplier) if used_multiplier is not None else None
     details['slope'] = {

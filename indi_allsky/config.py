@@ -559,6 +559,7 @@ class IndiAllSkyConfigBase(object):
             "PUSH_MODEL"             : "",     # python expression evaluated with locals 'history' and 'current'
             "PUSH_COOLDOWN_S"        : 900,    # minimum seconds between identical alerts (dedup cooldown)
             "PUSH_MAX_PER_HOUR"      : 6,      # maximum alerts allowed per hour
+            "PUSH_LIGHTNING_KM"      : 10.0,   # optional lightning threshold (km); requires AS3935 sensor
         },
         "SYNCAPI" : {
             "ENABLE"                 : False,

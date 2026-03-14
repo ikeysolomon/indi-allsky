@@ -141,7 +141,7 @@ class ImageWorker(Process):
         )
 
         try:
-            from .rainOrRefrain import MQTTPublisher, PushEvaluator
+            from .push_dispatcher import MQTTPublisher, PushEvaluator
             publisher = MQTTPublisher(self._miscUpload, upload_q=self.upload_q, config=self.config)
             self._push_evaluator = PushEvaluator(self.config, publisher=publisher)
             # wire persistent state handlers to use miscDb state storage

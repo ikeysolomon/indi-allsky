@@ -2720,6 +2720,18 @@ def MQTTPUBLISH__PUSH_MAX_PER_HOUR_validator(form, field):
         raise ValidationError('Max per hour must be a non-negative integer')
 
 
+def MQTTPUBLISH__PUSH_LIGHTNING_KM_validator(form, field):
+    # allow empty (unset) to mean disabled
+    if field.data is None or field.data == '':
+        return
+    try:
+        val = float(field.data)
+    except Exception:
+        raise ValidationError('Lightning threshold must be a number')
+    if val < 0:
+        raise ValidationError('Lightning threshold must be non-negative')
+
+
 def SYNCAPI__BASEURL_validator(form, field):
     try:
         r = urlparse(field.data)
@@ -4772,6 +4784,7 @@ class IndiAllskyConfigForm(FlaskForm):
     MQTTPUBLISH__PUSH_HISTORY_HOURS  = IntegerField('History (hours)', validators=[DataRequired(), MQTTPUBLISH__PUSH_HISTORY_HOURS_validator])
     MQTTPUBLISH__PUSH_COOLDOWN_S     = IntegerField('Dedup Cooldown (s)', validators=[DataRequired(), MQTTPUBLISH__PUSH_COOLDOWN_S_validator])
     MQTTPUBLISH__PUSH_MAX_PER_HOUR   = IntegerField('Max Alerts / Hour', validators=[DataRequired(), MQTTPUBLISH__PUSH_MAX_PER_HOUR_validator])
+    MQTTPUBLISH__PUSH_LIGHTNING_KM   = FloatField('Lightning Threshold (km)', validators=[MQTTPUBLISH__PUSH_LIGHTNING_KM_validator])
     MQTTPUBLISH__PUSH_MODEL          = TextAreaField('Push Model (Python expression)', render_kw={'rows':3})
     SYNCAPI__ENABLE                  = BooleanField('Enable Sync API')
     SYNCAPI__BASEURL                 = StringField('URL', validators=[SYNCAPI__BASEURL_validator], render_kw={'autocomplete' : 'new-password'})  # prevent saving BASEURL as username

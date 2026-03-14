@@ -3176,7 +3176,73 @@ class ConfigView(FormView):
         # convert to a sorted list of (slot, label) tuples for template friendliness
         context['sensor_slot_labels'] = sorted(sensor_slot_labels.items())
 
+        # Set defaults for push-slot mappings (allow users to select from configured slots)
+        mqtt_cfg = self.indi_allsky_config.get('MQTTPUBLISH', {}) or {}
+        form_data['MQTTPUBLISH__PUSH_SLOT_PRESSURE'] = mqtt_cfg.get('PUSH_SLOT_PRESSURE', 'pressure')
+        form_data['MQTTPUBLISH__PUSH_SLOT_HUMIDITY'] = mqtt_cfg.get('PUSH_SLOT_HUMIDITY', 'humidity')
+        form_data['MQTTPUBLISH__PUSH_SLOT_TEMPERATURE'] = mqtt_cfg.get('PUSH_SLOT_TEMPERATURE', 'temperature')
+        form_data['MQTTPUBLISH__PUSH_SLOT_DEW_POINT'] = mqtt_cfg.get('PUSH_SLOT_DEW_POINT', 'dew_point')
+        form_data['MQTTPUBLISH__PUSH_SLOT_RAIN'] = mqtt_cfg.get('PUSH_SLOT_RAIN', 'rain')
+        form_data['MQTTPUBLISH__PUSH_SLOT_LIGHTNING'] = mqtt_cfg.get('PUSH_SLOT_LIGHTNING', 'lightning')
+        form_data['MQTTPUBLISH__PUSH_SLOT_STARS'] = mqtt_cfg.get('PUSH_SLOT_STARS', 'stars')
+        form_data['MQTTPUBLISH__PUSH_USE_STAR_CLOUD'] = mqtt_cfg.get('PUSH_USE_STAR_CLOUD', False)
+
         context['form_config'] = IndiAllskyConfigForm(data=form_data)
+
+        # Populate select choices for slot mapping fields with configured slots + common keys.
+        slot_choices = []
+        # include any defined slots (with friendly labels)
+        slot_choices.extend([(slot, f"{label} ({slot})") for slot, label in context['sensor_slot_labels']])
+        # include common MQTT keys that may not be actual slots
+        common_slots = [
+            ('rain', 'rain'),
+            ('humidity', 'humidity'),
+            ('pressure', 'pressure'),
+            ('temperature', 'temperature'),
+            ('dew_point', 'dew_point'),
+            ('lightning', 'lightning'),
+            ('stars', 'stars'),
+            ('star_count', 'star_count'),
+            ('stars_count', 'stars_count'),
+            ('starCount', 'starCount'),
+        ]
+        for k, label in common_slots:
+            if (k, label) not in slot_choices:
+                slot_choices.append((k, label))
+
+        for field_name in (
+            'MQTTPUBLISH__PUSH_SLOT_PRESSURE',
+            'MQTTPUBLISH__PUSH_SLOT_HUMIDITY',
+            'MQTTPUBLISH__PUSH_SLOT_TEMPERATURE',
+            'MQTTPUBLISH__PUSH_SLOT_DEW_POINT',
+            'MQTTPUBLISH__PUSH_SLOT_RAIN',
+            'MQTTPUBLISH__PUSH_SLOT_LIGHTNING',
+            'MQTTPUBLISH__PUSH_SLOT_STARS',
+        ):
+            try:
+                getattr(context['form_config'], field_name).choices = slot_choices
+            except Exception:
+                pass
+
+        # Build a friendly label for the currently selected slot mappings
+        push_slot_labels = {}
+        for config_key, label in (
+            ('PUSH_SLOT_PRESSURE', 'Pressure'),
+            ('PUSH_SLOT_HUMIDITY', 'Humidity'),
+            ('PUSH_SLOT_TEMPERATURE', 'Temperature'),
+            ('PUSH_SLOT_DEW_POINT', 'Dew Point'),
+            ('PUSH_SLOT_RAIN', 'Rain'),
+            ('PUSH_SLOT_LIGHTNING', 'Lightning'),
+            ('PUSH_SLOT_STARS', 'Stars'),
+        ):
+            slot_val = mqtt_cfg.get(config_key)
+            if slot_val:
+                slot_label = sensor_slot_labels.get(slot_val, slot_val)
+                push_slot_labels[config_key] = f"{slot_val} ({slot_label})"
+            else:
+                push_slot_labels[config_key] = ''
+
+        context['push_slot_labels'] = push_slot_labels
 
         return context
 
@@ -3686,6 +3752,14 @@ class AjaxConfigView(BaseView):
         self.indi_allsky_config['MQTTPUBLISH']['PUSH_TOPIC']             = str(request.json.get('MQTTPUBLISH__PUSH_TOPIC', ''))
         self.indi_allsky_config['MQTTPUBLISH']['PUSH_HISTORY_HOURS']     = int(request.json.get('MQTTPUBLISH__PUSH_HISTORY_HOURS', 0))
         self.indi_allsky_config['MQTTPUBLISH']['PUSH_MODEL']             = str(request.json.get('MQTTPUBLISH__PUSH_MODEL', ''))
+        self.indi_allsky_config['MQTTPUBLISH']['PUSH_SLOT_PRESSURE']     = str(request.json.get('MQTTPUBLISH__PUSH_SLOT_PRESSURE', 'pressure'))
+        self.indi_allsky_config['MQTTPUBLISH']['PUSH_SLOT_HUMIDITY']     = str(request.json.get('MQTTPUBLISH__PUSH_SLOT_HUMIDITY', 'humidity'))
+        self.indi_allsky_config['MQTTPUBLISH']['PUSH_SLOT_TEMPERATURE']  = str(request.json.get('MQTTPUBLISH__PUSH_SLOT_TEMPERATURE', 'temperature'))
+        self.indi_allsky_config['MQTTPUBLISH']['PUSH_SLOT_DEW_POINT']    = str(request.json.get('MQTTPUBLISH__PUSH_SLOT_DEW_POINT', 'dew_point'))
+        self.indi_allsky_config['MQTTPUBLISH']['PUSH_SLOT_RAIN']         = str(request.json.get('MQTTPUBLISH__PUSH_SLOT_RAIN', 'rain'))
+        self.indi_allsky_config['MQTTPUBLISH']['PUSH_SLOT_LIGHTNING']    = str(request.json.get('MQTTPUBLISH__PUSH_SLOT_LIGHTNING', 'lightning'))
+        self.indi_allsky_config['MQTTPUBLISH']['PUSH_SLOT_STARS']        = str(request.json.get('MQTTPUBLISH__PUSH_SLOT_STARS', 'stars'))
+        self.indi_allsky_config['MQTTPUBLISH']['PUSH_USE_STAR_CLOUD']   = bool(request.json.get('MQTTPUBLISH__PUSH_USE_STAR_CLOUD', False))
         self.indi_allsky_config['MQTTPUBLISH']['PUBLISH_IMAGE']         = bool(request.json['MQTTPUBLISH__PUBLISH_IMAGE'])
         self.indi_allsky_config['SYNCAPI']['ENABLE']                    = bool(request.json['SYNCAPI__ENABLE'])
         self.indi_allsky_config['SYNCAPI']['BASEURL']                   = str(request.json['SYNCAPI__BASEURL'])

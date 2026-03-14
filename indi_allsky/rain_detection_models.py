@@ -2,14 +2,16 @@
 
 This module provides pure, testable functions that accept per-sensor
 histories (mapping sensor -> list of (ts, value) tuples) and produce
-features, spike detections and a weighted rain score. State (history
-cache and packaging) is owned by `Meteorologist`.
+features, spike detections, and a weighted rain *probability-like* score.
+State (history cache and packaging) is owned by `Meteorologist`.
 
 Model overview (high level)
 ----------------------------
 - Cloud cover: treated as a numeric degree (0.0..1.0) and applied as a
     multiplier to the final score; higher cloudiness increases the
-    reported rain-likelihood.
+    reported rain-likelihood. When enabled, cloudiness can be derived from
+    star-count (fewer stars -> higher cloudiness) via an optional toggle in
+    the Push settings.
 - Lightning: treated as a boolean switch when configured (see
     `MQTTPUBLISH.PUSH_LIGHTNING_KM` in config). When enabled, callers
     (e.g., `Meteorologist`) should set a lightning presence flag if the
@@ -18,17 +20,24 @@ Model overview (high level)
 - Rain: exposed as a boolean presence indicator (recent short-window
     sensor value > 0). Rain is available both as a boolean determinant
     and as a numeric feature in the weighted sum (depending on config).
+- Dew spread (relative humidity): derived from temperature and dew point
+    using standard vapor pressure relations. The result is a 0..1 signal
+    (higher value means higher relative humidity) used as a proxy for
+    saturation and precipitation potential.
+- Pressure tendency: implements standard weather tendency rules (e.g.,
+    Truganina/Met Office) where a 1‑hour change of <0.5 hPa is considered
+    "steady" and >0.5 hPa changes indicate rising/falling pressure. The
+    same threshold is scaled proportionally for shorter/longer windows.
 - Trend & spike analysis: slope and spike detectors run primarily on
-    `humidity` and `pressure` (short vs long windows). These signals
-    are used to boost the score when rapid changes or spikes indicate a
-    likely precipitation event.
+    `humidity` and `pressure` (short vs long windows). These signals are
+    used to boost the score when rapid changes or spikes indicate a likely
+    precipitation event.
 
-Normalization note
-------------------
-Sensor magnitudes have different units/ranges (pressure ~1000 hPa,
-humidity 0-100%, lightning 0-1). Callers or the module should normalize
-per-sensor values into a comparable 0..1 range before applying weights
-so large-magnitude sensors do not dominate the weighted sum.
+Probability note
+----------------
+The output score is clamped to [0, 1] and is intended to behave like a
+rain likelihood. The score may be further adjusted by spike boosts,
+trend multipliers, and configurable high-cloud scaling.
 """
 from typing import List, Tuple, Dict, Iterable, Optional
 import statistics
@@ -38,8 +47,16 @@ DEFAULT_SENSOR_WEIGHTS = {
     'rain': 1.0,
     'humidity': 0.5,
     'pressure': 0.2,
+    'temperature': 0.2,
     'dew_point': 0.3,
+    # dew_spread_inverse is a bounded signal derived from |temp - dew_point|.
+    # Smaller spread (closer to saturation) yields a higher signal.
+    'dew_spread_inverse': 0.2,
     'lightning': 2.0,
+    # Pressure tendency (rising/steady/falling) encoded as a 0..1 signal
+    # based on standard weather practice (e.g., Truganina Weather / Met Office
+    # pressure tendency codes).
+    'pressure_tendency': 0.15,
     # weight for high_cloud: higher means high-cloud presence contributes more to
     # the computed rain score. Value is configurable via callers/config.
     'high_cloud': 0.4,
@@ -95,10 +112,16 @@ def detect_recent_spikes_map(long_histories: Dict[str, List[Tuple[int, float]]],
 
     thresholds: mapping sensor -> {'absolute_delta': float, 'multiplier': float}
     Returns a dict sensor->bool.
+
+    Defaults are tuned for the rain model:
+      - humidity: triggers on ~15% jump in 30m (or ~25% over longer windows)
+      - pressure: triggers on smaller changes (typical for pressure behavior)
     """
     if thresholds is None:
         thresholds = {
-            'humidity': {'absolute_delta': 0.8, 'multiplier': 1.5},
+            # 15% change over ~30m should be considered a spike (shrinking from prior 0.8 default)
+            'humidity': {'absolute_delta': 0.15, 'multiplier': 1.5},
+            # pressure changes are smaller; keep a gentle threshold
             'pressure': {'absolute_delta': 0.2, 'multiplier': 1.5},
         }
     result: Dict[str, bool] = {}
@@ -120,6 +143,8 @@ def compute_weighted_rain_score(sensor_histories: Dict[str, List[Tuple[int, floa
                                 # numeric representation for high_cloud (0.0..1.0),
                                 # or boolean which will be converted: True->1.0, False->0.0
                                 high_cloud_value: Optional[float] = None) -> Dict[str, object]:
+    if sensor_histories is None:
+        sensor_histories = {}
     breakdown: Dict[str, Dict[str, float]] = {}
     total_weight = 0.0
     weighted_sum = 0.0
@@ -149,6 +174,8 @@ def compute_weighted_rain_score(sensor_histories: Dict[str, List[Tuple[int, floa
             weighted_sum += hwval
 
     score = weighted_sum / total_weight if (normalize and total_weight > 0) else weighted_sum
+    # Clamp score to [0,1] so it behaves like a probability.
+    score = max(0.0, min(1.0, float(score)))
     return {'score': float(score), 'breakdown': breakdown, 'total_weight': float(total_weight)}
 
 
@@ -158,6 +185,10 @@ def compute_weighted_rain_score_with_recent_priority(
     include: Optional[Iterable[str]] = None,
     feature_key: str = DEFAULT_FEATURE_KEY,
     normalize: bool = True,
+    # NOTE: For this function to return a meaningful probability-like score
+    # in [0,1], callers should pass normalized sensor values (0..1). The
+    # higher-level caller (`Meteorologist`) already prefers normalized
+    # histories when available.
     long_window_s: int = 3 * 3600,
     short_window_s: int = 30 * 60,
     spike_multiplier: float = 2.0,
@@ -168,11 +199,24 @@ def compute_weighted_rain_score_with_recent_priority(
     high_cloud: Optional[bool] = None,
     # Multiplier applied when high_cloud is True. Default >1 boosts rain-likelihood.
     high_cloud_multiplier: float = 1.2,
+    # Pressure tendency rules: standard weather practice (e.g., Truganina
+    # Weather's symbols and Met Office tendency codes) classify 1-hour pressure
+    # change < 0.5 hPa as "steady", and >= 0.5 hPa as "rising" or "falling".
+    # This implementation derives both short- and long-window tendency values
+    # by scaling the 1-hour rule to the window length (30min -> 0.25 hPa, 3h ->
+    # 1.5 hPa). This matches the intent of the published tendency code schemes
+    # while allowing flexible window lengths.
+    #
+    # References:
+    # - https://www.truganinaweather.com/weather-education/weather-symbols.htm
+    # - https://www.mintakainnovations.com/wp-content/uploads/Pressure_Tendency_Characteristic_Code.pdf
+    pressure_tendency_base_hpa: float = 0.5,
     # Slope-based humidity/pressure signals (see below) ---------------------------------
     # window (seconds) to consider for slope comparison (short window)
     slope_window_s: int = 30 * 60,
     # normalization deltas: delta across `slope_window_s` that maps -> 1.0
-    hum_delta_norm: float = 0.5,
+    # (15% change over 30 mins should be treated as a full signal)
+    hum_delta_norm: float = 0.15,
     pres_delta_norm: float = 1.0,
     # relative weights for humidity/pressure slope signals when boosting score
     hum_slope_weight: float = 0.25,
@@ -180,15 +224,33 @@ def compute_weighted_rain_score_with_recent_priority(
     # when both signals are above a threshold, apply an extra combined multiplier
     slope_combined_multiplier: float = 1.3,
     slope_signal_threshold: float = 0.5,
+    # humidity multiplier when humidity is high (e.g., 70%+)
+    # This is a blending factor (0..1) that moves the final score closer to 1.0.
+    high_humidity_threshold: float = 0.7,
+    high_humidity_multiplier: float = 0.6,
+    # Dew point spread signal (smaller spread -> higher rain likelihood)
+    dew_spread_max: float = 6.0,
 ) -> Dict[str, object]:
     # build per-sensor long/short series
     details = {}
     long_histories = {}
     short_histories = {}
+
+    # Allow missing/None sensor histories without failing.
+    if sensor_histories is None:
+        sensor_histories = {}
+    # Use a consistent "now" across all sensors (latest known timestamp),
+    # so windows are aligned and comparisons are stable.
     now = None
     for k, series in sensor_histories.items():
         if series:
-            now = series[-1][0]
+            last_ts = series[-1][0]
+            now = max(now, last_ts) if now is not None else last_ts
+    if now is None:
+        now = 0
+
+    for k, series in sensor_histories.items():
+        if series:
             long_cut = now - long_window_s
             short_cut = now - short_window_s
             long_histories[k] = [(t, v) for t, v in series if t >= long_cut]
@@ -204,6 +266,81 @@ def compute_weighted_rain_score_with_recent_priority(
     hum_spike = bool(per_sensor_spikes.get('humidity', False))
     pres_spike = bool(per_sensor_spikes.get('pressure', False))
     spike_detected = bool(hum_spike or pres_spike)
+
+    # Determine pressure tendency based on change over the short/long windows.
+    # This is modeled after standard weather tendency codes (Truganina/Met Office)
+    # where <0.5 hPa change is steady, >=0.5 hPa is rising/falling.
+    def _pressure_tendency(series: List[Tuple[int, float]], window_s: float) -> Optional[float]:
+        if not series or len(series) < 2:
+            return None
+        try:
+            t0, p0 = series[0]
+            t1, p1 = series[-1]
+            dt_hours = max(1e-6, (float(t1) - float(t0)) / 3600.0)
+            dp = float(p1) - float(p0)
+            rate = dp / dt_hours
+            # Scale the 1-hour threshold to the window duration
+            threshold = float(pressure_tendency_base_hpa) * (window_s / 3600.0)
+            if abs(rate) < threshold:
+                # steady
+                return 0.5
+            # rising -> 1.0, falling -> 0.0
+            return 1.0 if rate > 0 else 0.0
+        except Exception:
+            return None
+
+    pres_short_tendency = _pressure_tendency(short_histories.get('pressure', []) or [], short_window_s)
+    pres_long_tendency = _pressure_tendency(long_histories.get('pressure', []) or [], long_window_s)
+    pres_tendency = None
+    if pres_short_tendency is not None and pres_long_tendency is not None:
+        pres_tendency = (pres_short_tendency + pres_long_tendency) / 2.0
+    elif pres_short_tendency is not None:
+        pres_tendency = pres_short_tendency
+    elif pres_long_tendency is not None:
+        pres_tendency = pres_long_tendency
+
+    if pres_tendency is not None:
+        sensor_histories = dict(sensor_histories)
+        sensor_histories['pressure_tendency'] = [(now, pres_tendency)]
+
+    # Patched dew point handling: raw dew point is not used directly because a
+    # high dew point alone (far below temperature) should not imply rain.
+    # Instead we derive a single bounded signal that only becomes non-zero when
+    # dew point approaches ambient temperature.
+    dew_spread_signal = None
+    temp_series = short_histories.get('temperature', []) or []
+    dew_series = short_histories.get('dew_point', []) or []
+
+    # Remove the raw dew_point sensor so it cannot contribute directly.
+    sensor_histories = dict(sensor_histories)
+    sensor_histories.pop('dew_point', None)
+
+    if temp_series and dew_series:
+        try:
+            t = float(temp_series[-1][1])
+            d = float(dew_series[-1][1])
+            # Only contribute when dew point is near the ambient temperature.
+            # If the spread is too large, treat it as "no contribution".
+            spread = max(0.0, t - d)
+            if spread <= float(dew_spread_max):
+                # Use an RH-like computation for smooth scaling near saturation.
+                a = 17.27
+                b = 237.7
+                sat_t = 6.112 * (2.718281828459045 ** ((a * t) / (b + t)))
+                sat_d = 6.112 * (2.718281828459045 ** ((a * d) / (b + d)))
+                rh = 0.0
+                if sat_t > 0:
+                    rh = max(0.0, min(1.0, sat_d / sat_t))
+                # Scale the RH-like signal based on how close we are to saturation.
+                dew_spread_signal = rh * (1.0 - (spread / float(dew_spread_max)))
+        except Exception:
+            dew_spread_signal = None
+
+    # Add dew spread signal as a lightweight feature for the base score.
+    # This lets weights (and user config) control its impact; it won't blow up
+    # the score because it's bounded and treated like any other sensor.
+    if dew_spread_signal is not None:
+        sensor_histories['dew_spread_inverse'] = [(now, dew_spread_signal)]
 
     # Determine boolean presence for rain and lightning from short-window
     # recent values (fast indicator): present if latest short value > 0
@@ -268,9 +405,11 @@ def compute_weighted_rain_score_with_recent_priority(
     hum_delta = max(0.0, _delta_over_window(hum_short_slope, hum_long_slope))
     pres_delta = max(0.0, -_delta_over_window(pres_short_slope, pres_long_slope))
 
-    # normalize to 0..1 using provided norms
-    hum_sig = max(0.0, min(1.0, hum_delta / float(hum_delta_norm))) if hum_delta is not None else 0.0
-    pres_sig = max(0.0, min(1.0, pres_delta / float(pres_delta_norm))) if pres_delta is not None else 0.0
+    # Normalize to 0..1 using provided norms. The deltas are always numeric because
+    # the helper returns 0.0 when data is missing, so the fallback branch is not
+    # needed here.
+    hum_sig = max(0.0, min(1.0, hum_delta / float(hum_delta_norm)))
+    pres_sig = max(0.0, min(1.0, pres_delta / float(pres_delta_norm)))
 
     # apply additive weighting to final score
     slope_boost = 1.0 + (hum_slope_weight * hum_sig) + (pres_slope_weight * pres_sig)
@@ -292,14 +431,36 @@ def compute_weighted_rain_score_with_recent_priority(
         except Exception:
             used_multiplier = 1.2
             score = float(score) * used_multiplier
+
+    # Apply an additional boost when humidity is high (e.g., >70%).
+    # Treat the score as a probability and avoid exceeding 1.0 by blending
+    # toward 1.0 rather than multiplying (which can exceed 1.0).
+    used_humidity_multiplier = None
+    try:
+        last_hum = None
+        if short_histories.get('humidity'):
+            last_hum = float(short_histories['humidity'][-1][1])
+        if last_hum is not None and last_hum >= float(high_humidity_threshold):
+            # Blend toward 1.0 instead of multiplying directly.
+            # E.g. 0.8 + (1-0.8)*0.15 = 0.83, never > 1.0.
+            used_humidity_multiplier = float(high_humidity_multiplier)
+            score = float(score) + (1.0 - float(score)) * used_humidity_multiplier
+    except Exception:
+        used_humidity_multiplier = None
+
+    # Clamp final score to <= 0.99 to maintain interpretations as a probability.
+    score = min(float(score), 0.99)
     details['spike'] = {'humidity': hum_spike, 'pressure': pres_spike, 'any': spike_detected}
     details['rain_present'] = rain_present
     details['lightning_present'] = lightning_present
+    details['dew_spread_inverse'] = float(dew_spread_signal) if dew_spread_signal is not None else None
     details['base'] = base
     details['star_count'] = int(star_count) if star_count is not None else None
     details['high_cloud'] = (high_cloud_value is not None and high_cloud_value > 0.0)
     details['high_cloud_value'] = float(high_cloud_value) if high_cloud_value is not None else None
     details['high_cloud_multiplier'] = float(used_multiplier) if used_multiplier is not None else None
+    details['high_humidity_threshold'] = float(high_humidity_threshold)
+    details['high_humidity_multiplier'] = float(used_humidity_multiplier) if used_humidity_multiplier is not None else None
     details['slope'] = {
         'humidity': {'short_slope': hum_short_slope, 'long_slope': hum_long_slope, 'delta': hum_delta, 'signal': hum_sig},
         'pressure': {'short_slope': pres_short_slope, 'long_slope': pres_long_slope, 'delta': pres_delta, 'signal': pres_sig},

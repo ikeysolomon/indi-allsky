@@ -557,8 +557,16 @@ class IndiAllSkyConfigBase(object):
             "PUSH_TOPIC"             : "alert",  # sub-topic to publish push messages under base topic
             "PUSH_HISTORY_HOURS"     : 3,      # how many hours of sensor data to keep for regression
             "PUSH_MODEL"             : "",     # python expression evaluated with locals 'history' and 'current'
+            "PUSH_SLOT_PRESSURE"     : "pressure",
+            "PUSH_SLOT_HUMIDITY"     : "humidity",
+            "PUSH_SLOT_TEMPERATURE"  : "temperature",
+            "PUSH_SLOT_DEW_POINT"    : "dew_point",
+            "PUSH_SLOT_RAIN"         : "rain",
+            "PUSH_SLOT_LIGHTNING"    : "lightning",
+            "PUSH_SLOT_STARS"        : "stars",
             "PUSH_COOLDOWN_S"        : 900,    # minimum seconds between identical alerts (dedup cooldown)
             "PUSH_MAX_PER_HOUR"      : 6,      # maximum alerts allowed per hour
+            "PUSH_SCORE_THRESHOLD"   : 0.75,   # probability threshold (0..1) for push alerts
             "PUSH_LIGHTNING_KM"      : 10.0,   # optional lightning threshold (km); requires AS3935 sensor
         },
         "SYNCAPI" : {

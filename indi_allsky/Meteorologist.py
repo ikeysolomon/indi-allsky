@@ -23,7 +23,11 @@ coupling low; callers may lazily import or inject analysis functions.
 # --- Hoisted configuration defaults (module-level constants) ---
 # These may be overridden via the `MQTTPUBLISH` config passed into
 # `append_sample_and_build_histories`.
-DEFAULT_HIGH_CLOUD_STAR_THRESHOLD = 30
+#
+# Star count is used as a proxy for cloud cover. The model treats fewer
+# stars as more cloud. A linear scale is applied from 0..threshold.
+# Default threshold is 100 stars: above it, cloud is considered negligible.
+DEFAULT_HIGH_CLOUD_STAR_THRESHOLD = 100
 DEFAULT_HIGH_CLOUD_AFTER_HOUR = 17
 from typing import Dict, Iterable, List, Optional
 from datetime import datetime, timedelta
@@ -241,7 +245,7 @@ def append_sample_and_build_histories(mqtt_data: dict, mqtt_cfg: dict, now_ts: O
     history = cache.get_recent(seconds_window)
 
     # default mapping of canonical sensor names -> payload keys
-    slot_map = mqtt_cfg.get('PUSH_SLOT_MAP') or {
+    default_slot_map = {
         'rain': 'rain',
         'humidity': 'humidity',
         'pressure': 'pressure',
@@ -249,6 +253,24 @@ def append_sample_and_build_histories(mqtt_data: dict, mqtt_cfg: dict, now_ts: O
         'dew_point': 'dew_point',
         'lightning': 'lightning',
     }
+
+    # Allow explicit mapping overrides via config (for user-selected sensor slots)
+    slot_map = mqtt_cfg.get('PUSH_SLOT_MAP') or dict(default_slot_map)
+    for model_key, cfg_key, default in (
+        ('pressure', 'PUSH_SLOT_PRESSURE', 'pressure'),
+        ('humidity', 'PUSH_SLOT_HUMIDITY', 'humidity'),
+        ('temperature', 'PUSH_SLOT_TEMPERATURE', 'temperature'),
+        ('dew_point', 'PUSH_SLOT_DEW_POINT', 'dew_point'),
+        ('rain', 'PUSH_SLOT_RAIN', 'rain'),
+        ('lightning', 'PUSH_SLOT_LIGHTNING', 'lightning'),
+    ):
+        try:
+            val = mqtt_cfg.get(cfg_key)
+            if val:
+                slot_map[model_key] = val
+        except Exception:
+            pass
+
     packager = DataPackager(slot_map)
     # packager.build returns (raw, norm) mapping; maintain backwards
     # compatible keys and include normalized histories under
@@ -266,15 +288,26 @@ def append_sample_and_build_histories(mqtt_data: dict, mqtt_cfg: dict, now_ts: O
     HIGH_CLOUD_STAR_THRESHOLD = int(mqtt_cfg.get('PUSH_HIGH_CLOUD_STAR_THRESHOLD', DEFAULT_HIGH_CLOUD_STAR_THRESHOLD))
     HIGH_CLOUD_AFTER_HOUR = int(mqtt_cfg.get('PUSH_HIGH_CLOUD_AFTER_HOUR', DEFAULT_HIGH_CLOUD_AFTER_HOUR))
 
-    # Look for star count in the immediate mqtt payload under common keys.
+    # Look for star count in the immediate mqtt payload.
+    # Note: we intentionally do not allow the star count threshold to be
+    # modified via config—this is a fixed behavioral mapping from stars -> cloud.
     star_count = None
-    for key in ('star_count', 'stars', 'stars_count', 'starCount'):
-        if isinstance(mqtt_data, dict) and key in mqtt_data:
-            try:
-                star_count = int(mqtt_data[key])
-                break
-            except Exception:
-                continue
+    star_key = mqtt_cfg.get('PUSH_SLOT_STARS') or None
+
+    if isinstance(mqtt_data, dict) and star_key and star_key in mqtt_data:
+        try:
+            star_count = int(mqtt_data[star_key])
+        except Exception:
+            star_count = None
+
+    if star_count is None:
+        for key in ('star_count', 'stars', 'stars_count', 'starCount'):
+            if isinstance(mqtt_data, dict) and key in mqtt_data:
+                try:
+                    star_count = int(mqtt_data[key])
+                    break
+                except Exception:
+                    continue
 
     # fallback: if either raw or normalized histories contain a 'stars'
     # series, use its latest value. If only a normalized series is
@@ -294,7 +327,7 @@ def append_sample_and_build_histories(mqtt_data: dict, mqtt_cfg: dict, now_ts: O
             if s_norm:
                 try:
                     # normalized value in [0,1] -> scale by threshold
-                    star_count = int(float(s_norm[-1][1]) * float(HIGH_CLOUD_STAR_THRESHOLD))
+                    star_count = int(float(s_norm[-1][1]) * DEFAULT_HIGH_CLOUD_STAR_THRESHOLD)
                 except Exception:
                     star_count = None
 
@@ -303,11 +336,10 @@ def append_sample_and_build_histories(mqtt_data: dict, mqtt_cfg: dict, now_ts: O
     sample_ts = int(now_ts if now_ts is not None else _time.time())
     local_hour = _time.localtime(sample_ts).tm_hour
 
-    # Compute a graded `high_cloud_value` in [0.0, 1.0]. When star_count >=
-    # threshold or before the configured hour, value is 0. If star_count is
-    # 0, value is 1. Values scale linearly in between.
+    # Compute a graded `high_cloud_value` in [0.0, 1.0] based on star count.
+    # When enabled, fewer visible stars means more cloud.
     high_cloud_value = None
-    if star_count is not None and local_hour >= HIGH_CLOUD_AFTER_HOUR:
+    if mqtt_cfg.get('PUSH_USE_STAR_CLOUD', False) and star_count is not None and local_hour >= HIGH_CLOUD_AFTER_HOUR:
         try:
             sc = float(star_count)
             if sc >= float(HIGH_CLOUD_STAR_THRESHOLD):
@@ -405,7 +437,7 @@ def run_worker(mqtt_cfg: dict, shutdown_event: Optional['threading.Event'] = Non
                     )
                     push_score = float(score_obj.get('score', 0.0))
                     result['push_score'] = push_score
-                    threshold = float(mqtt_cfg_local.get('PUSH_SCORE_THRESHOLD', 0.0))
+                    threshold = float(mqtt_cfg_local.get('PUSH_SCORE_THRESHOLD', 0.75))
                     result['push_triggered'] = (push_score >= threshold)
             except Exception:
                 LOG.exception('meteorologist worker: analysis failed')

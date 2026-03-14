@@ -3,19 +3,22 @@
 Integration notes
 -----------------
 This module consumes processed items from the dispatch queue provided by
-`weather_station` (imported here as `metric_queue`). It exposes `PushEvaluator`
+`weather_station` (imported here as `get_dispatch`). It exposes `PushEvaluator`
 and `MQTTPublisher` and a `run()` worker suitable for running in a separate
 process. `PushEvaluator` persists suppression counters (cooldown/hourly/
 timegate/publish_error) via the configured `state_get`/`state_set` handlers
 when available.
 
+This system is designed to interpret the model output as a **rain likelihood
+score (0..1)** and publish when that score exceeds a configurable threshold.
+
 Configuration
 -------------
 Tune behaviour through the `MQTTPUBLISH` config namespace (examples:
-`PUSH_COOLDOWN_S`, `PUSH_MAX_PER_HOUR`, `PUSH_USE_ANALYSIS`). `MQTTPublisher`
-enqueues a DB task for actual MQTT delivery; retained publish flags are not
-set by default (add `PUSH_MQTT_RETAIN` handling in the uploader to change
-that behaviour).
+`PUSH_COOLDOWN_S`, `PUSH_MAX_PER_HOUR`, `PUSH_USE_ANALYSIS`,
+`PUSH_SCORE_THRESHOLD`). `MQTTPublisher` enqueues a DB task for actual MQTT
+delivery; retained publish flags are not set by default (add
+`PUSH_MQTT_RETAIN` handling in the uploader to change that behaviour).
 """
 import time
 import logging
@@ -173,7 +176,6 @@ class PushEvaluator:
                       end_hour=time_gate_cfg.get('end_hour', 24))
         self.push_messaging = PushMessaging(self.publisher, time_gate=tg)
         self.history_packager = history_packager
-        # Lazy-loaded default history packager; imported only when needed.
         self._default_packager = None
 
     def _call_publisher(self, topic, payload):
@@ -251,7 +253,7 @@ class PushEvaluator:
                 triggered = False
         elif isinstance(packaged, dict) and 'push_score' in packaged:
             try:
-                triggered = float(packaged.get('push_score', 0.0)) >= float(mqtt_cfg.get('PUSH_SCORE_THRESHOLD', 0.0))
+                triggered = float(packaged.get('push_score', 0.0)) >= float(mqtt_cfg.get('PUSH_SCORE_THRESHOLD', 0.75))
             except Exception:
                 triggered = False
         else:

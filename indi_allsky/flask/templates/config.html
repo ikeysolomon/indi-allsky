@@ -6713,6 +6713,17 @@ var camera_id = {{ camera_id }};
     </div>
     <div class="form-group row">
         <div class="col-sm-2">
+            {{ form_config.MQTTPUBLISH__PUSH_SCORE_THRESHOLD.label(class='col-form-label') }}
+        </div>
+        <div class="col-sm-4">
+            {{ form_config.MQTTPUBLISH__PUSH_SCORE_THRESHOLD(class='form-control bg-secondary') }}
+            <div id="MQTTPUBLISH__PUSH_SCORE_THRESHOLD-error" class="invalid-feedback text-danger" style="display: none;"></div>
+            <small class="form-text text-muted">Rain probability threshold for receiving alerts (default 0.75).</small>
+        </div>
+        <div class="col-sm-6">Push score threshold</div>
+    </div>
+    <div class="form-group row">
+        <div class="col-sm-2">
             {{ form_config.MQTTPUBLISH__PUSH_MODEL.label(class='col-form-label') }}
         </div>
         <div class="col-sm-8">
@@ -6720,7 +6731,7 @@ var camera_id = {{ camera_id }};
             <div id="MQTTPUBLISH__PUSH_MODEL-error" class="invalid-feedback text-danger" style="display: none;"></div>
             <small class="form-text text-muted">
                 Available fields include:<br>
-                • <code>current['stars']</code> – number of stars detected<br>
+                • <code>current['stars']</code> – number of stars detected / pseudo-cloudiness<br>
                 • <code>current['sensor_user_X']</code> – user sensor slots (replace X with the slot number) and compare with operators (`>`, `<`, `==`, etc.) plus a numeric value.<br>
                 {% if sensor_slot_labels %}
                 Configured sensor slots:
@@ -6737,6 +6748,100 @@ var camera_id = {{ camera_id }};
             </small>
         </div>
         <div class="col-sm-2">Python expression using <code>history</code> and <code>current</code></div>
+    </div>
+
+    <div class="form-group row">
+        <div class="col-sm-2">Star count as cloudiness?</div>
+        <div class="col-sm-4">
+            <div class="form-switch">
+                {{ form_config.MQTTPUBLISH__PUSH_USE_STAR_CLOUD(class='form-check-input') }}
+            </div>
+        </div>
+        <div class="col-sm-6">Enable use of star count to derive cloudiness (fewer stars = more cloud).</div>
+    </div>
+
+    <hr>
+
+    <div class="form-group row">
+        <div class="col-sm-2"><strong>Model Inputs</strong></div>
+        <div class="col-sm-10"><small class="text-muted">Map your configured sensor slots to the variables used by the built-in rain detection model.</small></div>
+    </div>
+    <div class="form-group row">
+        <div class="col-sm-2">Pressure</div>
+        <div class="col-sm-4">
+            {{ form_config.MQTTPUBLISH__PUSH_SLOT_PRESSURE(class='form-select bg-secondary') }}
+            <div id="MQTTPUBLISH__PUSH_SLOT_PRESSURE-error" class="invalid-feedback text-danger" style="display: none;"></div>
+            {% if push_slot_labels.PUSH_SLOT_PRESSURE %}
+            <small class="form-text text-muted">Currently: {{ push_slot_labels.PUSH_SLOT_PRESSURE }}</small>
+            {% endif %}
+        </div>
+        <div class="col-sm-6">Select the sensor slot that provides pressure readings.</div>
+    </div>
+    <div class="form-group row">
+        <div class="col-sm-2">Humidity</div>
+        <div class="col-sm-4">
+            {{ form_config.MQTTPUBLISH__PUSH_SLOT_HUMIDITY(class='form-select bg-secondary') }}
+            <div id="MQTTPUBLISH__PUSH_SLOT_HUMIDITY-error" class="invalid-feedback text-danger" style="display: none;"></div>
+            {% if push_slot_labels.PUSH_SLOT_HUMIDITY %}
+            <small class="form-text text-muted">Currently: {{ push_slot_labels.PUSH_SLOT_HUMIDITY }}</small>
+            {% endif %}
+        </div>
+        <div class="col-sm-6">Select the sensor slot that provides humidity readings.</div>
+    </div>
+    <div class="form-group row">
+        <div class="col-sm-2">Temperature</div>
+        <div class="col-sm-4">
+            {{ form_config.MQTTPUBLISH__PUSH_SLOT_TEMPERATURE(class='form-select bg-secondary') }}
+            <div id="MQTTPUBLISH__PUSH_SLOT_TEMPERATURE-error" class="invalid-feedback text-danger" style="display: none;"></div>
+            {% if push_slot_labels.PUSH_SLOT_TEMPERATURE %}
+            <small class="form-text text-muted">Currently: {{ push_slot_labels.PUSH_SLOT_TEMPERATURE }}</small>
+            {% endif %}
+        </div>
+        <div class="col-sm-6">Select the sensor slot that provides temperature readings.</div>
+    </div>
+    <div class="form-group row">
+        <div class="col-sm-2">Dew Point</div>
+        <div class="col-sm-4">
+            {{ form_config.MQTTPUBLISH__PUSH_SLOT_DEW_POINT(class='form-select bg-secondary') }}
+            <div id="MQTTPUBLISH__PUSH_SLOT_DEW_POINT-error" class="invalid-feedback text-danger" style="display: none;"></div>
+            {% if push_slot_labels.PUSH_SLOT_DEW_POINT %}
+            <small class="form-text text-muted">Currently: {{ push_slot_labels.PUSH_SLOT_DEW_POINT }}</small>
+            {% endif %}
+        </div>
+        <div class="col-sm-6">Select the sensor slot that provides dew point readings (optional).</div>
+    </div>
+    <div class="form-group row">
+        <div class="col-sm-2">Rain</div>
+        <div class="col-sm-4">
+            {{ form_config.MQTTPUBLISH__PUSH_SLOT_RAIN(class='form-select bg-secondary') }}
+            <div id="MQTTPUBLISH__PUSH_SLOT_RAIN-error" class="invalid-feedback text-danger" style="display: none;"></div>
+            {% if push_slot_labels.PUSH_SLOT_RAIN %}
+            <small class="form-text text-muted">Currently: {{ push_slot_labels.PUSH_SLOT_RAIN }}</small>
+            {% endif %}
+        </div>
+        <div class="col-sm-6">Select the sensor slot that provides rain/precipitation readings.</div>
+    </div>
+    <div class="form-group row">
+        <div class="col-sm-2">Lightning</div>
+        <div class="col-sm-4">
+            {{ form_config.MQTTPUBLISH__PUSH_SLOT_LIGHTNING(class='form-select bg-secondary') }}
+            <div id="MQTTPUBLISH__PUSH_SLOT_LIGHTNING-error" class="invalid-feedback text-danger" style="display: none;"></div>
+            {% if push_slot_labels.PUSH_SLOT_LIGHTNING %}
+            <small class="form-text text-muted">Currently: {{ push_slot_labels.PUSH_SLOT_LIGHTNING }}</small>
+            {% endif %}
+        </div>
+        <div class="col-sm-6">Select the sensor slot that provides lightning count/distance (optional).</div>
+    </div>
+    <div class="form-group row">
+        <div class="col-sm-2">Star count</div>
+        <div class="col-sm-4">
+            {{ form_config.MQTTPUBLISH__PUSH_SLOT_STARS(class='form-select bg-secondary') }}
+            <div id="MQTTPUBLISH__PUSH_SLOT_STARS-error" class="invalid-feedback text-danger" style="display: none;"></div>
+            {% if push_slot_labels.PUSH_SLOT_STARS %}
+            <small class="form-text text-muted">Currently: {{ push_slot_labels.PUSH_SLOT_STARS }}</small>
+            {% endif %}
+        </div>
+        <div class="col-sm-6">Select the field used for star count (cloudiness proxy) used to compute high-cloud signal.</div>
     </div>
 
 </div><!-- end filetransfer tab -->

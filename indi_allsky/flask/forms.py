@@ -2732,6 +2732,18 @@ def MQTTPUBLISH__PUSH_LIGHTNING_KM_validator(form, field):
         raise ValidationError('Lightning threshold must be non-negative')
 
 
+def MQTTPUBLISH__PUSH_SCORE_THRESHOLD_validator(form, field):
+    # allow empty (unset) to mean the default is used
+    if field.data is None or field.data == '':
+        return
+    try:
+        val = float(field.data)
+    except Exception:
+        raise ValidationError('Score threshold must be a number')
+    if val < 0.0 or val > 1.0:
+        raise ValidationError('Score threshold must be between 0 and 1')
+
+
 def SYNCAPI__BASEURL_validator(form, field):
     try:
         r = urlparse(field.data)
@@ -4785,7 +4797,16 @@ class IndiAllskyConfigForm(FlaskForm):
     MQTTPUBLISH__PUSH_COOLDOWN_S     = IntegerField('Dedup Cooldown (s)', validators=[DataRequired(), MQTTPUBLISH__PUSH_COOLDOWN_S_validator])
     MQTTPUBLISH__PUSH_MAX_PER_HOUR   = IntegerField('Max Alerts / Hour', validators=[DataRequired(), MQTTPUBLISH__PUSH_MAX_PER_HOUR_validator])
     MQTTPUBLISH__PUSH_LIGHTNING_KM   = FloatField('Lightning Threshold (km)', validators=[MQTTPUBLISH__PUSH_LIGHTNING_KM_validator])
+    MQTTPUBLISH__PUSH_SCORE_THRESHOLD = FloatField('Push Threshold (0-1)', validators=[DataRequired(), MQTTPUBLISH__PUSH_SCORE_THRESHOLD_validator])
     MQTTPUBLISH__PUSH_MODEL          = TextAreaField('Push Model (Python expression)', render_kw={'rows':3})
+    MQTTPUBLISH__PUSH_USE_STAR_CLOUD = BooleanField('Use star count for cloudiness')
+    MQTTPUBLISH__PUSH_SLOT_PRESSURE  = SelectField('Pressure Source', choices=[])
+    MQTTPUBLISH__PUSH_SLOT_HUMIDITY  = SelectField('Humidity Source', choices=[])
+    MQTTPUBLISH__PUSH_SLOT_TEMPERATURE = SelectField('Temperature Source', choices=[])
+    MQTTPUBLISH__PUSH_SLOT_DEW_POINT = SelectField('Dew Point Source', choices=[])
+    MQTTPUBLISH__PUSH_SLOT_RAIN      = SelectField('Rain Source', choices=[])
+    MQTTPUBLISH__PUSH_SLOT_LIGHTNING = SelectField('Lightning Source', choices=[])
+    MQTTPUBLISH__PUSH_SLOT_STARS     = SelectField('Star Count Source', choices=[])
     SYNCAPI__ENABLE                  = BooleanField('Enable Sync API')
     SYNCAPI__BASEURL                 = StringField('URL', validators=[SYNCAPI__BASEURL_validator], render_kw={'autocomplete' : 'new-password'})  # prevent saving BASEURL as username
     SYNCAPI__USERNAME                = StringField('Username', validators=[SYNCAPI__USERNAME_validator], render_kw={'autocomplete' : 'new-password'})

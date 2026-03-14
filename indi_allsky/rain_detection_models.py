@@ -52,10 +52,13 @@ DEFAULT_SENSOR_WEIGHTS = {
     'rain': 1.0,
     'humidity': 0.5,
     'pressure': 0.2,
-    'temperature': 0.2,
-    'dew_point': 0.3,
-    # dew_spread_inverse is a bounded signal derived from |temp - dew_point|.
-    # Smaller spread (closer to saturation) yields a higher signal.
+    # Temperature alone is not a reliable rain indicator; it is only
+    # meaningful in the context of dew point (via dew_spread_inverse).
+    # Therefore we do not weight raw temperature directly.
+    'temperature': 0.0,
+    # Raw dew_point is removed during processing; only the derived
+    # dew_spread_inverse signal (based on temp/dew spread) contributes.
+    'dew_point': 0.0,
     'dew_spread_inverse': 0.2,
     'lightning': 2.0,
     # Pressure tendency (rising/steady/falling) encoded as a 0..1 signal

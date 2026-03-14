@@ -20,14 +20,19 @@ Model overview (high level)
 - Rain: exposed as a boolean presence indicator (recent short-window
     sensor value > 0). Rain is available both as a boolean determinant
     and as a numeric feature in the weighted sum (depending on config).
-- Dew spread (relative humidity): derived from temperature and dew point
-    using standard vapor pressure relations. The result is a 0..1 signal
-    (higher value means higher relative humidity) used as a proxy for
-    saturation and precipitation potential.
+- Humidity: treated as a numeric feature (0..1) and used both in the weighted
+    sum and for slope/spike boosting. Rapid rises in humidity can increase
+    the rain likelihood score.
+- Dew spread (relative humidity proxy): computed from temperature and dew point
+    using standard vapor pressure relations, but only contributes when the dew point
+    approaches the ambient temperature. The resulting 0..1 signal is used as a proxy
+    for saturation and precipitation potential (raw dew point values are ignored unless
+    the spread is small enough).
 - Pressure tendency: implements standard weather tendency rules (e.g.,
     Truganina/Met Office) where a 1‑hour change of <0.5 hPa is considered
     "steady" and >0.5 hPa changes indicate rising/falling pressure. The
-    same threshold is scaled proportionally for shorter/longer windows.
+    benchmark is scaled linearly by the window length (e.g., 30m -> 0.25 hPa,
+    3h -> 1.5 hPa) so shorter/longer windows still use the same reference.
 - Trend & spike analysis: slope and spike detectors run primarily on
     `humidity` and `pressure` (short vs long windows). These signals are
     used to boost the score when rapid changes or spikes indicate a likely

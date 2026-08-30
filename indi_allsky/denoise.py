@@ -25,24 +25,12 @@ _hotpixel_kernel_cache: dict[int, numpy.ndarray] = {}  # radius -> kernel
 # typical Raspberry Pi.
 _thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
-# Hoisted constant maps to avoid reallocating them per-call
-_GAUSSIAN_SIGMA_MAP = {1: 1.0, 2: 1.8, 3: 3.0, 4: 4.2, 5: 5.8}
-_WAVELET_SCALE_MAP = {1: 1.8, 2: 3.0, 3: 4.6, 4: 7.0, 5: 9.2}
-_BILATERAL_TUNED_SIGMA = {1: 8, 2: 8, 3: 8, 4: 12, 5: 16}
-
-# tuning constants for various denoising algorithms; extracted from the
-# long series of adjustments sprinkled through the original implementation.
-# Keeping them here makes it easier to audit and tweak.
-
-# wavelet strength adjustment:
-WAVELET_SCALE_ADJUST = 1.10  # 10% boost to the base scale value
-
-# gaussian modifications (sigma & blend) applied as cumulative multipliers.
-# combining them once gives a single constant that is easier to read and reason about.
+# Tuned multiplier for wavelet denoise strength.
+WAVELET_SCALE_ADJUST = 1.10
+# Tuned multiplier for Gaussian sigma and blend.
 GAUSSIAN_SIGMA_ADJUST = 0.707625
 GAUSSIAN_BLEND_ADJUST = GAUSSIAN_SIGMA_ADJUST
-
-# median strength adjustments for kernel size and blend.
+# Tuned multiplier for median kernel size and blend.
 MEDIAN_KSIZE_ADJUST = 0.851
 MEDIAN_BLEND_ADJUST = MEDIAN_KSIZE_ADJUST
 
@@ -343,35 +331,15 @@ class IndiAllskyDenoise(object):
         # These values provide consistent denoising without external test files.
         sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE', 15))
 
-        strength = max(1, min(self._get_strength(), 5))
-        # Tuned mapping: strengths 1-5 -> sigma_color (baseline)
-        tuned_sigma = {
-            1: 8,
-            2: 8,
-            3: 8,
-            4: 12,
-            5: 16,
-        }
+    def _uses_high_bit_depth_camera(self, img):
+        """Return whether this frame comes from a camera with more than 8 bits.
 
-        base_sigma = float(tuned_sigma.get(strength, 10))
-
-        # Allow scaling/exponent to reshape strength→sigma mapping.
-        bil_scale_factor = float(self.config.get('BILATERAL_SCALE_FACTOR', 0.4))
-        bil_scale_exp = float(self.config.get('BILATERAL_SCALE_EXP', 1.0))
-
-        t = (float(strength) - 1.0) / 4.0
-        sigma_min = base_sigma * bil_scale_factor * (1.0 ** (bil_scale_exp - 1.0))
-        sigma_max = base_sigma * bil_scale_factor * (5.0 ** (bil_scale_exp - 1.0))
-        sigma_color = int(max(1.0, sigma_min + (sigma_max - sigma_min) * (t ** bil_scale_exp)))
-
-        # If explicit override provided, respect it; otherwise bump by 10%
-        if 'BILATERAL_SIGMA_COLOR' in self.config:
-            sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR'))
-        else:
-            # bump computed sigma_color by a fixed factor
-            sigma_color = int(max(1.0, sigma_color * BILATERAL_SIGMA_BUMP))
-
-        return max(1, sigma_color), max(1, sigma_space)
+        A configured camera bit depth takes precedence over the image dtype.
+        """
+        configured_bit_depth = int(self.config.get('CCD_BIT_DEPTH', 0))
+        if configured_bit_depth:
+            return configured_bit_depth > 8
+        return img.dtype == numpy.uint16
 
 
     def _medianBlur(self, img, ksize):

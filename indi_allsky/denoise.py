@@ -327,9 +327,12 @@ class IndiAllskyDenoise(object):
 
     def _get_bilateral_sigma(self):
         """Return (sigmaColor, sigmaSpace) for the bilateral filter."""
-        # Tuned sigma_color per strength (derived from benchmarks).
-        # These values provide consistent denoising without external test files.
-        sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE', 15))
+        use_night_settings = (self.config.get('USE_NIGHT_COLOR', True) or
+                              self.night_av[constants.NIGHT_NIGHT])
+        suffix = '' if use_night_settings else '_DAY'
+        sigma_color = int(self.config.get('BILATERAL_SIGMA_COLOR' + suffix, 10))
+        sigma_space = int(self.config.get('BILATERAL_SIGMA_SPACE' + suffix, 15))
+        return max(1, sigma_color), max(1, sigma_space)
 
     def _uses_high_bit_depth_camera(self, img):
         """Return whether this frame comes from a camera with more than 8 bits.
@@ -345,9 +348,16 @@ class IndiAllskyDenoise(object):
     def _medianBlur(self, img, ksize):
         """cv2.medianBlur only supports CV_8U for multi-channel images in newer OpenCV.
         Split into per-channel blurs when the image is 16-bit (or deeper) multi-channel."""
+        use_native_uint16 = (img.dtype == numpy.uint16 and
+                             self._uses_high_bit_depth_camera(img) and
+                             ksize <= 5)
+
         def _blur_channel(ch):
             # Fast path for 8-bit single-channel
             if ch.dtype == numpy.uint8:
+                return cv2.medianBlur(ch, ksize)
+
+            if use_native_uint16:
                 return cv2.medianBlur(ch, ksize)
 
             # Integer types (commonly uint16) — scale down to 8-bit, blur, scale back
@@ -393,10 +403,13 @@ class IndiAllskyDenoise(object):
         preserves edges (unlike Gaussian) while effectively smoothing
         noise.
 
-        Strength mapping:
+                Strength mapping (kernel size, blend):
           1 → 3×3 kernel, blend=0.40   (gentle)
           3 → 7×7 kernel, blend=0.70   (moderate)
-          5 → 11×11 kernel, blend=1.00  (strong — fully filtered)
+                    5 → 9×9 kernel, blend=1.00   (strong — fully filtered)
+
+                High-bit-depth cameras (uint16) are capped at a 5×5 kernel so
+                OpenCV's native uint16 median path can be used losslessly.
 
         Strength range: 1-5.
         """
@@ -407,6 +420,11 @@ class IndiAllskyDenoise(object):
         # Process at full resolution to maintain image quality
         strength = max(1, min(strength, 5))
         ksize = self._compute_median_ksize(strength)
+
+        # OpenCV natively preserves uint16 values only through a 5x5 median.
+        # Cap high-bit-depth cameras at that fast, lossless implementation.
+        if self._uses_high_bit_depth_camera(scidata):
+            ksize = min(ksize, 5)
 
         blurred = self._medianBlur(scidata, ksize)
 
@@ -741,7 +759,8 @@ class IndiAllskyDenoise(object):
         # Compute blend based on strength
         norm_strength = self._norm_strength()
         blend = float(self.config.get('WAVELET_BLEND', 0.46 + 0.54 * norm_strength))
-        blend = max(0.0, min(1.0, blend))
+        max_blend = float(self.config.get('WAVELET_MAX_BLEND', 1.0))
+        blend = max(0.0, min(1.0, blend, max_blend))
 
         # Blend, match luminance and protect stars using the shared
         # finalization helper so that any future improvements (eg. a more

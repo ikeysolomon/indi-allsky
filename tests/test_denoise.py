@@ -14,6 +14,11 @@ def _denoiser(config, is_night=False):
     return IndiAllskyDenoise(config, night_av)
 
 
+def test_set_cache_size_remains_a_noop_public_api():
+    assert 'set_cache_size' in protection_masks.__all__
+    assert protection_masks.set_cache_size(4) is None
+
+
 def test_bilateral_uses_day_settings_when_day_color_is_enabled():
     denoiser = _denoiser({
         'USE_NIGHT_COLOR': False,

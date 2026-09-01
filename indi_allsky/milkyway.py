@@ -1,4 +1,4 @@
-"""Fast, lens-solution aligned Milky Way enhancement for stretched images."""
+"""Fast, lens-solution aligned Milky Way enhancement."""
 
 import logging
 import time
@@ -13,30 +13,12 @@ from .lens_solver.projection import projectToPixels
 logger = logging.getLogger('indi_allsky')
 
 
-def stretch_eligibility(stretch_config, is_night, is_moonmode, has_base_stretch=True, lens_solved=True):
-    """Decide, independently, whether the base histogram stretch and the
-    Milky Way enhancement should run for the current frame. Enabling the
-    Milky Way Moon Mode toggle must never force the (unrelated) base
-    stretch to run during Moon Mode, and vice versa; a base stretch that
-    isn't even configured (``has_base_stretch=False``) must not block the
-    Milky Way enhancement either. Without a solved lens (``lens_solved=False``)
-    the projection geometry is untrustworthy, so the band would land in the
-    wrong place -- it must never run in that case.
-    """
+def base_stretch_allowed(stretch_config, is_night, is_moonmode, has_base_stretch=True):
+    """Decide whether the configured base histogram stretch should run."""
     if is_night:
-        base_allowed = has_base_stretch and (not is_moonmode or bool(stretch_config.get('MOONMODE')))
-    else:
-        base_allowed = has_base_stretch and bool(stretch_config.get('DAYTIME'))
+        return has_base_stretch and (not is_moonmode or bool(stretch_config.get('MOONMODE')))
 
-    milkyway_enabled = bool(stretch_config.get('MILKYWAY_ENABLE', False))
-    milkyway_allowed = (
-        is_night
-        and milkyway_enabled
-        and lens_solved
-        and (not is_moonmode or bool(stretch_config.get('MILKYWAY_MOONMODE', False)))
-    )
-
-    return base_allowed, milkyway_allowed
+    return has_base_stretch and bool(stretch_config.get('DAYTIME'))
 
 
 # IAU 1958 equatorial(J2000)-to-galactic rotation matrix (standard "A_G").
@@ -225,15 +207,7 @@ class IndiAllskyMilkyWayStretch(object):
             enhanced = cv2.LUT(image, lut)
 
             if image.ndim == 3:
-                # All detail work operates on luminance only (L channel),
-                # never on raw BGR/chroma. CLAHE is deliberately not used:
-                # its tiled local histograms create visible blotches in the
-                # smooth, low-SNR sky background this effect targets.
-                lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB)
-
-                enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-
-                # saturation boost brings out the reds/pinks of emission
+                # Saturation boost brings out the reds/pinks of emission
                 # nebulosity along the plane, which gamma alone (the same
                 # curve applied identically to every channel) does not
                 saturation = float(settings.get('MILKYWAY_SATURATION', 1.4))

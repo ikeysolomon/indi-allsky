@@ -226,6 +226,14 @@ class IndiAllskyMilkyWayStretch(object):
                     hsv[:, :, 1] = cv2.multiply(hsv[:, :, 1], saturation)
                     enhanced = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
+                # unsharp mask brings out star pinpoints and dust-lane edge
+                # definition that CLAHE's broad local contrast still leaves
+                # soft; same technique as the general SHARPEN_AMOUNT stage
+                sharpen_amount = float(settings.get('MILKYWAY_SHARPEN', 0.6))
+                if sharpen_amount != 0.0:
+                    blurred = cv2.GaussianBlur(enhanced, (0, 0), sigmaX=2)
+                    enhanced = cv2.addWeighted(enhanced, 1.0 + sharpen_amount, blurred, -sharpen_amount, 0)
+
             result = cv2.blendLinear(image, enhanced, 1.0 - alpha, alpha)
             self.last_elapsed_ms = (time.monotonic() - t_start) * 1000.0
             return result

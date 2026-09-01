@@ -32,6 +32,7 @@ from .keogram import KeogramGenerator
 from .draw import IndiAllSkyDraw
 from .scnr import IndiAllskyScnr
 from .denoise import IndiAllskyDenoise
+from .milkyway import IndiAllskyMilkyWayStretch
 from .stack import IndiAllskyStacker
 from .overlay.cardinalDirsLabel import IndiAllskyCardinalDirsLabel
 from .utils import IndiAllSkyDateCalcs
@@ -173,6 +174,7 @@ class ImageProcessor(object):
         self._draw = None
         self._stacker = None
         self._stretch_o = None
+        self._milkyway_stretch = IndiAllskyMilkyWayStretch(self.config)
         self._image_overlay_o = IndiAllSkyImageOverlay(self.config)
 
 
@@ -3953,6 +3955,13 @@ class ImageProcessor(object):
 
 
         stretched_image = self._stretch(i_ref)
+        stretched_image = self._milkyway_stretch.apply(
+            stretched_image,
+            float(self.position_av[constants.POSITION_LATITUDE]),
+            float(self.position_av[constants.POSITION_LONGITUDE]),
+            i_ref.exp_date_utc.timestamp(),
+            i_ref.binning,
+        )
 
 
         if self.config.get('IMAGE_STRETCH', {}).get('SPLIT'):

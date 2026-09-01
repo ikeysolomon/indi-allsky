@@ -1255,6 +1255,21 @@ def IMAGE_STRETCH__MODE3_HIGHLIGHTS_validator(form, field):
         raise ValidationError('Value must be 1.0 or less')
 
 
+def IMAGE_STRETCH__MILKYWAY_GAMMA_validator(form, field):
+    if not isinstance(field.data, (int, float)) or field.data < 1.0 or field.data > 4.0:
+        raise ValidationError('Value must be between 1.0 and 4.0')
+
+
+def IMAGE_STRETCH__MILKYWAY_BAND_WIDTH_validator(form, field):
+    if not isinstance(field.data, (int, float)) or field.data < 1.0 or field.data > 45.0:
+        raise ValidationError('Value must be between 1 and 45 degrees')
+
+
+def IMAGE_STRETCH__MILKYWAY_FEATHER_validator(form, field):
+    if not isinstance(field.data, (int, float)) or field.data < 0.0 or field.data > 500.0:
+        raise ValidationError('Value must be between 0 and 500 pixels')
+
+
 def IMAGE_ROTATE_validator(form, field):
     import cv2
 
@@ -4654,6 +4669,10 @@ class IndiAllskyConfigForm(FlaskForm):
     IMAGE_STRETCH__SPLIT             = BooleanField('Stretching split screen')
     IMAGE_STRETCH__MOONMODE          = BooleanField('Moon Mode Stretching')
     IMAGE_STRETCH__DAYTIME           = BooleanField('Daytime Stretching')
+    IMAGE_STRETCH__MILKYWAY_ENABLE   = BooleanField('Milky Way enhancement')
+    IMAGE_STRETCH__MILKYWAY_GAMMA    = FloatField('Milky Way gamma', validators=[IMAGE_STRETCH__MILKYWAY_GAMMA_validator], widget=NumberInput(step=0.05))
+    IMAGE_STRETCH__MILKYWAY_BAND_WIDTH = FloatField('Milky Way band width (degrees)', validators=[IMAGE_STRETCH__MILKYWAY_BAND_WIDTH_validator], widget=NumberInput(step=1))
+    IMAGE_STRETCH__MILKYWAY_FEATHER  = FloatField('Milky Way feather (pixels)', validators=[IMAGE_STRETCH__MILKYWAY_FEATHER_validator], widget=NumberInput(step=5))
     KEOGRAM_ANGLE                    = FloatField('Keogram Rotation Angle', validators=[KEOGRAM_ANGLE_validator], widget=NumberInput(step=0.1))
     KEOGRAM_H_SCALE                  = IntegerField('Keogram Horizontal Scaling', validators=[DataRequired(), KEOGRAM_H_SCALE_validator])
     KEOGRAM_V_SCALE                  = IntegerField('Keogram Vertical Scaling', validators=[DataRequired(), KEOGRAM_V_SCALE_validator])

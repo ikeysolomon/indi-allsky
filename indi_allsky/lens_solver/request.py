@@ -22,6 +22,8 @@ LENS_GEOMETRY_KEYS = (
     'IMAGE_ROTATE_KEEP_SIZE',
     'IMAGE_FLIP_V',
     'IMAGE_FLIP_H',
+    'IMAGE_CROP_IMAGE_CIRCLE',
+    'IMAGE_CROP_ROI',
 )
 
 # the VIRTUALSKY sub-keys the solver itself writes

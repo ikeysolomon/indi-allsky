@@ -165,6 +165,8 @@ def test_invalidate_fires_when_rotation_or_flip_changes():
         ('IMAGE_FLIP_H', False),
         ('LENS_OFFSET_X', 999),
         ('LENS_IMAGE_CIRCLE', 1234),
+        ('IMAGE_CROP_IMAGE_CIRCLE', True),
+        ('IMAGE_CROP_ROI', [100, 100, 1800, 900]),
     ):
         config = _solved_config()
         snapshot = captureLensGeometrySnapshot(config)

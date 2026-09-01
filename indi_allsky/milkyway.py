@@ -74,6 +74,7 @@ class IndiAllskyMilkyWayStretch(object):
     def __init__(self, config):
         self.config = config
         self.last_elapsed_ms = 0.0
+        self._image_circle_mask_cache = {}
 
     def apply(self, image, latitude, longitude, obstime_unix, binning=1, moonmode=False, is_night=True):
         """Apply the enhancement, never raising -- any failure returns
@@ -189,6 +190,23 @@ class IndiAllskyMilkyWayStretch(object):
 
         if scale < 1.0:
             mask = cv2.resize(mask, (image_width, image_height), interpolation=cv2.INTER_LINEAR)
+
+        # Linear upscaling can interpolate non-zero alpha just outside the
+        # low-resolution circle edge. Reapply the exact full-resolution
+        # boundary so no enhancement reaches invalid camera pixels.
+        circle_key = (image_width, image_height, diameter, params[4], params[5])
+        circle_mask = self._image_circle_mask_cache.get(circle_key)
+        if circle_mask is None:
+            circle_mask = numpy.zeros_like(mask)
+            cv2.circle(
+                circle_mask,
+                (int(round(image_width / 2.0 + params[4])), int(round(image_height / 2.0 - params[5]))),
+                int(round(diameter / 2.0)),
+                255,
+                -1,
+            )
+            self._image_circle_mask_cache[circle_key] = circle_mask
+        mask = cv2.bitwise_and(mask, circle_mask)
 
         gamma = float(settings.get('MILKYWAY_GAMMA', 2.2))
         if gamma <= 1.0 or not numpy.any(mask):

@@ -31,6 +31,8 @@ from ..processing import ImageProcessor
 from ..lens_solver import IndiAllSkyLensSolver
 from ..lens_solver import parseSolverRequestValues
 from ..lens_solver import applySolvedValuesToConfig
+from ..lens_solver import captureLensGeometrySnapshot
+from ..lens_solver import invalidateLensSolveIfGeometryChanged
 from ..panorama import panoramaSourceCircleClipped
 from ..panorama import validatePanoramaMiniTimelapseRequest
 
@@ -2658,7 +2660,7 @@ class ConfigView(FormView):
             'IMAGE_STRETCH__DAYTIME'         : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('DAYTIME', False),
             'IMAGE_STRETCH__MILKYWAY_ENABLE' : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_ENABLE', False),
             'IMAGE_STRETCH__MILKYWAY_MOONMODE' : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_MOONMODE', False),
-            'IMAGE_STRETCH__MILKYWAY_GAMMA'  : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_GAMMA', 1.35),
+            'IMAGE_STRETCH__MILKYWAY_GAMMA'  : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_GAMMA', 1.485),
             'IMAGE_STRETCH__MILKYWAY_BAND_WIDTH' : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_BAND_WIDTH', 14.0),
             'IMAGE_STRETCH__MILKYWAY_FEATHER': self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_FEATHER', 80.0),
             'KEOGRAM_ANGLE'                  : self.indi_allsky_config.get('KEOGRAM_ANGLE', 0.0),
@@ -3526,6 +3528,10 @@ class AjaxConfigView(BaseView):
 
         if not self.indi_allsky_config:
             return jsonify({}), 400
+
+        # a stale solve is worse than no solve -- compare against this once
+        # the form's new values have all been applied, right before saving
+        lens_geometry_snapshot = captureLensGeometrySnapshot(self.indi_allsky_config)
 
 
         # sanity check
@@ -4457,6 +4463,9 @@ class AjaxConfigView(BaseView):
             username = current_user.username
         else:
             username = 'system'
+
+        if invalidateLensSolveIfGeometryChanged(self.indi_allsky_config, lens_geometry_snapshot):
+            app.logger.warning('Lens geometry changed -- invalidating previous plate solve')
 
 
         try:
@@ -9183,7 +9192,7 @@ class ImageProcessingView(TemplateView):
             'IMAGE_STRETCH__MODE3_HIGHLIGHTS': self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MODE3_HIGHLIGHTS', 1.0),
             'IMAGE_STRETCH__MILKYWAY_ENABLE' : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_ENABLE', False),
             'IMAGE_STRETCH__MILKYWAY_MOONMODE' : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_MOONMODE', False),
-            'IMAGE_STRETCH__MILKYWAY_GAMMA'  : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_GAMMA', 1.35),
+            'IMAGE_STRETCH__MILKYWAY_GAMMA'  : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_GAMMA', 1.485),
             'IMAGE_STRETCH__MILKYWAY_BAND_WIDTH' : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_BAND_WIDTH', 14.0),
             'IMAGE_STRETCH__MILKYWAY_FEATHER': self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_FEATHER', 80.0),
             'CFA_PATTERN'                    : self.indi_allsky_config.get('CFA_PATTERN', ''),

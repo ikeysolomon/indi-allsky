@@ -195,7 +195,7 @@ class IndiAllskyMilkyWayStretch(object):
         if scale < 1.0:
             mask = cv2.resize(mask, (image_width, image_height), interpolation=cv2.INTER_LINEAR)
 
-        gamma = float(settings.get('MILKYWAY_GAMMA', 1.35))
+        gamma = float(settings.get('MILKYWAY_GAMMA', 1.485))
         if gamma <= 1.0 or not numpy.any(mask):
             logger.debug('Milky Way enhancement skipped: band not visible or gamma is a no-op')
             return image

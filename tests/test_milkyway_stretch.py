@@ -3,6 +3,7 @@ import pytest
 
 from indi_allsky.milkyway import IndiAllskyMilkyWayStretch
 from indi_allsky.milkyway import _GALACTIC_PLANE_CATALOG
+from indi_allsky.milkyway import _predict_alt_az
 from indi_allsky.milkyway import stretch_eligibility
 
 
@@ -14,6 +15,57 @@ def test_galactic_plane_catalog_matches_known_galactic_center():
     ra, dec = _GALACTIC_PLANE_CATALOG[180]
     assert ra == pytest.approx(266.405, abs=0.05)
     assert dec == pytest.approx(-28.936, abs=0.05)
+
+
+def test_galactic_plane_catalog_matches_known_anticenter():
+    # l=180, b=0 (galactic anticenter) has well known equatorial coordinates
+    # (~RA 85.5deg, Dec +28.9deg); this is the catalog's other pole from the
+    # galactic center and guards the same rotation matrix from a different
+    # angle (literally) of the sky.
+    ra, dec = _GALACTIC_PLANE_CATALOG[0]
+    assert ra == pytest.approx(86.405, abs=0.5)
+    assert dec == pytest.approx(28.936, abs=0.05)
+
+
+def test_galactic_plane_catalog_antipodal_longitudes_are_consistent():
+    # for any l, the point at l+180 must be antipodal on the galactic
+    # equator: RA differs by exactly 180deg and Dec has the opposite sign
+    # with the same magnitude. This is a structural invariant of the
+    # rotation (independent of any external reference value), so it catches
+    # a wrong transpose/sign regression at *every* sampled longitude, not
+    # just the two named ones above.
+    for l in (30, 60, 90, 120, 150):
+        ra_a, dec_a = _GALACTIC_PLANE_CATALOG[l + 180]
+        ra_b, dec_b = _GALACTIC_PLANE_CATALOG[l]  # l - 180, i.e. the antipode
+        assert (ra_a - ra_b) % 360.0 == pytest.approx(180.0, abs=0.05)
+        assert dec_a == pytest.approx(-dec_b, abs=0.05)
+
+
+def test_galactic_plane_partially_below_horizon_for_typical_frame():
+    # a typical mid-latitude frame must show *some* of the plane below the
+    # horizon and *some* above it -- if every point were visible (or none
+    # were), the alt >= -2deg cutoff used by _apply's visibility mask would
+    # not actually be filtering anything, silently.
+    alt, _ = _predict_alt_az(_GALACTIC_PLANE_CATALOG, 45.0, -93.0, 1767225600.0)
+    visible = alt >= numpy.radians(-2.0)
+    assert visible.any()
+    assert not visible.all()
+
+
+def test_predict_alt_az_hemisphere_sign_convention_is_consistent_across_a_day():
+    # a star 5deg from the north celestial pole must be circumpolar (always
+    # above the horizon) from a matching-sign (northern) latitude, and never
+    # rise from the opposite-sign (southern) latitude of the same
+    # magnitude, at every hour of the day. A sign error in the
+    # latitude/declination handling would flip this for at least some hours.
+    catalog = numpy.array([[0.0, 85.0]])
+    base_obstime = 1767225600.0
+    for hours in range(0, 24, 3):
+        obstime = base_obstime + hours * 3600.0
+        alt_north, _ = _predict_alt_az(catalog, 50.0, 0.0, obstime)
+        alt_south, _ = _predict_alt_az(catalog, -50.0, 0.0, obstime)
+        assert alt_north[0] > 0.0
+        assert alt_south[0] < 0.0
 
 
 def _config(enabled=True):
@@ -30,7 +82,7 @@ def _config(enabled=True):
         'IMAGE_STRETCH': {
             'MILKYWAY_ENABLE': enabled,
             'MILKYWAY_MOONMODE': False,
-            'MILKYWAY_GAMMA': 1.35,
+            'MILKYWAY_GAMMA': 1.485,
             'MILKYWAY_BAND_WIDTH': 14.0,
             'MILKYWAY_FEATHER': 80.0,
         },

@@ -123,6 +123,42 @@ def test_rendered_pixel_matches_shared_projection_end_to_end():
     assert numpy.array_equal(result[50, 50], image[50, 50])
 
 
+def test_enhancement_never_extends_past_the_image_circle():
+    # regression guard: the -2deg horizon allowance lets a near-horizon
+    # catalog point stay "visible" even though it projects past the edge
+    # of the configured sky circle (fisheye radius grows without bound
+    # past the horizon). This index/lat/lon/time is a known case of that:
+    # alt is just above -2deg, but its pixel radius exceeds the 500px
+    # (1000px diameter) circle while still landing inside the frame. The
+    # enhancement must never touch it.
+    lat, lon, obstime = -27.0, 153.0, 1767225600.0
+    config = _config()
+    config['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 1000
+    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+
+    near_horizon_point = _GALACTIC_PLANE_CATALOG[84:85]
+    alt, az = predictAltAz(near_horizon_point, lat, lon, obstime)
+    assert numpy.radians(-2.0) <= alt[0] < 0.0  # confirms this is the case being guarded
+
+    params = (
+        config['LENS_AZIMUTH'],
+        config['VIRTUALSKY']['LATITUDE_OFFSET'],
+        config['VIRTUALSKY']['LONGITUDE_OFFSET'],
+        config['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'],
+        config['VIRTUALSKY']['OFFSET_X'],
+        config['VIRTUALSKY']['OFFSET_Y'],
+    )
+    x, y = projectToPixels(alt, az, params, 1920, 1080)
+    radius = numpy.hypot(x[0] - 960.0, y[0] - 540.0)
+    assert radius > 500.0  # confirms it does land outside the 1000px-diameter circle
+    assert 0 <= x[0] < 1920 and 0 <= y[0] < 1080  # and still on-frame
+
+    ex, ey = int(round(x[0])), int(round(y[0]))
+    result = IndiAllskyMilkyWayStretch(config).apply(image, lat, lon, obstime)
+
+    assert numpy.array_equal(result[ey, ex], image[ey, ex])
+
+
 def test_milkyway_stretch_is_opt_in_and_localized():
     image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
     disabled = IndiAllskyMilkyWayStretch(_config(enabled=False))

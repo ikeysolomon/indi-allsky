@@ -1,11 +1,15 @@
 """Fast, lens-solution aligned Milky Way enhancement for stretched images."""
 
+import logging
 import time
 
 import cv2
 import numpy
 
 from .lens_solver.projection import projectToPixels
+
+
+logger = logging.getLogger('indi_allsky')
 
 
 # IAU 1958 equatorial(J2000)-to-galactic rotation matrix (standard "A_G").
@@ -64,15 +68,26 @@ class IndiAllskyMilkyWayStretch(object):
         self.last_elapsed_ms = 0.0
 
     def apply(self, image, latitude, longitude, obstime_unix, binning=1):
+        """Apply the enhancement, never raising -- any failure returns
+        ``image`` unchanged so a bad frame/config cannot break capture.
+        """
         settings = self.config.get('IMAGE_STRETCH', {})
         if not settings.get('MILKYWAY_ENABLE', False):
             return image
 
+        try:
+            return self._apply(image, settings, latitude, longitude, obstime_unix, binning)
+        except Exception as e:
+            logger.warning('Milky Way enhancement skipped: %s', str(e))
+            return image
+
+    def _apply(self, image, settings, latitude, longitude, obstime_unix, binning):
         t_start = time.monotonic()
         image_height, image_width = image.shape[:2]
         virtualsky = self.config.get('VIRTUALSKY', {})
         diameter = float(virtualsky.get('IMAGE_CIRCLE_DIAMETER', 0)) / binning
         if diameter <= 0.0:
+            logger.debug('Milky Way enhancement skipped: no image circle diameter configured')
             return image
 
         params = (
@@ -126,6 +141,7 @@ class IndiAllskyMilkyWayStretch(object):
 
         gamma = float(settings.get('MILKYWAY_GAMMA', 1.35))
         if gamma <= 1.0 or not numpy.any(mask):
+            logger.debug('Milky Way enhancement skipped: band not visible or gamma is a no-op')
             return image
 
         alpha = mask.astype(numpy.float32) / 255.0

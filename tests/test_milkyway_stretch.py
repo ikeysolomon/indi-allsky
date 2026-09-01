@@ -45,3 +45,56 @@ def test_milkyway_stretch_is_opt_in_and_localized():
     assert numpy.any(result != image)
     assert numpy.any(result == image)
     assert enabled.last_elapsed_ms > 0.0
+
+
+def test_milkyway_band_tracks_sidereal_time():
+    # the whole point of piggybacking on the lens solution is that the band
+    # follows the sky; sampling six hours apart must move it, not just
+    # change it by coincidence of noise.
+    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+    enhancer = IndiAllskyMilkyWayStretch(_config())
+
+    result_a = enhancer.apply(image, 45.0, -93.0, 1767225600.0)
+    result_b = enhancer.apply(image, 45.0, -93.0, 1767225600.0 + 6 * 3600)
+
+    assert not numpy.array_equal(result_a, result_b)
+
+
+def test_milkyway_gamma_brightens_the_masked_region_monotonically():
+    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+
+    config_mild = _config()
+    config_mild['IMAGE_STRETCH']['MILKYWAY_GAMMA'] = 1.1
+    config_strong = _config()
+    config_strong['IMAGE_STRETCH']['MILKYWAY_GAMMA'] = 3.0
+
+    mild = IndiAllskyMilkyWayStretch(config_mild).apply(image, 45.0, -93.0, 1767225600.0)
+    strong = IndiAllskyMilkyWayStretch(config_strong).apply(image, 45.0, -93.0, 1767225600.0)
+
+    assert strong.astype(numpy.int32).sum() > mild.astype(numpy.int32).sum() > image.astype(numpy.int32).sum()
+
+
+def test_milkyway_stretch_respects_binning():
+    # binned frames are smaller and use a proportionally smaller image
+    # circle; this must not raise or silently no-op.
+    image = numpy.full((540, 960, 3), 40, dtype=numpy.uint8)
+    enhancer = IndiAllskyMilkyWayStretch(_config())
+    result = enhancer.apply(image, 45.0, -93.0, 1767225600.0, binning=2)
+    assert numpy.any(result != image)
+
+
+def test_milkyway_stretch_stays_within_performance_budget():
+    # explicit product requirement: no more than ~100ms per image, even at
+    # high resolution.
+    image = numpy.full((2160, 3840, 3), 40, dtype=numpy.uint8)
+    enhancer = IndiAllskyMilkyWayStretch(_config())
+    enhancer.apply(image, 45.0, -93.0, 1767225600.0)
+    assert enhancer.last_elapsed_ms < 100.0
+
+
+def test_milkyway_stretch_never_raises_on_bad_config():
+    image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
+    config = _config()
+    config['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 'not-a-number'
+    enhancer = IndiAllskyMilkyWayStretch(config)
+    assert enhancer.apply(image, 45.0, -93.0, 1767225600.0) is image

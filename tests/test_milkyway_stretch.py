@@ -240,10 +240,10 @@ def test_milkyway_sharpen_increases_local_contrast_around_a_star():
 
 
 def test_milkyway_dark_structure_enhance_affects_dust_lane_gradient():
-    # CLAHE (and this invert-CLAHE-invert dark structure pass) is a no-op
-    # on a perfectly flat region, so a synthetic dust-lane gradient is
-    # needed to observe any effect at all; the point isn't a specific
-    # direction, just that the toggle actually changes the shadow region
+    # The dark-only local-detail pass is a no-op on a perfectly flat region,
+    # so a synthetic dust-lane gradient is needed to observe any effect at
+    # all; the point isn't a specific direction, just that the toggle
+    # actually changes the shadow region.
     lat, lon, obstime = -27.0, 153.0, 1767225600.0
     image = numpy.full((1080, 1920, 3), 90, dtype=numpy.uint8)
 

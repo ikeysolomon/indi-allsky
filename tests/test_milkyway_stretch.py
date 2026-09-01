@@ -89,7 +89,6 @@ def _config(enabled=True):
             'MILKYWAY_FEATHER': 60.0,
             'MILKYWAY_SATURATION': 1.4,
             'MILKYWAY_SHARPEN': 0.6,
-            'MILKYWAY_DARK_STRUCTURE': 0.5,
         },
     }
 
@@ -172,7 +171,6 @@ def test_enhancement_never_leaks_past_full_resolution_circle_boundary():
         'MILKYWAY_FEATHER': 500.0,
         'MILKYWAY_SATURATION': 1.0,
         'MILKYWAY_SHARPEN': 0.0,
-        'MILKYWAY_DARK_STRUCTURE': 0.0,
     })
     image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
 
@@ -237,38 +235,6 @@ def test_milkyway_sharpen_increases_local_contrast_around_a_star():
         return peak - neighbor
 
     assert peak_to_neighbor_gap(result_sharpened) > peak_to_neighbor_gap(result_no_sharpen)
-
-
-def test_milkyway_dark_structure_enhance_affects_dust_lane_gradient():
-    # The dark-only local-detail pass is a no-op on a perfectly flat region,
-    # so a synthetic dust-lane gradient is needed to observe any effect at
-    # all; the point isn't a specific direction, just that the toggle
-    # actually changes the shadow region.
-    lat, lon, obstime = -27.0, 153.0, 1767225600.0
-    image = numpy.full((1080, 1920, 3), 90, dtype=numpy.uint8)
-
-    galactic_center = numpy.array([[266.405, -28.936]])
-    alt, az = predictAltAz(galactic_center, lat, lon, obstime)
-    params = (0.0, 0.0, 0.0, 1700, 0, 0)
-    x, y = projectToPixels(alt, az, params, 1920, 1080)
-    ex, ey = int(round(x[0])), int(round(y[0]))
-
-    # a dark dust-lane patch with internal gradient, centered on the
-    # enhanced pixel
-    gradient = numpy.linspace(20, 60, 40, dtype=numpy.uint8)
-    image[ey - 20:ey + 20, ex - 20:ex + 20, :] = gradient[numpy.newaxis, :, numpy.newaxis]
-
-    config_no_ds = _config()
-    config_no_ds['IMAGE_STRETCH']['MILKYWAY_DARK_STRUCTURE'] = 0.0
-    config_ds = _config()
-    config_ds['IMAGE_STRETCH']['MILKYWAY_DARK_STRUCTURE'] = 1.0
-
-    result_no_ds = IndiAllskyMilkyWayStretch(config_no_ds).apply(image, lat, lon, obstime)
-    result_ds = IndiAllskyMilkyWayStretch(config_ds).apply(image, lat, lon, obstime)
-
-    patch_no_ds = result_no_ds[ey - 20:ey + 20, ex - 20:ex + 20]
-    patch_ds = result_ds[ey - 20:ey + 20, ex - 20:ex + 20]
-    assert not numpy.array_equal(patch_no_ds, patch_ds)
 
 
 def test_milkyway_stretch_never_raises_on_mono_image():

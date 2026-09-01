@@ -445,6 +445,11 @@ var fullscreen = false;  //initial state
                                     {{ form_image_processing.IMAGE_STRETCH__MILKYWAY_SHARPEN(class='tw:input tw:input-bordered tw:input-sm tw:h-10 tw:w-full') }}
                                     <div id="IMAGE_STRETCH__MILKYWAY_SHARPEN-error" class="tw:text-error tw:text-xs tw:mt-1" style="display: none;"></div>
                                 </div>
+                                <div class="tw:form-control">
+                                    <label class="tw:label tw:py-1"><span class="tw:label-text tw:text-[0.625rem] tw:font-bold tw:uppercase tw:tracking-wide tw:text-base-content/60">{{ form_image_processing.IMAGE_STRETCH__MILKYWAY_DARK_STRUCTURE.label.text }}</span></label>
+                                    {{ form_image_processing.IMAGE_STRETCH__MILKYWAY_DARK_STRUCTURE(class='tw:input tw:input-bordered tw:input-sm tw:h-10 tw:w-full') }}
+                                    <div id="IMAGE_STRETCH__MILKYWAY_DARK_STRUCTURE-error" class="tw:text-error tw:text-xs tw:mt-1" style="display: none;"></div>
+                                </div>
                             </div>
 
                             <div class="tw:divider tw:my-0"></div>
@@ -1283,6 +1288,7 @@ const field_names = [
     'IMAGE_STRETCH__MODE3_MIDTONES', 'IMAGE_STRETCH__MODE3_HIGHLIGHTS',
     'IMAGE_STRETCH__MILKYWAY_GAMMA', 'IMAGE_STRETCH__MILKYWAY_BAND_WIDTH', 'IMAGE_STRETCH__MILKYWAY_FEATHER',
     'IMAGE_STRETCH__MILKYWAY_SATURATION', 'IMAGE_STRETCH__MILKYWAY_SHARPEN',
+    'IMAGE_STRETCH__MILKYWAY_DARK_STRUCTURE',
     'CFA_PATTERN', 'SCNR_ALGORITHM', 'SCNR_MTF_MIDTONES',
     'IMAGE_DENOISE', 'IMAGE_DENOISE_STRENGTH', 'BILATERAL_SIGMA_COLOR', 'BILATERAL_SIGMA_SPACE',
     'WBR_FACTOR', 'WBG_FACTOR', 'WBB_FACTOR', 'WBR_MTF_MIDTONES', 'WBG_MTF_MIDTONES', 'WBB_MTF_MIDTONES',

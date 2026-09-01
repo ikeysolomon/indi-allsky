@@ -3973,14 +3973,13 @@ class ImageProcessor(object):
             i_ref.exp_date_utc.timestamp(),
             i_ref.binning,
             moonmode=is_moonmode,
+            is_night=is_night,
         )
 
 
         if stretch_config.get('SPLIT'):
             self.image = self.splitscreen(self.image, stretched_image)
             return
-    is_night=is_night,
-        
 
         self.image = stretched_image
 

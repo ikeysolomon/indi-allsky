@@ -407,9 +407,12 @@ var fullscreen = false;  //initial state
                             </div>
 
                             <div class="tw:grid tw:grid-cols-1 sm:tw:grid-cols-2 tw:gap-4 tw:bg-base-300/30 tw:p-3 tw:rounded-[var(--radius-box)]">
-                                <div class="tw:flex tw:items-center tw:justify-between">
-                                    <span class="tw:label-text tw:text-[0.625rem] tw:font-bold tw:uppercase tw:tracking-wide tw:text-base-content/60">{{ form_image_processing.IMAGE_STRETCH__MILKYWAY_ENABLE.label.text }}</span>
-                                    {{ form_image_processing.IMAGE_STRETCH__MILKYWAY_ENABLE(class='tw:toggle tw:toggle-primary tw:toggle-sm') }}
+                                <div class="tw:flex tw:flex-col tw:gap-1">
+                                    <div class="tw:flex tw:items-center tw:justify-between">
+                                        <span class="tw:label-text tw:text-[0.625rem] tw:font-bold tw:uppercase tw:tracking-wide tw:text-base-content/60">{{ form_image_processing.IMAGE_STRETCH__MILKYWAY_ENABLE.label.text }}</span>
+                                        {{ form_image_processing.IMAGE_STRETCH__MILKYWAY_ENABLE(class='tw:toggle tw:toggle-primary tw:toggle-sm') }}
+                                    </div>
+                                    <span class="tw:text-[0.625rem] tw:text-warning">Accuracy depends on a completed VirtualSky lens solve (Azimuth/Offsets/Image Circle); an uncalibrated lens will enhance the wrong region of the sky.</span>
                                     <div id="IMAGE_STRETCH__MILKYWAY_ENABLE-error" class="tw:text-error tw:text-xs tw:mt-1" style="display: none;"></div>
                                 </div>
                                 <div class="tw:flex tw:items-center tw:justify-between">

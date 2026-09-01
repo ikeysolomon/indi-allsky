@@ -55,6 +55,8 @@ class IndiAllSkyConfigBase(object):
         "LENS_OFFSET_Y"     : 0,
         "LENS_ALTITUDE"     : 90.0,
         "LENS_AZIMUTH"      : 0.0,
+        # only ever flipped True by applySolvedValuesToConfig(), never by hand
+        "LENS_SOLVED"       : False,
         "CCD_CONFIG" : {
             "NIGHT" : {
                 "GAIN"    : 100.0,

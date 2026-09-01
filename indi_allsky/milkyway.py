@@ -12,13 +12,15 @@ from .lens_solver.projection import projectToPixels
 logger = logging.getLogger('indi_allsky')
 
 
-def stretch_eligibility(stretch_config, is_night, is_moonmode, has_base_stretch=True):
+def stretch_eligibility(stretch_config, is_night, is_moonmode, has_base_stretch=True, lens_solved=True):
     """Decide, independently, whether the base histogram stretch and the
     Milky Way enhancement should run for the current frame. Enabling the
     Milky Way Moon Mode toggle must never force the (unrelated) base
     stretch to run during Moon Mode, and vice versa; a base stretch that
     isn't even configured (``has_base_stretch=False``) must not block the
-    Milky Way enhancement either.
+    Milky Way enhancement either. Without a solved lens (``lens_solved=False``)
+    the projection geometry is untrustworthy, so the band would land in the
+    wrong place -- it must never run in that case.
     """
     if is_night:
         base_allowed = has_base_stretch and (not is_moonmode or bool(stretch_config.get('MOONMODE')))
@@ -29,6 +31,7 @@ def stretch_eligibility(stretch_config, is_night, is_moonmode, has_base_stretch=
     milkyway_allowed = (
         is_night
         and milkyway_enabled
+        and lens_solved
         and (not is_moonmode or bool(stretch_config.get('MILKYWAY_MOONMODE', False)))
     )
 
@@ -90,12 +93,24 @@ class IndiAllskyMilkyWayStretch(object):
         self.config = config
         self.last_elapsed_ms = 0.0
 
-    def apply(self, image, latitude, longitude, obstime_unix, binning=1, moonmode=False):
+    def apply(self, image, latitude, longitude, obstime_unix, binning=1, moonmode=False, is_night=True):
         """Apply the enhancement, never raising -- any failure returns
         ``image`` unchanged so a bad frame/config cannot break capture.
         """
         settings = self.config.get('IMAGE_STRETCH', {})
         if not settings.get('MILKYWAY_ENABLE', False):
+            return image
+
+        # an unsolved lens has no trustworthy azimuth/offset geometry -- the
+        # band would render, just in the wrong place -- so this is the one
+        # guard that may never be bypassed or defaulted True
+        if not self.config.get('LENS_SOLVED', False):
+            logger.debug('Milky Way enhancement skipped: lens has not been plate solved')
+            return image
+
+        # the Milky Way is never visible in daylight; this must be checked
+        # independently of the base stretch's own daytime toggle
+        if not is_night:
             return image
 
         # moonlight washes out the Milky Way; skip unless the user opted
@@ -142,8 +157,15 @@ class IndiAllskyMilkyWayStretch(object):
         mask_height = max(1, int(round(image_height * scale)))
         mask = numpy.zeros((mask_height, mask_width), dtype=numpy.uint8)
 
+        # Only a thin centerline is rasterized -- a filled band would leave
+        # every interior pixel at distance 0 from the (bitwise-inverted)
+        # mask, producing a hard, flat-alpha plateau across its full width
+        # no matter how much feather is applied. Measuring distance from
+        # the centerline instead lets alpha taper continuously across the
+        # entire band, so there is no hard edge anywhere.
         band_width_deg = float(settings.get('MILKYWAY_BAND_WIDTH', 14.0))
-        band_width_px = max(1, int(round(diameter * band_width_deg * numpy.pi / 360.0 * scale)))
+        half_width_px = max(1.0, diameter * band_width_deg * numpy.pi / 360.0 * scale / 2.0)
+        centerline_px = max(1, int(round(scale)))
         points = numpy.rint(numpy.column_stack((x * scale, y * scale))).astype(numpy.int32)
         visible = alt >= numpy.radians(-2.0)
         max_segment_length = diameter * scale * 0.12
@@ -152,21 +174,23 @@ class IndiAllskyMilkyWayStretch(object):
             if (not visible[index] or
                     (segment and numpy.hypot(*(point - segment[-1])) > max_segment_length)):
                 if len(segment) > 1:
-                    cv2.polylines(mask, [numpy.asarray(segment)], False, 255, band_width_px, cv2.LINE_AA)
+                    # LINE_8, not LINE_AA: distanceTransform needs an exact
+                    # 255/0 mask to find its zero reference points; the
+                    # smoothstep falloff below is what actually smooths it.
+                    cv2.polylines(mask, [numpy.asarray(segment)], False, 255, centerline_px, cv2.LINE_8)
                 segment = []
             if visible[index]:
                 segment.append(point)
         if len(segment) > 1:
-            cv2.polylines(mask, [numpy.asarray(segment)], False, 255, band_width_px, cv2.LINE_AA)
+            cv2.polylines(mask, [numpy.asarray(segment)], False, 255, centerline_px, cv2.LINE_8)
 
         feather_px = float(settings.get('MILKYWAY_FEATHER', 80.0)) * scale
-        if feather_px > 0.0:
-            # A distance-based smoothstep ramp keeps the band opaque while
-            # gently, smoothly fading its edge (no visible seam where the
-            # solid band meets the fade, unlike a plain linear ramp), and is
-            # substantially cheaper than a large Gaussian blur.
+        falloff_px = half_width_px + feather_px
+        if falloff_px > 0.0:
+            # Smoothstep of distance-from-centerline is a cheap, seamless
+            # stand-in for a large Gaussian blur.
             distance = cv2.distanceTransform(cv2.bitwise_not(mask), cv2.DIST_L2, 3)
-            t = numpy.clip(1.0 - distance / feather_px, 0.0, 1.0)
+            t = numpy.clip(1.0 - distance / falloff_px, 0.0, 1.0)
             mask = (t * t * (3.0 - 2.0 * t) * 255.0).astype(numpy.uint8)
         if scale < 1.0:
             mask = cv2.resize(mask, (image_width, image_height), interpolation=cv2.INTER_LINEAR)

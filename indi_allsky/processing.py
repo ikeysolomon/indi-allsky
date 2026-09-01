@@ -3947,9 +3947,10 @@ class ImageProcessor(object):
         is_night = bool(self.night_av[constants.NIGHT_NIGHT])
         is_moonmode = bool(self.night_av[constants.NIGHT_MOONMODE])
         has_base_stretch = not isinstance(self._stretch_o, type(None))
+        lens_solved = bool(self.config.get('LENS_SOLVED', False))
 
         run_base_stretch, run_milkyway = milkyway.stretch_eligibility(
-            stretch_config, is_night, is_moonmode, has_base_stretch)
+            stretch_config, is_night, is_moonmode, has_base_stretch, lens_solved)
 
         if not run_base_stretch and not run_milkyway:
             return
@@ -3978,7 +3979,8 @@ class ImageProcessor(object):
         if stretch_config.get('SPLIT'):
             self.image = self.splitscreen(self.image, stretched_image)
             return
-
+    is_night=is_night,
+        
 
         self.image = stretched_image
 

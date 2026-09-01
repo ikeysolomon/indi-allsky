@@ -2665,6 +2665,7 @@ class ConfigView(FormView):
             'IMAGE_STRETCH__MILKYWAY_FEATHER': self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_FEATHER', 60.0),
             'IMAGE_STRETCH__MILKYWAY_SATURATION': self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_SATURATION', 1.4),
             'IMAGE_STRETCH__MILKYWAY_SHARPEN': self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_SHARPEN', 0.6),
+            'IMAGE_STRETCH__MILKYWAY_DARK_STRUCTURE': self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_DARK_STRUCTURE', 0.5),
             'KEOGRAM_ANGLE'                  : self.indi_allsky_config.get('KEOGRAM_ANGLE', 0.0),
             'KEOGRAM_H_SCALE'                : self.indi_allsky_config.get('KEOGRAM_H_SCALE', 100),
             'KEOGRAM_V_SCALE'                : self.indi_allsky_config.get('KEOGRAM_V_SCALE', 33),
@@ -3752,6 +3753,7 @@ class AjaxConfigView(BaseView):
         self.indi_allsky_config['IMAGE_STRETCH']['MILKYWAY_FEATHER']    = float(request.json['IMAGE_STRETCH__MILKYWAY_FEATHER'])
         self.indi_allsky_config['IMAGE_STRETCH']['MILKYWAY_SATURATION'] = float(request.json['IMAGE_STRETCH__MILKYWAY_SATURATION'])
         self.indi_allsky_config['IMAGE_STRETCH']['MILKYWAY_SHARPEN']    = float(request.json['IMAGE_STRETCH__MILKYWAY_SHARPEN'])
+        self.indi_allsky_config['IMAGE_STRETCH']['MILKYWAY_DARK_STRUCTURE'] = float(request.json['IMAGE_STRETCH__MILKYWAY_DARK_STRUCTURE'])
         self.indi_allsky_config['KEOGRAM_ANGLE']                        = float(request.json['KEOGRAM_ANGLE'])
         self.indi_allsky_config['KEOGRAM_H_SCALE']                      = int(request.json['KEOGRAM_H_SCALE'])
         self.indi_allsky_config['KEOGRAM_V_SCALE']                      = int(request.json['KEOGRAM_V_SCALE'])
@@ -9201,6 +9203,7 @@ class ImageProcessingView(TemplateView):
             'IMAGE_STRETCH__MILKYWAY_FEATHER': self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_FEATHER', 60.0),
             'IMAGE_STRETCH__MILKYWAY_SATURATION': self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_SATURATION', 1.4),
             'IMAGE_STRETCH__MILKYWAY_SHARPEN': self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_SHARPEN', 0.6),
+            'IMAGE_STRETCH__MILKYWAY_DARK_STRUCTURE': self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_DARK_STRUCTURE', 0.5),
             'CFA_PATTERN'                    : self.indi_allsky_config.get('CFA_PATTERN', ''),
             'SCNR_ALGORITHM'                 : self.indi_allsky_config.get('SCNR_ALGORITHM', ''),
             'SCNR_MTF_MIDTONES'              : self.indi_allsky_config.get('SCNR_MTF_MIDTONES', 0.65),
@@ -9485,6 +9488,7 @@ class JsonImageProcessingView(JsonView):
         p_config['IMAGE_STRETCH']['MILKYWAY_FEATHER']    = float(request.json['IMAGE_STRETCH__MILKYWAY_FEATHER'])
         p_config['IMAGE_STRETCH']['MILKYWAY_SATURATION'] = float(request.json['IMAGE_STRETCH__MILKYWAY_SATURATION'])
         p_config['IMAGE_STRETCH']['MILKYWAY_SHARPEN']    = float(request.json['IMAGE_STRETCH__MILKYWAY_SHARPEN'])
+        p_config['IMAGE_STRETCH']['MILKYWAY_DARK_STRUCTURE'] = float(request.json['IMAGE_STRETCH__MILKYWAY_DARK_STRUCTURE'])
         p_config['IMAGE_STRETCH']['SPLIT']               = False
         p_config['CFA_PATTERN']                          = str(request.json['CFA_PATTERN'])
         p_config['SCNR_ALGORITHM']                       = str(request.json['SCNR_ALGORITHM'])

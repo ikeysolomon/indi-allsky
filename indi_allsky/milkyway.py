@@ -225,33 +225,23 @@ class IndiAllskyMilkyWayStretch(object):
             enhanced = cv2.LUT(image, lut)
 
             if image.ndim == 3:
-                # local contrast + sharpening both operate on luminance only
-                # (L channel), never on the raw BGR/chroma -- sharpening all
-                # three color channels independently amplifies per-pixel
-                # noise as false color speckle, and doing it after the
-                # saturation boost re-amplifies already-boosted chroma
-                # noise on top of that. Saturation must be the last step,
-                # applied once to already-clean luminance.
-                clip_limit = float(self.config.get('CLAHE_CLIPLIMIT', 3.0))
-                grid_size = int(self.config.get('CLAHE_GRIDSIZE', 8))
-                clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(grid_size, grid_size))
+                # All detail work operates on luminance only (L channel),
+                # never on raw BGR/chroma. CLAHE is deliberately not used:
+                # its tiled local histograms create visible blotches in the
+                # smooth, low-SNR sky background this effect targets.
                 lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB)
-                lab[:, :, 0] = clahe.apply(lab[:, :, 0])
 
-                # PixInsight-style dark structure enhancement: invert
-                # luminance so dust lanes become the "bright" signal CLAHE
-                # naturally favors, enhance local contrast there, then
-                # invert back. This pulls out dust-lane definition in the
-                # shadows without blowing out already-bright stars, which
-                # a single CLAHE pass on non-inverted luminance does not
-                # target specifically.
+                # Dark structure enhancement compares each pixel to a broad
+                # local background. Only luminance below that background is
+                # deepened, preserving bright stars and avoiding the tiled
+                # sky patches produced by local histogram equalization.
                 dark_structure = float(settings.get('MILKYWAY_DARK_STRUCTURE', 0.5))
                 if dark_structure != 0.0:
-                    inverted = 255 - lab[:, :, 0]
-                    inverted = clahe.apply(inverted)
-                    dark_enhanced = 255 - inverted
+                    luminance = lab[:, :, 0]
+                    background = cv2.GaussianBlur(luminance, (0, 0), sigmaX=12)
+                    dark_detail = cv2.subtract(background, luminance)
                     lab[:, :, 0] = cv2.addWeighted(
-                        lab[:, :, 0], 1.0 - dark_structure, dark_enhanced, dark_structure, 0)
+                        luminance, 1.0, dark_detail, -dark_structure, 0)
 
                 sharpen_amount = float(settings.get('MILKYWAY_SHARPEN', 0.6))
                 if sharpen_amount != 0.0:

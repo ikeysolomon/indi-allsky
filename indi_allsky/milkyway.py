@@ -90,12 +90,17 @@ class IndiAllskyMilkyWayStretch(object):
         self.config = config
         self.last_elapsed_ms = 0.0
 
-    def apply(self, image, latitude, longitude, obstime_unix, binning=1, moonmode=False):
+    def apply(self, image, latitude, longitude, obstime_unix, binning=1, moonmode=False, is_night=True):
         """Apply the enhancement, never raising -- any failure returns
         ``image`` unchanged so a bad frame/config cannot break capture.
         """
         settings = self.config.get('IMAGE_STRETCH', {})
         if not settings.get('MILKYWAY_ENABLE', False):
+            return image
+
+        # the Milky Way is never visible in daylight; this must be checked
+        # independently of the base stretch's own daytime toggle
+        if not is_night:
             return image
 
         # moonlight washes out the Milky Way; skip unless the user opted

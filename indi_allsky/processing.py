@@ -3972,7 +3972,8 @@ class ImageProcessor(object):
         if stretch_config.get('SPLIT'):
             self.image = self.splitscreen(self.image, stretched_image)
             return
-
+    is_night=is_night,
+        
 
         self.image = stretched_image
 

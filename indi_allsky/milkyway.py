@@ -231,12 +231,6 @@ class IndiAllskyMilkyWayStretch(object):
                 # smooth, low-SNR sky background this effect targets.
                 lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB)
 
-                sharpen_amount = float(settings.get('MILKYWAY_SHARPEN', 0.6))
-                if sharpen_amount != 0.0:
-                    luminance = lab[:, :, 0]
-                    blurred = cv2.GaussianBlur(luminance, (0, 0), sigmaX=2)
-                    lab[:, :, 0] = cv2.addWeighted(luminance, 1.0 + sharpen_amount, blurred, -sharpen_amount, 0)
-
                 enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
                 # saturation boost brings out the reds/pinks of emission

@@ -88,7 +88,6 @@ def _config(enabled=True):
             'MILKYWAY_BAND_WIDTH': 10.0,
             'MILKYWAY_FEATHER': 60.0,
             'MILKYWAY_SATURATION': 1.4,
-            'MILKYWAY_SHARPEN': 0.6,
         },
     }
 
@@ -170,7 +169,6 @@ def test_enhancement_never_leaks_past_full_resolution_circle_boundary():
         'MILKYWAY_BAND_WIDTH': 45.0,
         'MILKYWAY_FEATHER': 500.0,
         'MILKYWAY_SATURATION': 1.0,
-        'MILKYWAY_SHARPEN': 0.0,
     })
     image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
 
@@ -205,36 +203,6 @@ def test_milkyway_saturation_boost_increases_color_saturation_in_band():
     sat_no_boost = cv2.cvtColor(result_no_boost, cv2.COLOR_BGR2HSV)[ey, ex, 1]
     sat_boosted = cv2.cvtColor(result_boosted, cv2.COLOR_BGR2HSV)[ey, ex, 1]
     assert int(sat_boosted) > int(sat_no_boost)
-
-
-def test_milkyway_sharpen_increases_local_contrast_around_a_star():
-    # a flat image is unaffected by unsharp masking (blurred == original
-    # everywhere), so a synthetic "star" is needed to observe any effect;
-    # sharpening must widen the peak-to-neighbor gap around it
-    lat, lon, obstime = -27.0, 153.0, 1767225600.0
-    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
-
-    galactic_center = numpy.array([[266.405, -28.936]])
-    alt, az = predictAltAz(galactic_center, lat, lon, obstime)
-    params = (0.0, 0.0, 0.0, 1700, 0, 0)
-    x, y = projectToPixels(alt, az, params, 1920, 1080)
-    ex, ey = int(round(x[0])), int(round(y[0]))
-    image[ey, ex] = 220  # synthetic star at the enhanced pixel
-
-    config_no_sharpen = _config()
-    config_no_sharpen['IMAGE_STRETCH']['MILKYWAY_SHARPEN'] = 0.0
-    config_sharpened = _config()
-    config_sharpened['IMAGE_STRETCH']['MILKYWAY_SHARPEN'] = 1.5
-
-    result_no_sharpen = IndiAllskyMilkyWayStretch(config_no_sharpen).apply(image, lat, lon, obstime)
-    result_sharpened = IndiAllskyMilkyWayStretch(config_sharpened).apply(image, lat, lon, obstime)
-
-    def peak_to_neighbor_gap(result):
-        peak = int(result[ey, ex, 0])
-        neighbor = int(result[ey, ex + 3, 0])
-        return peak - neighbor
-
-    assert peak_to_neighbor_gap(result_sharpened) > peak_to_neighbor_gap(result_no_sharpen)
 
 
 def test_milkyway_stretch_never_raises_on_mono_image():

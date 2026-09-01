@@ -682,6 +682,11 @@ class ImageWorker(Process):
         self.image_processor.crop_image()
 
 
+        # Milky Way enhancement -- must run after rotate/flip/crop, in the
+        # same final pixel space the lens solve geometry was fit against
+        self.image_processor.milkyway_stretch()
+
+
         # green removal
         self.image_processor.scnr()
 

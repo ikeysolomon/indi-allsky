@@ -3949,25 +3949,44 @@ class ImageProcessor(object):
         has_base_stretch = not isinstance(self._stretch_o, type(None))
         lens_solved = bool(self.config.get('LENS_SOLVED', False))
 
-        run_base_stretch, run_milkyway = milkyway.stretch_eligibility(
+        # milkyway_allowed is intentionally ignored here -- the Milky Way
+        # enhancement runs later, in milkyway_stretch(), after rotate/flip/
+        # crop have put the image into the same pixel space the lens was
+        # solved against; applying it here would blend it pre-transform and
+        # the enhancement would land in the wrong place once transformed.
+        run_base_stretch, _ = milkyway.stretch_eligibility(
             stretch_config, is_night, is_moonmode, has_base_stretch, lens_solved)
 
-        if not run_base_stretch and not run_milkyway:
+        if not run_base_stretch:
             return
 
 
         i_ref = self.getLatestImage()
+        stretched_image = self._stretch(i_ref)
+
+        if stretch_config.get('SPLIT'):
+            self.image = self.splitscreen(self.image, stretched_image)
+            return
 
 
-        if run_base_stretch:
-            stretched_image = self._stretch(i_ref)
-        else:
-            # Milky Way enhancement was independently allowed through (its
-            # own Moon Mode toggle) while the base stretch was not.
-            stretched_image = self.image
+        self.image = stretched_image
 
-        stretched_image = self._milkyway_stretch.apply(
-            stretched_image,
+
+    def milkyway_stretch(self):
+        """Blend the Milky Way enhancement onto the final image. Must run
+        after rotate_90/rotate_angle/flip_v/flip_h/crop_image -- the lens
+        solve was fit against that final, post-transform pixel space, not
+        the raw sensor orientation stretch() operates in.
+        """
+        if self.focus_mode:
+            return
+
+        i_ref = self.getLatestImage()
+        is_night = bool(self.night_av[constants.NIGHT_NIGHT])
+        is_moonmode = bool(self.night_av[constants.NIGHT_MOONMODE])
+
+        self.image = self._milkyway_stretch.apply(
+            self.image,
             float(self.position_av[constants.POSITION_LATITUDE]),
             float(self.position_av[constants.POSITION_LONGITUDE]),
             i_ref.exp_date_utc.timestamp(),
@@ -3975,13 +3994,6 @@ class ImageProcessor(object):
             moonmode=is_moonmode,
             is_night=is_night,
         )
-
-
-        if stretch_config.get('SPLIT'):
-            self.image = self.splitscreen(self.image, stretched_image)
-            return
-
-        self.image = stretched_image
 
 
     def _stretch(self, i_ref):

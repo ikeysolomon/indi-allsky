@@ -3941,15 +3941,12 @@ class ImageProcessor(object):
         is_night = bool(self.night_av[constants.NIGHT_NIGHT])
         is_moonmode = bool(self.night_av[constants.NIGHT_MOONMODE])
         has_base_stretch = not isinstance(self._stretch_o, type(None))
-        lens_solved = bool(self.config.get('LENS_SOLVED', False))
-
-        # milkyway_allowed is intentionally ignored here -- the Milky Way
-        # enhancement runs later, in milkyway_stretch(), after rotate/flip/
+        # The Milky Way enhancement runs later, in milkyway_stretch(), after rotate/flip/
         # crop have put the image into the same pixel space the lens was
         # solved against; applying it here would blend it pre-transform and
         # the enhancement would land in the wrong place once transformed.
-        run_base_stretch, _ = milkyway.stretch_eligibility(
-            stretch_config, is_night, is_moonmode, has_base_stretch, lens_solved)
+        run_base_stretch = milkyway.base_stretch_allowed(
+            stretch_config, is_night, is_moonmode, has_base_stretch)
 
         if not run_base_stretch:
             return

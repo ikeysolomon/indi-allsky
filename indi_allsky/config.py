@@ -231,7 +231,6 @@ class IndiAllSkyConfigBase(object):
             "MILKYWAY_BAND_WIDTH": 10.0,
             "MILKYWAY_FEATHER"  : 60.0,
             "MILKYWAY_SATURATION": 1.4,
-            "MILKYWAY_SHARPEN"  : 0.6,
         },
         "KEOGRAM_ANGLE"         : 0.0,
         "KEOGRAM_H_SCALE"       : 100,

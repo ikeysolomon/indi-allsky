@@ -12,6 +12,27 @@ from .lens_solver.projection import projectToPixels
 logger = logging.getLogger('indi_allsky')
 
 
+def stretch_eligibility(stretch_config, is_night, is_moonmode):
+    """Decide, independently, whether the base histogram stretch and the
+    Milky Way enhancement should run for the current frame. Enabling the
+    Milky Way Moon Mode toggle must never force the (unrelated) base
+    stretch to run during Moon Mode, and vice versa.
+    """
+    if is_night:
+        base_allowed = not is_moonmode or bool(stretch_config.get('MOONMODE'))
+    else:
+        base_allowed = bool(stretch_config.get('DAYTIME'))
+
+    milkyway_enabled = bool(stretch_config.get('MILKYWAY_ENABLE', False))
+    milkyway_allowed = milkyway_enabled and (
+        not is_night
+        or not is_moonmode
+        or bool(stretch_config.get('MILKYWAY_MOONMODE', False))
+    )
+
+    return base_allowed, milkyway_allowed
+
+
 # IAU 1958 equatorial(J2000)-to-galactic rotation matrix (standard "A_G").
 # The Galactic plane is sampled once per degree; that is dense enough for a
 # smooth rasterized band. Since A_G is orthogonal, applying it (without

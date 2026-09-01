@@ -368,6 +368,7 @@ def test_apply_solved_values_to_config():
     assert config['VIRTUALSKY'] is virtualsky_ref    # in-place, object identity preserved
 
     assert config['LENS_AZIMUTH'] == 37.5
+    assert config['LENS_SOLVED'] is True
     assert config['VIRTUALSKY']['LATITUDE_OFFSET'] == 2.0
     assert config['VIRTUALSKY']['LONGITUDE_OFFSET'] == -1.5
     assert config['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] == 1700
@@ -384,7 +385,7 @@ def test_apply_solved_values_to_config():
     assert config['VIRTUALSKY']['SOME_OTHER_KEY'] == 'keep-me-too'
 
     # exact changed-key set
-    changed_top = {'LENS_AZIMUTH', 'VIRTUALSKY'}
+    changed_top = {'LENS_AZIMUTH', 'LENS_SOLVED', 'VIRTUALSKY'}
     unchanged_top = set(config.keys()) - changed_top
     assert unchanged_top == {
         'LENS_ALTITUDE', 'LENS_IMAGE_CIRCLE', 'LENS_OFFSET_X', 'LENS_OFFSET_Y', 'UNRELATED_KEY'}

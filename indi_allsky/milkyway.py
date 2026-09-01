@@ -6,6 +6,7 @@ import time
 import cv2
 import numpy
 
+from .lens_solver.projection import predictAltAz
 from .lens_solver.projection import projectToPixels
 
 
@@ -65,25 +66,6 @@ def _galactic_plane_catalog():
 
 
 _GALACTIC_PLANE_CATALOG = _galactic_plane_catalog()
-
-
-def _predict_alt_az(catalog, latitude, longitude, obstime_unix):
-    """Fast equivalent of the VirtualSky alt/az transform for rendering."""
-    days_since_j2000 = (obstime_unix - 946728000.0) / 86400.0
-    gmst = numpy.radians((280.46061837 + 360.98564736629 * days_since_j2000) % 360.0)
-    ra = numpy.radians(catalog[:, 0])
-    dec = numpy.radians(catalog[:, 1])
-    latitude_rad = numpy.radians(latitude)
-    hour_angle = gmst + numpy.radians(longitude) - ra
-    alt = numpy.arcsin(numpy.clip(
-        numpy.sin(dec) * numpy.sin(latitude_rad) +
-        numpy.cos(dec) * numpy.cos(latitude_rad) * numpy.cos(hour_angle),
-        -1.0, 1.0))
-    az = numpy.arctan2(
-        -numpy.cos(dec) * numpy.sin(hour_angle),
-        numpy.sin(dec) * numpy.cos(latitude_rad) -
-        numpy.cos(dec) * numpy.sin(latitude_rad) * numpy.cos(hour_angle))
-    return alt, numpy.mod(az, 2.0 * numpy.pi)
 
 
 class IndiAllskyMilkyWayStretch(object):
@@ -146,7 +128,7 @@ class IndiAllskyMilkyWayStretch(object):
         latitude += params[1]
         longitude += params[2]
 
-        alt, az = _predict_alt_az(
+        alt, az = predictAltAz(
             _GALACTIC_PLANE_CATALOG, latitude, longitude, obstime_unix)
         x, y = projectToPixels(alt, az, params, image_width, image_height)
 

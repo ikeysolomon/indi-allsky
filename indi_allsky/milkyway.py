@@ -174,6 +174,19 @@ class IndiAllskyMilkyWayStretch(object):
             distance = cv2.distanceTransform(cv2.bitwise_not(mask), cv2.DIST_L2, 3)
             t = numpy.clip(1.0 - distance / falloff_px, 0.0, 1.0)
             mask = (t * t * (3.0 - 2.0 * t) * 255.0).astype(numpy.uint8)
+
+        # the enhancement must never touch pixels outside the camera's own
+        # valid sky circle -- the -2deg horizon allowance (and the feather
+        # falloff itself) can otherwise push it past the circle edge, and
+        # this must not depend on some other pipeline stage (e.g. circular
+        # cropping) to clean it up
+        circle_cx = (image_width / 2.0 + params[4]) * scale
+        circle_cy = (image_height / 2.0 - params[5]) * scale
+        circle_radius = (diameter / 2.0) * scale
+        yy, xx = numpy.ogrid[:mask_height, :mask_width]
+        outside_circle = (xx - circle_cx) ** 2 + (yy - circle_cy) ** 2 > circle_radius ** 2
+        mask[outside_circle] = 0
+
         if scale < 1.0:
             mask = cv2.resize(mask, (image_width, image_height), interpolation=cv2.INTER_LINEAR)
 

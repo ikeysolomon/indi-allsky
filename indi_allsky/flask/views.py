@@ -1,3 +1,4 @@
+import copy
 import os
 from datetime import datetime
 from datetime import timedelta
@@ -9166,6 +9167,11 @@ class ImageProcessingView(TemplateView):
             'IMAGE_STRETCH__MODE3_SHADOWS'   : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MODE3_SHADOWS', 0.0),
             'IMAGE_STRETCH__MODE3_MIDTONES'  : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MODE3_MIDTONES', 0.25),
             'IMAGE_STRETCH__MODE3_HIGHLIGHTS': self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MODE3_HIGHLIGHTS', 1.0),
+            'IMAGE_STRETCH__MILKYWAY_ENABLE' : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_ENABLE', False),
+            'IMAGE_STRETCH__MILKYWAY_MOONMODE' : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_MOONMODE', False),
+            'IMAGE_STRETCH__MILKYWAY_GAMMA'  : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_GAMMA', 1.35),
+            'IMAGE_STRETCH__MILKYWAY_BAND_WIDTH' : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_BAND_WIDTH', 14.0),
+            'IMAGE_STRETCH__MILKYWAY_FEATHER': self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_FEATHER', 80.0),
             'CFA_PATTERN'                    : self.indi_allsky_config.get('CFA_PATTERN', ''),
             'SCNR_ALGORITHM'                 : self.indi_allsky_config.get('SCNR_ALGORITHM', ''),
             'SCNR_MTF_MIDTONES'              : self.indi_allsky_config.get('SCNR_MTF_MIDTONES', 0.65),
@@ -9416,7 +9422,7 @@ class JsonImageProcessingView(JsonView):
         filename_p = Path(fits_entry.getFilesystemPath())
 
 
-        p_config = self.indi_allsky_config.copy()
+        p_config = copy.deepcopy(self.indi_allsky_config)
 
         p_config['LENS_IMAGE_CIRCLE']                    = int(request.json['LENS_IMAGE_CIRCLE'])
         p_config['LENS_OFFSET_X']                        = int(request.json['LENS_OFFSET_X'])
@@ -9443,6 +9449,11 @@ class JsonImageProcessingView(JsonView):
         p_config['IMAGE_STRETCH']['MODE3_SHADOWS']       = float(request.json['IMAGE_STRETCH__MODE3_SHADOWS'])
         p_config['IMAGE_STRETCH']['MODE3_MIDTONES']      = float(request.json['IMAGE_STRETCH__MODE3_MIDTONES'])
         p_config['IMAGE_STRETCH']['MODE3_HIGHLIGHTS']    = float(request.json['IMAGE_STRETCH__MODE3_HIGHLIGHTS'])
+        p_config['IMAGE_STRETCH']['MILKYWAY_ENABLE']     = bool(request.json['IMAGE_STRETCH__MILKYWAY_ENABLE'])
+        p_config['IMAGE_STRETCH']['MILKYWAY_MOONMODE']   = bool(request.json['IMAGE_STRETCH__MILKYWAY_MOONMODE'])
+        p_config['IMAGE_STRETCH']['MILKYWAY_GAMMA']      = float(request.json['IMAGE_STRETCH__MILKYWAY_GAMMA'])
+        p_config['IMAGE_STRETCH']['MILKYWAY_BAND_WIDTH'] = float(request.json['IMAGE_STRETCH__MILKYWAY_BAND_WIDTH'])
+        p_config['IMAGE_STRETCH']['MILKYWAY_FEATHER']    = float(request.json['IMAGE_STRETCH__MILKYWAY_FEATHER'])
         p_config['IMAGE_STRETCH']['SPLIT']               = False
         p_config['CFA_PATTERN']                          = str(request.json['CFA_PATTERN'])
         p_config['SCNR_ALGORITHM']                       = str(request.json['SCNR_ALGORITHM'])

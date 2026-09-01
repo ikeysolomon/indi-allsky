@@ -112,13 +112,12 @@ def test_milkyway_stretch_stays_within_performance_budget():
     # high resolution. OpenCV pays a one-time per-process init cost on the
     # first call to distanceTransform/resize/LUT/blendLinear; the real
     # process is a long-lived capture daemon that only ever pays that once,
-    # so warm up before measuring steady-state cost. Best-of-N further
-    # filters out incidental OS scheduler/GC noise.
+    # so warm up before measuring steady-state cost.
     image = numpy.full((2160, 3840, 3), 40, dtype=numpy.uint8)
     enhancer = IndiAllskyMilkyWayStretch(_config())
     _run_and_time(enhancer, image)  # warm-up, discarded
-    best_ms = min(_run_and_time(enhancer, image) for _ in range(5))
-    assert best_ms < 100.0
+    timings_ms = [_run_and_time(enhancer, image) for _ in range(5)]
+    assert max(timings_ms) < 100.0
 
 
 def test_milkyway_stretch_never_raises_on_bad_config():

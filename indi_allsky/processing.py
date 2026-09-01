@@ -3943,7 +3943,14 @@ class ImageProcessor(object):
 
         if self.night_av[constants.NIGHT_NIGHT]:
             # night
-            if self.night_av[constants.NIGHT_MOONMODE] and not self.config.get('IMAGE_STRETCH', {}).get('MOONMODE'):
+            stretch_config = self.config.get('IMAGE_STRETCH', {})
+            milkyway_moonmode = (
+                stretch_config.get('MILKYWAY_ENABLE', False)
+                and stretch_config.get('MILKYWAY_MOONMODE', False)
+            )
+            if (self.night_av[constants.NIGHT_MOONMODE]
+                    and not stretch_config.get('MOONMODE')
+                    and not milkyway_moonmode):
                 return
         else:
             # daytime

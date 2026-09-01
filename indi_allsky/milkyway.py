@@ -12,22 +12,24 @@ from .lens_solver.projection import projectToPixels
 logger = logging.getLogger('indi_allsky')
 
 
-def stretch_eligibility(stretch_config, is_night, is_moonmode):
+def stretch_eligibility(stretch_config, is_night, is_moonmode, has_base_stretch=True):
     """Decide, independently, whether the base histogram stretch and the
     Milky Way enhancement should run for the current frame. Enabling the
     Milky Way Moon Mode toggle must never force the (unrelated) base
-    stretch to run during Moon Mode, and vice versa.
+    stretch to run during Moon Mode, and vice versa; a base stretch that
+    isn't even configured (``has_base_stretch=False``) must not block the
+    Milky Way enhancement either.
     """
     if is_night:
-        base_allowed = not is_moonmode or bool(stretch_config.get('MOONMODE'))
+        base_allowed = has_base_stretch and (not is_moonmode or bool(stretch_config.get('MOONMODE')))
     else:
-        base_allowed = bool(stretch_config.get('DAYTIME'))
+        base_allowed = has_base_stretch and bool(stretch_config.get('DAYTIME'))
 
     milkyway_enabled = bool(stretch_config.get('MILKYWAY_ENABLE', False))
-    milkyway_allowed = milkyway_enabled and (
-        not is_night
-        or not is_moonmode
-        or bool(stretch_config.get('MILKYWAY_MOONMODE', False))
+    milkyway_allowed = (
+        is_night
+        and milkyway_enabled
+        and (not is_moonmode or bool(stretch_config.get('MILKYWAY_MOONMODE', False)))
     )
 
     return base_allowed, milkyway_allowed

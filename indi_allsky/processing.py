@@ -33,7 +33,6 @@ from .draw import IndiAllSkyDraw
 from .scnr import IndiAllskyScnr
 from .denoise import IndiAllskyDenoise
 from . import milkyway
-from .milkyway import IndiAllskyMilkyWayStretch
 from .stack import IndiAllskyStacker
 from .overlay.cardinalDirsLabel import IndiAllskyCardinalDirsLabel
 from .utils import IndiAllSkyDateCalcs
@@ -175,7 +174,7 @@ class ImageProcessor(object):
         self._draw = None
         self._stacker = None
         self._stretch_o = None
-        self._milkyway_stretch = IndiAllskyMilkyWayStretch(self.config)
+        self._milkyway_stretch = milkyway.IndiAllskyMilkyWayStretch(self.config)
         self._image_overlay_o = IndiAllSkyImageOverlay(self.config)
 
 
@@ -3938,16 +3937,13 @@ class ImageProcessor(object):
             return
 
 
-        if isinstance(self._stretch_o, type(None)):
-            return
-
-
         stretch_config = self.config.get('IMAGE_STRETCH', {})
         is_night = bool(self.night_av[constants.NIGHT_NIGHT])
         is_moonmode = bool(self.night_av[constants.NIGHT_MOONMODE])
+        has_base_stretch = not isinstance(self._stretch_o, type(None))
 
         run_base_stretch, run_milkyway = milkyway.stretch_eligibility(
-            stretch_config, is_night, is_moonmode)
+            stretch_config, is_night, is_moonmode, has_base_stretch)
 
         if not run_base_stretch and not run_milkyway:
             return

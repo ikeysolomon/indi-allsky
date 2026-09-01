@@ -113,16 +113,14 @@ def test_milkyway_stretch_stays_within_performance_budget():
     # high resolution. OpenCV pays a one-time per-process init cost on the
     # first call to distanceTransform/resize/LUT/blendLinear; the real
     # process is a long-lived capture daemon that only ever pays that once,
-    # so warm up before measuring steady-state cost. A single isolated OS
-    # scheduler/GC hiccup on a shared machine can spike one sample without
-    # indicating a real regression, so the median of several steady-state
-    # samples is asserted rather than a single run or the raw maximum.
+    # so warm up before measuring steady-state cost. Every measured frame
+    # must satisfy the product's per-image budget.
     image = numpy.full((2160, 3840, 3), 40, dtype=numpy.uint8)
     enhancer = IndiAllskyMilkyWayStretch(_config())
     for _ in range(2):
         _run_and_time(enhancer, image)  # warm-up, discarded
-    timings_ms = sorted(_run_and_time(enhancer, image) for _ in range(7))
-    assert timings_ms[len(timings_ms) // 2] < 100.0
+    timings_ms = [_run_and_time(enhancer, image) for _ in range(7)]
+    assert max(timings_ms) < 100.0
 
 
 def test_milkyway_stretch_never_raises_on_bad_config():
@@ -165,7 +163,7 @@ def test_stretch_eligibility_base_moonmode_is_independent_of_milkyway():
     assert milkyway_allowed is False
 
 
-def test_stretch_eligibility_daytime_ignores_moonmode_toggles():
+def test_stretch_eligibility_milkyway_never_runs_during_daytime():
     stretch_config = {
         'DAYTIME': True,
         'MILKYWAY_ENABLE': True,
@@ -175,10 +173,42 @@ def test_stretch_eligibility_daytime_ignores_moonmode_toggles():
         stretch_config, is_night=False, is_moonmode=False)
 
     assert base_allowed is True
-    assert milkyway_allowed is True
+    assert milkyway_allowed is False
 
 
 def test_stretch_eligibility_milkyway_disabled_never_runs():
     stretch_config = {'MOONMODE': True, 'MILKYWAY_ENABLE': False, 'MILKYWAY_MOONMODE': True}
     _, milkyway_allowed = stretch_eligibility(stretch_config, is_night=True, is_moonmode=True)
+    assert milkyway_allowed is False
+
+
+def test_stretch_eligibility_milkyway_runs_without_a_base_stretch_configured():
+    # regression guard: no IMAGE_STRETCH.CLASSNAME selected (has_base_stretch
+    # False) must not block Milky Way from running -- they are independent
+    # processing stages, not a special case of the base stretch.
+    stretch_config = {'MILKYWAY_ENABLE': True, 'MILKYWAY_MOONMODE': True}
+    base_allowed, milkyway_allowed = stretch_eligibility(
+        stretch_config, is_night=True, is_moonmode=True, has_base_stretch=False)
+
+    assert base_allowed is False
+    assert milkyway_allowed is True
+
+
+def test_stretch_eligibility_both_disabled():
+    stretch_config = {}
+    base_allowed, milkyway_allowed = stretch_eligibility(
+        stretch_config, is_night=True, is_moonmode=False, has_base_stretch=False)
+
+    assert base_allowed is False
+    assert milkyway_allowed is False
+
+
+def test_stretch_eligibility_base_stretch_unaffected_when_milkyway_disabled():
+    # base stretch behavior must be unchanged by the Milky Way feature when
+    # Milky Way itself is disabled.
+    stretch_config = {'MILKYWAY_ENABLE': False}
+    base_allowed, milkyway_allowed = stretch_eligibility(
+        stretch_config, is_night=True, is_moonmode=False, has_base_stretch=True)
+
+    assert base_allowed is True
     assert milkyway_allowed is False

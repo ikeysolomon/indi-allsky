@@ -27,6 +27,8 @@ from .projection import predictAltAz                    # noqa: F401
 from .projection import projectToPixels                 # noqa: F401
 from .request import SOLVER_REQUEST_FIELDS              # noqa: F401
 from .request import applySolvedValuesToConfig          # noqa: F401
+from .request import captureLensGeometrySnapshot        # noqa: F401
+from .request import invalidateLensSolveIfGeometryChanged  # noqa: F401
 from .request import parseSolverRequestValues           # noqa: F401
 from .solver import MAX_SOLVE_PIXELS                    # noqa: F401
 from .solver import MIN_DETECTED_STARS                  # noqa: F401

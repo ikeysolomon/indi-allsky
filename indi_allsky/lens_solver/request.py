@@ -8,6 +8,58 @@ SOLVER_REQUEST_FIELDS = (
     ('OFFSET_Y', int, -10000, 10000),
 )
 
+# every top-level config key that changes the final, post-transform pixel
+# space the solve was fit against; if any of these move after a solve,
+# LENS_SOLVED must be invalidated or the Milky Way band renders confidently
+# in the wrong place
+LENS_GEOMETRY_KEYS = (
+    'LENS_AZIMUTH',
+    'LENS_OFFSET_X',
+    'LENS_OFFSET_Y',
+    'LENS_IMAGE_CIRCLE',
+    'IMAGE_ROTATE',
+    'IMAGE_ROTATE_ANGLE',
+    'IMAGE_ROTATE_KEEP_SIZE',
+    'IMAGE_FLIP_V',
+    'IMAGE_FLIP_H',
+)
+
+# the VIRTUALSKY sub-keys the solver itself writes
+LENS_GEOMETRY_VIRTUALSKY_KEYS = (
+    'IMAGE_CIRCLE_DIAMETER',
+    'LATITUDE_OFFSET',
+    'LONGITUDE_OFFSET',
+    'OFFSET_X',
+    'OFFSET_Y',
+)
+
+
+def captureLensGeometrySnapshot(config):
+    """Snapshot every config value that affects the solved pixel geometry,
+    to be compared later via ``invalidateLensSolveIfGeometryChanged``.
+    """
+    virtualsky = config.get('VIRTUALSKY', {})
+    return (
+        tuple(config.get(key) for key in LENS_GEOMETRY_KEYS)
+        + tuple(virtualsky.get(key) for key in LENS_GEOMETRY_VIRTUALSKY_KEYS)
+    )
+
+
+def invalidateLensSolveIfGeometryChanged(config, snapshot):
+    """Clear LENS_SOLVED if any geometry key has changed since ``snapshot``
+    was captured -- a stale solve is worse than no solve, since the Milky
+    Way band would render confidently in the wrong place. Returns True if
+    invalidated.
+    """
+    if not config.get('LENS_SOLVED', False):
+        return False
+
+    if captureLensGeometrySnapshot(config) == snapshot:
+        return False
+
+    config['LENS_SOLVED'] = False
+    return True
+
 
 def parseSolverRequestValues(data):
     """Validate and coerce the six solver form values from request JSON.

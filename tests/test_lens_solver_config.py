@@ -1,4 +1,6 @@
 from indi_allsky.lens_solver import applySolvedValuesToConfig
+from indi_allsky.lens_solver import captureLensGeometrySnapshot
+from indi_allsky.lens_solver import invalidateLensSolveIfGeometryChanged
 
 
 VALUES = {
@@ -103,3 +105,82 @@ def test_builtin_types_only():
     assert type(config['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER']) is int
     assert type(config['VIRTUALSKY']['OFFSET_X']) is int
     assert type(config['VIRTUALSKY']['OFFSET_Y']) is int
+
+
+def _solved_config():
+    config = _base_config()
+    applySolvedValuesToConfig(config, VALUES)
+    assert config['LENS_SOLVED'] is True
+    return config
+
+
+def test_invalidate_noop_when_geometry_unchanged():
+    config = _solved_config()
+    snapshot = captureLensGeometrySnapshot(config)
+
+    changed = invalidateLensSolveIfGeometryChanged(config, snapshot)
+
+    assert changed is False
+    assert config['LENS_SOLVED'] is True
+
+
+def test_invalidate_noop_when_already_unsolved():
+    config = _base_config()  # LENS_SOLVED never set
+    snapshot = captureLensGeometrySnapshot(config)
+    config['LENS_AZIMUTH'] = 999.0  # geometry did change, but there was no solve to protect
+
+    changed = invalidateLensSolveIfGeometryChanged(config, snapshot)
+
+    assert changed is False
+    assert config.get('LENS_SOLVED', False) is False
+
+
+def test_invalidate_fires_when_lens_azimuth_changes():
+    config = _solved_config()
+    snapshot = captureLensGeometrySnapshot(config)
+    config['LENS_AZIMUTH'] = config['LENS_AZIMUTH'] + 10.0
+
+    changed = invalidateLensSolveIfGeometryChanged(config, snapshot)
+
+    assert changed is True
+    assert config['LENS_SOLVED'] is False
+
+
+def test_invalidate_fires_when_virtualsky_offset_changes():
+    config = _solved_config()
+    snapshot = captureLensGeometrySnapshot(config)
+    config['VIRTUALSKY']['OFFSET_X'] += 5
+
+    changed = invalidateLensSolveIfGeometryChanged(config, snapshot)
+
+    assert changed is True
+    assert config['LENS_SOLVED'] is False
+
+
+def test_invalidate_fires_when_rotation_or_flip_changes():
+    for key, value in (
+        ('IMAGE_ROTATE', 'ROTATE_90_CLOCKWISE'),
+        ('IMAGE_ROTATE_ANGLE', 5),
+        ('IMAGE_FLIP_V', False),
+        ('IMAGE_FLIP_H', False),
+        ('LENS_OFFSET_X', 999),
+        ('LENS_IMAGE_CIRCLE', 1234),
+    ):
+        config = _solved_config()
+        snapshot = captureLensGeometrySnapshot(config)
+        config[key] = value
+
+        assert invalidateLensSolveIfGeometryChanged(config, snapshot) is True, key
+        assert config['LENS_SOLVED'] is False, key
+
+
+def test_invalidate_ignores_unrelated_key_changes():
+    config = _solved_config()
+    snapshot = captureLensGeometrySnapshot(config)
+    config['OWNER'] = 'someone else'
+    config['VIRTUALSKY']['MAGNITUDE'] = 5.0
+
+    changed = invalidateLensSolveIfGeometryChanged(config, snapshot)
+
+    assert changed is False
+    assert config['LENS_SOLVED'] is True

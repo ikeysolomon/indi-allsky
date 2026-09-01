@@ -1,9 +1,10 @@
 import numpy
 import pytest
 
+from indi_allsky.lens_solver.projection import predictAltAz
+from indi_allsky.lens_solver.projection import projectToPixels
 from indi_allsky.milkyway import IndiAllskyMilkyWayStretch
 from indi_allsky.milkyway import _GALACTIC_PLANE_CATALOG
-from indi_allsky.milkyway import _predict_alt_az
 from indi_allsky.milkyway import stretch_eligibility
 
 
@@ -46,7 +47,7 @@ def test_galactic_plane_partially_below_horizon_for_typical_frame():
     # horizon and *some* above it -- if every point were visible (or none
     # were), the alt >= -2deg cutoff used by _apply's visibility mask would
     # not actually be filtering anything, silently.
-    alt, _ = _predict_alt_az(_GALACTIC_PLANE_CATALOG, 45.0, -93.0, 1767225600.0)
+    alt, _ = predictAltAz(_GALACTIC_PLANE_CATALOG, 45.0, -93.0, 1767225600.0)
     visible = alt >= numpy.radians(-2.0)
     assert visible.any()
     assert not visible.all()
@@ -62,8 +63,8 @@ def test_predict_alt_az_hemisphere_sign_convention_is_consistent_across_a_day():
     base_obstime = 1767225600.0
     for hours in range(0, 24, 3):
         obstime = base_obstime + hours * 3600.0
-        alt_north, _ = _predict_alt_az(catalog, 50.0, 0.0, obstime)
-        alt_south, _ = _predict_alt_az(catalog, -50.0, 0.0, obstime)
+        alt_north, _ = predictAltAz(catalog, 50.0, 0.0, obstime)
+        alt_south, _ = predictAltAz(catalog, -50.0, 0.0, obstime)
         assert alt_north[0] > 0.0
         assert alt_south[0] < 0.0
 
@@ -87,6 +88,39 @@ def _config(enabled=True):
             'MILKYWAY_FEATHER': 80.0,
         },
     }
+
+
+def test_rendered_pixel_matches_shared_projection_end_to_end():
+    # end-to-end regression anchor: the earlier tests prove the catalog and
+    # the alt/az math are each internally consistent, but not that the full
+    # chain -- Galactic catalog -> predictAltAz -> projectToPixels -> pixels
+    # actually blended into the frame -- lands where the shared projection
+    # module independently says it should. Galactic Centre is well above
+    # the horizon at this lat/lon/time (unlike -93deg longitude used
+    # elsewhere in this file, where it's below the horizon).
+    lat, lon, obstime = -27.0, 153.0, 1767225600.0
+    config = _config()
+    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+
+    galactic_center = numpy.array([[266.405, -28.936]])
+    alt, az = predictAltAz(galactic_center, lat, lon, obstime)
+    params = (
+        config['LENS_AZIMUTH'],
+        config['VIRTUALSKY']['LATITUDE_OFFSET'],
+        config['VIRTUALSKY']['LONGITUDE_OFFSET'],
+        config['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'],
+        config['VIRTUALSKY']['OFFSET_X'],
+        config['VIRTUALSKY']['OFFSET_Y'],
+    )
+    expected_x, expected_y = projectToPixels(alt, az, params, 1920, 1080)
+    ex, ey = int(round(expected_x[0])), int(round(expected_y[0]))
+    assert 0 <= ex < 1920 and 0 <= ey < 1080  # sanity: must land on-frame
+
+    result = IndiAllskyMilkyWayStretch(config).apply(image, lat, lon, obstime)
+
+    assert result[ey, ex].astype(int).sum() > image[ey, ex].astype(int).sum()
+    # a corner well outside the band's feather radius must be untouched
+    assert numpy.array_equal(result[50, 50], image[50, 50])
 
 
 def test_milkyway_stretch_is_opt_in_and_localized():

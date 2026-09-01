@@ -19,6 +19,7 @@ def test_galactic_plane_catalog_matches_known_galactic_center():
 def _config(enabled=True):
     return {
         'LENS_AZIMUTH': 0.0,
+        'LENS_SOLVED': True,
         'VIRTUALSKY': {
             'IMAGE_CIRCLE_DIAMETER': 1700,
             'LATITUDE_OFFSET': 0.0,

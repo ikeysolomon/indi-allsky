@@ -12,13 +12,15 @@ from .lens_solver.projection import projectToPixels
 logger = logging.getLogger('indi_allsky')
 
 
-def stretch_eligibility(stretch_config, is_night, is_moonmode, has_base_stretch=True):
+def stretch_eligibility(stretch_config, is_night, is_moonmode, has_base_stretch=True, lens_solved=True):
     """Decide, independently, whether the base histogram stretch and the
     Milky Way enhancement should run for the current frame. Enabling the
     Milky Way Moon Mode toggle must never force the (unrelated) base
     stretch to run during Moon Mode, and vice versa; a base stretch that
     isn't even configured (``has_base_stretch=False``) must not block the
-    Milky Way enhancement either.
+    Milky Way enhancement either. Without a solved lens (``lens_solved=False``)
+    the projection geometry is untrustworthy, so the band would land in the
+    wrong place -- it must never run in that case.
     """
     if is_night:
         base_allowed = has_base_stretch and (not is_moonmode or bool(stretch_config.get('MOONMODE')))
@@ -29,6 +31,7 @@ def stretch_eligibility(stretch_config, is_night, is_moonmode, has_base_stretch=
     milkyway_allowed = (
         is_night
         and milkyway_enabled
+        and lens_solved
         and (not is_moonmode or bool(stretch_config.get('MILKYWAY_MOONMODE', False)))
     )
 
@@ -96,6 +99,13 @@ class IndiAllskyMilkyWayStretch(object):
         """
         settings = self.config.get('IMAGE_STRETCH', {})
         if not settings.get('MILKYWAY_ENABLE', False):
+            return image
+
+        # an unsolved lens has no trustworthy azimuth/offset geometry -- the
+        # band would render, just in the wrong place -- so this is the one
+        # guard that may never be bypassed or defaulted True
+        if not self.config.get('LENS_SOLVED', False):
+            logger.debug('Milky Way enhancement skipped: lens has not been plate solved')
             return image
 
         # the Milky Way is never visible in daylight; this must be checked

@@ -32,11 +32,14 @@ def parseSolverRequestValues(data):
 
 
 def applySolvedValuesToConfig(config, values):
-    """Write exactly LENS_AZIMUTH and the five VIRTUALSKY offset/diameter
-    keys, in place -- never LENS_ALTITUDE or the LENS_IMAGE_CIRCLE family,
-    which drive unrelated behavior.
+    """Write exactly LENS_AZIMUTH, the five VIRTUALSKY offset/diameter keys,
+    and LENS_SOLVED, in place -- never LENS_ALTITUDE or the LENS_IMAGE_CIRCLE
+    family, which drive unrelated behavior. LENS_SOLVED is the sole gate the
+    Milky Way enhancement trusts to know the geometry is real, so it must
+    only ever be set here, never defaulted True.
     """
     config['LENS_AZIMUTH'] = values['AZIMUTH_ANGLE']
+    config['LENS_SOLVED'] = True
 
     if 'VIRTUALSKY' not in config:
         config['VIRTUALSKY'] = {}

@@ -67,12 +67,19 @@ class IndiAllskyMilkyWayStretch(object):
         self.config = config
         self.last_elapsed_ms = 0.0
 
-    def apply(self, image, latitude, longitude, obstime_unix, binning=1):
+    def apply(self, image, latitude, longitude, obstime_unix, binning=1, moonmode=False):
         """Apply the enhancement, never raising -- any failure returns
         ``image`` unchanged so a bad frame/config cannot break capture.
         """
         settings = self.config.get('IMAGE_STRETCH', {})
         if not settings.get('MILKYWAY_ENABLE', False):
+            return image
+
+        # moonlight washes out the Milky Way; skip unless the user opted
+        # in via its own toggle, independent of the base stretch's Moon
+        # Mode setting.
+        if moonmode and not settings.get('MILKYWAY_MOONMODE', False):
+            logger.debug('Milky Way enhancement skipped: moon mode active')
             return image
 
         try:
@@ -131,11 +138,13 @@ class IndiAllskyMilkyWayStretch(object):
 
         feather_px = float(settings.get('MILKYWAY_FEATHER', 80.0)) * scale
         if feather_px > 0.0:
-            # A distance ramp keeps the band opaque while gently fading its
-            # edge, and is substantially cheaper than a large Gaussian blur.
+            # A distance-based smoothstep ramp keeps the band opaque while
+            # gently, smoothly fading its edge (no visible seam where the
+            # solid band meets the fade, unlike a plain linear ramp), and is
+            # substantially cheaper than a large Gaussian blur.
             distance = cv2.distanceTransform(cv2.bitwise_not(mask), cv2.DIST_L2, 3)
-            mask = numpy.clip(1.0 - distance / feather_px, 0.0, 1.0)
-            mask = (mask * 255.0).astype(numpy.uint8)
+            t = numpy.clip(1.0 - distance / feather_px, 0.0, 1.0)
+            mask = (t * t * (3.0 - 2.0 * t) * 255.0).astype(numpy.uint8)
         if scale < 1.0:
             mask = cv2.resize(mask, (image_width, image_height), interpolation=cv2.INTER_LINEAR)
 

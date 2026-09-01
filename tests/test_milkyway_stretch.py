@@ -27,6 +27,7 @@ def _config(enabled=True):
         },
         'IMAGE_STRETCH': {
             'MILKYWAY_ENABLE': enabled,
+            'MILKYWAY_MOONMODE': False,
             'MILKYWAY_GAMMA': 1.35,
             'MILKYWAY_BAND_WIDTH': 14.0,
             'MILKYWAY_FEATHER': 80.0,
@@ -45,6 +46,24 @@ def test_milkyway_stretch_is_opt_in_and_localized():
     assert numpy.any(result != image)
     assert numpy.any(result == image)
     assert enabled.last_elapsed_ms > 0.0
+
+
+def test_milkyway_stretch_is_disabled_during_moonmode_by_default():
+    image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
+    enhancer = IndiAllskyMilkyWayStretch(_config())
+
+    assert enhancer.apply(image, 45.0, -93.0, 1767225600.0, moonmode=True) is image
+    assert numpy.any(enhancer.apply(image, 45.0, -93.0, 1767225600.0, moonmode=False) != image)
+
+
+def test_milkyway_stretch_moonmode_toggle_allows_it_through():
+    image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
+    config = _config()
+    config['IMAGE_STRETCH']['MILKYWAY_MOONMODE'] = True
+    enhancer = IndiAllskyMilkyWayStretch(config)
+
+    result = enhancer.apply(image, 45.0, -93.0, 1767225600.0, moonmode=True)
+    assert numpy.any(result != image)
 
 
 def test_milkyway_band_tracks_sidereal_time():

@@ -3961,6 +3961,7 @@ class ImageProcessor(object):
             float(self.position_av[constants.POSITION_LONGITUDE]),
             i_ref.exp_date_utc.timestamp(),
             i_ref.binning,
+            moonmode=bool(self.night_av[constants.NIGHT_MOONMODE]),
         )
 
 

@@ -224,6 +224,7 @@ class IndiAllSkyConfigBase(object):
             "MOONMODE"          : False,
             "DAYTIME"           : False,
             "MILKYWAY_ENABLE"   : False,
+            "MILKYWAY_MOONMODE" : False,
             "MILKYWAY_GAMMA"    : 1.35,
             "MILKYWAY_BAND_WIDTH": 14.0,
             "MILKYWAY_FEATHER"  : 80.0,

@@ -268,10 +268,18 @@
                     <div class="tw:flex tw:items-center tw:justify-between tw:p-3 tw:bg-base-100 tw:rounded-[var(--radius-box)] tw:border tw:border-base-300">
                         <div class="tw:flex tw:flex-col">
                             <span class="tw:text-[0.625rem] tw:font-bold tw:uppercase tw:tracking-wider tw:text-base-content/80">{{ form_config.IMAGE_STRETCH__MILKYWAY_ENABLE.label.text }}</span>
-                            <span class="tw:text-[0.625rem] tw:text-base-content/40">Uses the calibrated VirtualSky lens solution.</span>
+                            <span class="tw:text-[0.625rem] tw:text-warning">Accuracy depends on a completed VirtualSky lens solve (Azimuth/Offsets/Image Circle below); an uncalibrated lens will enhance the wrong region of the sky.</span>
                         </div>
                         {{ form_config.IMAGE_STRETCH__MILKYWAY_ENABLE(class='tw:toggle tw:toggle-primary tw:toggle-sm') }}
                         <div id="IMAGE_STRETCH__MILKYWAY_ENABLE-error" class="tw:text-error tw:text-xs tw:mt-1" style="display: none;"></div>
+                    </div>
+                    <div class="tw:flex tw:items-center tw:justify-between tw:p-3 tw:bg-base-100 tw:rounded-[var(--radius-box)] tw:border tw:border-base-300">
+                        <div class="tw:flex tw:flex-col">
+                            <span class="tw:text-[0.625rem] tw:font-bold tw:uppercase tw:tracking-wider tw:text-base-content/80">{{ form_config.IMAGE_STRETCH__MILKYWAY_MOONMODE.label.text }}</span>
+                            <span class="tw:text-[0.625rem] tw:text-base-content/40">Off by default: moonlight washes out the Milky Way, so the enhancement is skipped during Moon Mode unless enabled here.</span>
+                        </div>
+                        {{ form_config.IMAGE_STRETCH__MILKYWAY_MOONMODE(class='tw:toggle tw:toggle-primary tw:toggle-sm') }}
+                        <div id="IMAGE_STRETCH__MILKYWAY_MOONMODE-error" class="tw:text-error tw:text-xs tw:mt-1" style="display: none;"></div>
                     </div>
                     <div class="tw:flex tw:flex-col tw:gap-1">
                         <span class="tw:text-[0.625rem] tw:font-bold tw:uppercase tw:tracking-wider tw:text-base-content/80">{{ form_config.IMAGE_STRETCH__MILKYWAY_GAMMA.label.text }}</span>

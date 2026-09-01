@@ -4670,6 +4670,7 @@ class IndiAllskyConfigForm(FlaskForm):
     IMAGE_STRETCH__MOONMODE          = BooleanField('Moon Mode Stretching')
     IMAGE_STRETCH__DAYTIME           = BooleanField('Daytime Stretching')
     IMAGE_STRETCH__MILKYWAY_ENABLE   = BooleanField('Milky Way enhancement')
+    IMAGE_STRETCH__MILKYWAY_MOONMODE = BooleanField('Milky Way enhancement during Moon Mode')
     IMAGE_STRETCH__MILKYWAY_GAMMA    = FloatField('Milky Way gamma', validators=[IMAGE_STRETCH__MILKYWAY_GAMMA_validator], widget=NumberInput(step=0.05))
     IMAGE_STRETCH__MILKYWAY_BAND_WIDTH = FloatField('Milky Way band width (degrees)', validators=[IMAGE_STRETCH__MILKYWAY_BAND_WIDTH_validator], widget=NumberInput(step=1))
     IMAGE_STRETCH__MILKYWAY_FEATHER  = FloatField('Milky Way feather (pixels)', validators=[IMAGE_STRETCH__MILKYWAY_FEATHER_validator], widget=NumberInput(step=5))

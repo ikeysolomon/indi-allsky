@@ -2656,6 +2656,7 @@ class ConfigView(FormView):
             'IMAGE_STRETCH__MOONMODE'        : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MOONMODE', False),
             'IMAGE_STRETCH__DAYTIME'         : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('DAYTIME', False),
             'IMAGE_STRETCH__MILKYWAY_ENABLE' : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_ENABLE', False),
+            'IMAGE_STRETCH__MILKYWAY_MOONMODE' : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_MOONMODE', False),
             'IMAGE_STRETCH__MILKYWAY_GAMMA'  : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_GAMMA', 1.35),
             'IMAGE_STRETCH__MILKYWAY_BAND_WIDTH' : self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_BAND_WIDTH', 14.0),
             'IMAGE_STRETCH__MILKYWAY_FEATHER': self.indi_allsky_config.get('IMAGE_STRETCH', {}).get('MILKYWAY_FEATHER', 80.0),
@@ -3729,6 +3730,7 @@ class AjaxConfigView(BaseView):
         self.indi_allsky_config['IMAGE_STRETCH']['MOONMODE']            = bool(request.json['IMAGE_STRETCH__MOONMODE'])
         self.indi_allsky_config['IMAGE_STRETCH']['DAYTIME']             = bool(request.json['IMAGE_STRETCH__DAYTIME'])
         self.indi_allsky_config['IMAGE_STRETCH']['MILKYWAY_ENABLE']     = bool(request.json['IMAGE_STRETCH__MILKYWAY_ENABLE'])
+        self.indi_allsky_config['IMAGE_STRETCH']['MILKYWAY_MOONMODE']   = bool(request.json['IMAGE_STRETCH__MILKYWAY_MOONMODE'])
         self.indi_allsky_config['IMAGE_STRETCH']['MILKYWAY_GAMMA']      = float(request.json['IMAGE_STRETCH__MILKYWAY_GAMMA'])
         self.indi_allsky_config['IMAGE_STRETCH']['MILKYWAY_BAND_WIDTH'] = float(request.json['IMAGE_STRETCH__MILKYWAY_BAND_WIDTH'])
         self.indi_allsky_config['IMAGE_STRETCH']['MILKYWAY_FEATHER']    = float(request.json['IMAGE_STRETCH__MILKYWAY_FEATHER'])

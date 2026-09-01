@@ -163,6 +163,27 @@ def test_enhancement_never_extends_past_the_image_circle():
     assert numpy.array_equal(result[ey, ex], image[ey, ex])
 
 
+def test_enhancement_never_leaks_past_full_resolution_circle_boundary():
+    lat, lon, obstime = -27.0, 153.0, 1767225600.0
+    config = _config()
+    config['IMAGE_STRETCH'].update({
+        'MILKYWAY_GAMMA': 4.0,
+        'MILKYWAY_BAND_WIDTH': 45.0,
+        'MILKYWAY_FEATHER': 500.0,
+        'MILKYWAY_SATURATION': 1.0,
+        'MILKYWAY_SHARPEN': 0.0,
+        'MILKYWAY_DARK_STRUCTURE': 0.0,
+    })
+    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+
+    result = IndiAllskyMilkyWayStretch(config).apply(image, lat, lon, obstime)
+    changed_y, changed_x = numpy.nonzero(numpy.any(result != image, axis=2))
+    radius = numpy.hypot(changed_x - 960.0, changed_y - 540.0)
+
+    assert changed_x.size > 0
+    assert numpy.all(radius <= 850.0)
+
+
 def test_milkyway_saturation_boost_increases_color_saturation_in_band():
     # a slightly reddish background lets us tell the saturation boost apart
     # from the gamma/CLAHE lift, which affect luminance, not chroma

@@ -406,6 +406,34 @@ var fullscreen = false;  //initial state
                                 </div>
                             </div>
 
+                            <div class="tw:grid tw:grid-cols-1 sm:tw:grid-cols-2 tw:gap-4 tw:bg-base-300/30 tw:p-3 tw:rounded-[var(--radius-box)]">
+                                <div class="tw:flex tw:items-center tw:justify-between">
+                                    <span class="tw:label-text tw:text-[0.625rem] tw:font-bold tw:uppercase tw:tracking-wide tw:text-base-content/60">{{ form_image_processing.IMAGE_STRETCH__MILKYWAY_ENABLE.label.text }}</span>
+                                    {{ form_image_processing.IMAGE_STRETCH__MILKYWAY_ENABLE(class='tw:toggle tw:toggle-primary tw:toggle-sm') }}
+                                    <div id="IMAGE_STRETCH__MILKYWAY_ENABLE-error" class="tw:text-error tw:text-xs tw:mt-1" style="display: none;"></div>
+                                </div>
+                                <div class="tw:flex tw:items-center tw:justify-between">
+                                    <span class="tw:label-text tw:text-[0.625rem] tw:font-bold tw:uppercase tw:tracking-wide tw:text-base-content/60">{{ form_image_processing.IMAGE_STRETCH__MILKYWAY_MOONMODE.label.text }}</span>
+                                    {{ form_image_processing.IMAGE_STRETCH__MILKYWAY_MOONMODE(class='tw:toggle tw:toggle-primary tw:toggle-sm') }}
+                                    <div id="IMAGE_STRETCH__MILKYWAY_MOONMODE-error" class="tw:text-error tw:text-xs tw:mt-1" style="display: none;"></div>
+                                </div>
+                                <div class="tw:form-control">
+                                    <label class="tw:label tw:py-1"><span class="tw:label-text tw:text-[0.625rem] tw:font-bold tw:uppercase tw:tracking-wide tw:text-base-content/60">{{ form_image_processing.IMAGE_STRETCH__MILKYWAY_GAMMA.label.text }}</span></label>
+                                    {{ form_image_processing.IMAGE_STRETCH__MILKYWAY_GAMMA(class='tw:input tw:input-bordered tw:input-sm tw:h-10 tw:w-full') }}
+                                    <div id="IMAGE_STRETCH__MILKYWAY_GAMMA-error" class="tw:text-error tw:text-xs tw:mt-1" style="display: none;"></div>
+                                </div>
+                                <div class="tw:form-control">
+                                    <label class="tw:label tw:py-1"><span class="tw:label-text tw:text-[0.625rem] tw:font-bold tw:uppercase tw:tracking-wide tw:text-base-content/60">{{ form_image_processing.IMAGE_STRETCH__MILKYWAY_BAND_WIDTH.label.text }}</span></label>
+                                    {{ form_image_processing.IMAGE_STRETCH__MILKYWAY_BAND_WIDTH(class='tw:input tw:input-bordered tw:input-sm tw:h-10 tw:w-full') }}
+                                    <div id="IMAGE_STRETCH__MILKYWAY_BAND_WIDTH-error" class="tw:text-error tw:text-xs tw:mt-1" style="display: none;"></div>
+                                </div>
+                                <div class="tw:form-control">
+                                    <label class="tw:label tw:py-1"><span class="tw:label-text tw:text-[0.625rem] tw:font-bold tw:uppercase tw:tracking-wide tw:text-base-content/60">{{ form_image_processing.IMAGE_STRETCH__MILKYWAY_FEATHER.label.text }}</span></label>
+                                    {{ form_image_processing.IMAGE_STRETCH__MILKYWAY_FEATHER(class='tw:input tw:input-bordered tw:input-sm tw:h-10 tw:w-full') }}
+                                    <div id="IMAGE_STRETCH__MILKYWAY_FEATHER-error" class="tw:text-error tw:text-xs tw:mt-1" style="display: none;"></div>
+                                </div>
+                            </div>
+
                             <div class="tw:divider tw:my-0"></div>
 
                             <!-- Color/SCNR Section -->
@@ -1240,6 +1268,8 @@ const field_names = [
     'IMAGE_STRETCH__MODE2_SHADOWS', 'IMAGE_STRETCH__MODE2_MIDTONES', 'IMAGE_STRETCH__MODE2_HIGHLIGHTS',
     'IMAGE_STRETCH__MODE3_BLACK_CLIP', 'IMAGE_STRETCH__MODE3_SHADOWS',
     'IMAGE_STRETCH__MODE3_MIDTONES', 'IMAGE_STRETCH__MODE3_HIGHLIGHTS',
+    'IMAGE_STRETCH__MILKYWAY_ENABLE', 'IMAGE_STRETCH__MILKYWAY_MOONMODE',
+    'IMAGE_STRETCH__MILKYWAY_GAMMA', 'IMAGE_STRETCH__MILKYWAY_BAND_WIDTH', 'IMAGE_STRETCH__MILKYWAY_FEATHER',
     'CFA_PATTERN', 'SCNR_ALGORITHM', 'SCNR_MTF_MIDTONES',
     'IMAGE_DENOISE', 'IMAGE_DENOISE_STRENGTH', 'BILATERAL_SIGMA_COLOR', 'BILATERAL_SIGMA_SPACE',
     'WBR_FACTOR', 'WBG_FACTOR', 'WBB_FACTOR', 'WBR_MTF_MIDTONES', 'WBG_MTF_MIDTONES', 'WBB_MTF_MIDTONES',

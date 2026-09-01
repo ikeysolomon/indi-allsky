@@ -32,6 +32,7 @@ from .keogram import KeogramGenerator
 from .draw import IndiAllSkyDraw
 from .scnr import IndiAllskyScnr
 from .denoise import IndiAllskyDenoise
+from . import milkyway
 from .stack import IndiAllskyStacker
 from .overlay.cardinalDirsLabel import IndiAllskyCardinalDirsLabel
 from .utils import IndiAllSkyDateCalcs
@@ -173,6 +174,7 @@ class ImageProcessor(object):
         self._draw = None
         self._stacker = None
         self._stretch_o = None
+        self._milkyway_stretch = milkyway.IndiAllskyMilkyWayStretch(self.config)
         self._image_overlay_o = IndiAllSkyImageOverlay(self.config)
 
 
@@ -3941,27 +3943,39 @@ class ImageProcessor(object):
             return
 
 
-        if isinstance(self._stretch_o, type(None)):
+        stretch_config = self.config.get('IMAGE_STRETCH', {})
+        is_night = bool(self.night_av[constants.NIGHT_NIGHT])
+        is_moonmode = bool(self.night_av[constants.NIGHT_MOONMODE])
+        has_base_stretch = not isinstance(self._stretch_o, type(None))
+
+        run_base_stretch, run_milkyway = milkyway.stretch_eligibility(
+            stretch_config, is_night, is_moonmode, has_base_stretch)
+
+        if not run_base_stretch and not run_milkyway:
             return
-
-
-        if self.night_av[constants.NIGHT_NIGHT]:
-            # night
-            if self.night_av[constants.NIGHT_MOONMODE] and not self.config.get('IMAGE_STRETCH', {}).get('MOONMODE'):
-                return
-        else:
-            # daytime
-            if not self.config.get('IMAGE_STRETCH', {}).get('DAYTIME'):
-                return
 
 
         i_ref = self.getLatestImage()
 
 
-        stretched_image = self._stretch(i_ref)
+        if run_base_stretch:
+            stretched_image = self._stretch(i_ref)
+        else:
+            # Milky Way enhancement was independently allowed through (its
+            # own Moon Mode toggle) while the base stretch was not.
+            stretched_image = self.image
+
+        stretched_image = self._milkyway_stretch.apply(
+            stretched_image,
+            float(self.position_av[constants.POSITION_LATITUDE]),
+            float(self.position_av[constants.POSITION_LONGITUDE]),
+            i_ref.exp_date_utc.timestamp(),
+            i_ref.binning,
+            moonmode=is_moonmode,
+        )
 
 
-        if self.config.get('IMAGE_STRETCH', {}).get('SPLIT'):
+        if stretch_config.get('SPLIT'):
             self.image = self.splitscreen(self.image, stretched_image)
             return
 

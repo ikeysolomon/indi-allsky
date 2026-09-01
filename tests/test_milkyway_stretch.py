@@ -1,0 +1,214 @@
+import numpy
+import pytest
+
+from indi_allsky.milkyway import IndiAllskyMilkyWayStretch
+from indi_allsky.milkyway import _GALACTIC_PLANE_CATALOG
+from indi_allsky.milkyway import stretch_eligibility
+
+
+def test_galactic_plane_catalog_matches_known_galactic_center():
+    # l=0, b=0 (galactic center) is the 181st sampled longitude (-180..180
+    # step 1) and has well known equatorial coordinates; this guards the
+    # equatorial<->galactic rotation matrix/multiplication order against
+    # silent regressions (e.g. wrong transpose or a non-orthogonal matrix).
+    ra, dec = _GALACTIC_PLANE_CATALOG[180]
+    assert ra == pytest.approx(266.405, abs=0.05)
+    assert dec == pytest.approx(-28.936, abs=0.05)
+
+
+def _config(enabled=True):
+    return {
+        'LENS_AZIMUTH': 0.0,
+        'VIRTUALSKY': {
+            'IMAGE_CIRCLE_DIAMETER': 1700,
+            'LATITUDE_OFFSET': 0.0,
+            'LONGITUDE_OFFSET': 0.0,
+            'OFFSET_X': 0,
+            'OFFSET_Y': 0,
+        },
+        'IMAGE_STRETCH': {
+            'MILKYWAY_ENABLE': enabled,
+            'MILKYWAY_MOONMODE': False,
+            'MILKYWAY_GAMMA': 1.35,
+            'MILKYWAY_BAND_WIDTH': 14.0,
+            'MILKYWAY_FEATHER': 80.0,
+        },
+    }
+
+
+def test_milkyway_stretch_is_opt_in_and_localized():
+    image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
+    disabled = IndiAllskyMilkyWayStretch(_config(enabled=False))
+    assert disabled.apply(image, 45.0, -93.0, 1767225600.0) is image
+
+    enabled = IndiAllskyMilkyWayStretch(_config())
+    result = enabled.apply(image, 45.0, -93.0, 1767225600.0)
+
+    assert numpy.any(result != image)
+    assert numpy.any(result == image)
+    assert enabled.last_elapsed_ms > 0.0
+
+
+def test_milkyway_stretch_is_disabled_during_moonmode_by_default():
+    image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
+    enhancer = IndiAllskyMilkyWayStretch(_config())
+
+    assert enhancer.apply(image, 45.0, -93.0, 1767225600.0, moonmode=True) is image
+    assert numpy.any(enhancer.apply(image, 45.0, -93.0, 1767225600.0, moonmode=False) != image)
+
+
+def test_milkyway_stretch_moonmode_toggle_allows_it_through():
+    image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
+    config = _config()
+    config['IMAGE_STRETCH']['MILKYWAY_MOONMODE'] = True
+    enhancer = IndiAllskyMilkyWayStretch(config)
+
+    result = enhancer.apply(image, 45.0, -93.0, 1767225600.0, moonmode=True)
+    assert numpy.any(result != image)
+
+
+def test_milkyway_band_tracks_sidereal_time():
+    # the whole point of piggybacking on the lens solution is that the band
+    # follows the sky; sampling six hours apart must move it, not just
+    # change it by coincidence of noise.
+    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+    enhancer = IndiAllskyMilkyWayStretch(_config())
+
+    result_a = enhancer.apply(image, 45.0, -93.0, 1767225600.0)
+    result_b = enhancer.apply(image, 45.0, -93.0, 1767225600.0 + 6 * 3600)
+
+    assert not numpy.array_equal(result_a, result_b)
+
+
+def test_milkyway_gamma_brightens_the_masked_region_monotonically():
+    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+
+    config_mild = _config()
+    config_mild['IMAGE_STRETCH']['MILKYWAY_GAMMA'] = 1.1
+    config_strong = _config()
+    config_strong['IMAGE_STRETCH']['MILKYWAY_GAMMA'] = 3.0
+
+    mild = IndiAllskyMilkyWayStretch(config_mild).apply(image, 45.0, -93.0, 1767225600.0)
+    strong = IndiAllskyMilkyWayStretch(config_strong).apply(image, 45.0, -93.0, 1767225600.0)
+
+    assert strong.astype(numpy.int32).sum() > mild.astype(numpy.int32).sum() > image.astype(numpy.int32).sum()
+
+
+def test_milkyway_stretch_respects_binning():
+    # binned frames are smaller and use a proportionally smaller image
+    # circle; this must not raise or silently no-op.
+    image = numpy.full((540, 960, 3), 40, dtype=numpy.uint8)
+    enhancer = IndiAllskyMilkyWayStretch(_config())
+    result = enhancer.apply(image, 45.0, -93.0, 1767225600.0, binning=2)
+    assert numpy.any(result != image)
+
+
+def _run_and_time(enhancer, image):
+    enhancer.apply(image, 45.0, -93.0, 1767225600.0)
+    return enhancer.last_elapsed_ms
+
+
+def test_milkyway_stretch_stays_within_performance_budget():
+    # explicit product requirement: no more than ~100ms per image, even at
+    # high resolution. OpenCV pays a one-time per-process init cost on the
+    # first call to distanceTransform/resize/LUT/blendLinear; the real
+    # process is a long-lived capture daemon that only ever pays that once,
+    # so warm up before measuring steady-state cost. Every measured frame
+    # must satisfy the product's per-image budget.
+    image = numpy.full((2160, 3840, 3), 40, dtype=numpy.uint8)
+    enhancer = IndiAllskyMilkyWayStretch(_config())
+    for _ in range(2):
+        _run_and_time(enhancer, image)  # warm-up, discarded
+    timings_ms = [_run_and_time(enhancer, image) for _ in range(7)]
+    assert max(timings_ms) < 100.0
+
+
+def test_milkyway_stretch_never_raises_on_bad_config():
+    image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
+    config = _config()
+    config['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 'not-a-number'
+    enhancer = IndiAllskyMilkyWayStretch(config)
+    assert enhancer.apply(image, 45.0, -93.0, 1767225600.0) is image
+
+
+def test_milkyway_moonmode_toggle_does_not_force_base_stretch_on():
+    # regression guard: enabling the Milky Way's own Moon Mode toggle must
+    # not silently re-enable the (unrelated) base histogram stretch during
+    # Moon Mode when the user has explicitly left the base MOONMODE toggle
+    # off.
+    stretch_config = {
+        'MOONMODE': False,
+        'MILKYWAY_ENABLE': True,
+        'MILKYWAY_MOONMODE': True,
+    }
+    base_allowed, milkyway_allowed = stretch_eligibility(
+        stretch_config, is_night=True, is_moonmode=True)
+
+    assert base_allowed is False
+    assert milkyway_allowed is True
+
+
+def test_stretch_eligibility_base_moonmode_is_independent_of_milkyway():
+    # the reverse must also hold: the base MOONMODE toggle must not gate
+    # the Milky Way enhancement.
+    stretch_config = {
+        'MOONMODE': True,
+        'MILKYWAY_ENABLE': True,
+        'MILKYWAY_MOONMODE': False,
+    }
+    base_allowed, milkyway_allowed = stretch_eligibility(
+        stretch_config, is_night=True, is_moonmode=True)
+
+    assert base_allowed is True
+    assert milkyway_allowed is False
+
+
+def test_stretch_eligibility_milkyway_never_runs_during_daytime():
+    stretch_config = {
+        'DAYTIME': True,
+        'MILKYWAY_ENABLE': True,
+        'MILKYWAY_MOONMODE': False,
+    }
+    base_allowed, milkyway_allowed = stretch_eligibility(
+        stretch_config, is_night=False, is_moonmode=False)
+
+    assert base_allowed is True
+    assert milkyway_allowed is False
+
+
+def test_stretch_eligibility_milkyway_disabled_never_runs():
+    stretch_config = {'MOONMODE': True, 'MILKYWAY_ENABLE': False, 'MILKYWAY_MOONMODE': True}
+    _, milkyway_allowed = stretch_eligibility(stretch_config, is_night=True, is_moonmode=True)
+    assert milkyway_allowed is False
+
+
+def test_stretch_eligibility_milkyway_runs_without_a_base_stretch_configured():
+    # regression guard: no IMAGE_STRETCH.CLASSNAME selected (has_base_stretch
+    # False) must not block Milky Way from running -- they are independent
+    # processing stages, not a special case of the base stretch.
+    stretch_config = {'MILKYWAY_ENABLE': True, 'MILKYWAY_MOONMODE': True}
+    base_allowed, milkyway_allowed = stretch_eligibility(
+        stretch_config, is_night=True, is_moonmode=True, has_base_stretch=False)
+
+    assert base_allowed is False
+    assert milkyway_allowed is True
+
+
+def test_stretch_eligibility_both_disabled():
+    stretch_config = {}
+    base_allowed, milkyway_allowed = stretch_eligibility(
+        stretch_config, is_night=True, is_moonmode=False, has_base_stretch=False)
+
+    assert base_allowed is False
+    assert milkyway_allowed is False
+
+
+def test_stretch_eligibility_base_stretch_unaffected_when_milkyway_disabled():
+    # base stretch behavior must be unchanged by the Milky Way feature when
+    # Milky Way itself is disabled.
+    stretch_config = {'MILKYWAY_ENABLE': False}
+    base_allowed, milkyway_allowed = stretch_eligibility(
+        stretch_config, is_night=True, is_moonmode=False, has_base_stretch=True)
+
+    assert base_allowed is True
+    assert milkyway_allowed is False

@@ -145,7 +145,7 @@ class IndiAllskyMilkyWayStretch(object):
         # no matter how much feather is applied. Measuring distance from
         # the centerline instead lets alpha taper continuously across the
         # entire band, so there is no hard edge anywhere.
-        band_width_deg = float(settings.get('MILKYWAY_BAND_WIDTH', 14.0))
+        band_width_deg = float(settings.get('MILKYWAY_BAND_WIDTH', 10.0))
         half_width_px = max(1.0, diameter * band_width_deg * numpy.pi / 360.0 * scale / 2.0)
         centerline_px = max(1, int(round(scale)))
         points = numpy.rint(numpy.column_stack((x * scale, y * scale))).astype(numpy.int32)
@@ -166,7 +166,7 @@ class IndiAllskyMilkyWayStretch(object):
         if len(segment) > 1:
             cv2.polylines(mask, [numpy.asarray(segment)], False, 255, centerline_px, cv2.LINE_8)
 
-        feather_px = float(settings.get('MILKYWAY_FEATHER', 80.0)) * scale
+        feather_px = float(settings.get('MILKYWAY_FEATHER', 60.0)) * scale
         falloff_px = half_width_px + feather_px
         if falloff_px > 0.0:
             # Smoothstep of distance-from-centerline is a cheap, seamless
@@ -190,7 +190,7 @@ class IndiAllskyMilkyWayStretch(object):
         if scale < 1.0:
             mask = cv2.resize(mask, (image_width, image_height), interpolation=cv2.INTER_LINEAR)
 
-        gamma = float(settings.get('MILKYWAY_GAMMA', 1.485))
+        gamma = float(settings.get('MILKYWAY_GAMMA', 2.2))
         if gamma <= 1.0 or not numpy.any(mask):
             logger.debug('Milky Way enhancement skipped: band not visible or gamma is a no-op')
             return image
@@ -200,7 +200,32 @@ class IndiAllskyMilkyWayStretch(object):
             lut = numpy.clip(
                 numpy.power(numpy.arange(256, dtype=numpy.float32) / 255.0, 1.0 / gamma) * 255.0,
                 0.0, 255.0).astype(numpy.uint8)
+
+            # deliberately full resolution: this is a quality-focused
+            # enhancement (dust-lane/color detail), not the geometry mask,
+            # so it must not be softened by a downscale/upscale round-trip
             enhanced = cv2.LUT(image, lut)
+
+            if image.ndim == 3:
+                # local contrast on luminance brings out dust-lane definition
+                # that a flat gamma lift alone washes out (gamma brightens
+                # the dust lanes almost as much as their surroundings)
+                clip_limit = float(self.config.get('CLAHE_CLIPLIMIT', 3.0))
+                grid_size = int(self.config.get('CLAHE_GRIDSIZE', 8))
+                clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(grid_size, grid_size))
+                lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB)
+                lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+                enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+                # saturation boost brings out the reds/pinks of emission
+                # nebulosity along the plane, which gamma alone (the same
+                # curve applied identically to every channel) does not
+                saturation = float(settings.get('MILKYWAY_SATURATION', 1.4))
+                if saturation != 1.0:
+                    hsv = cv2.cvtColor(enhanced, cv2.COLOR_BGR2HSV)
+                    hsv[:, :, 1] = cv2.multiply(hsv[:, :, 1], saturation)
+                    enhanced = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
             result = cv2.blendLinear(image, enhanced, 1.0 - alpha, alpha)
             self.last_elapsed_ms = (time.monotonic() - t_start) * 1000.0
             return result

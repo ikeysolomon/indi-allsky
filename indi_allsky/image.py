@@ -682,11 +682,6 @@ class ImageWorker(Process):
         self.image_processor.crop_image()
 
 
-        # Milky Way enhancement -- must run after rotate/flip/crop, in the
-        # same final pixel space the lens solve geometry was fit against
-        self.image_processor.milkyway_stretch()
-
-
         # green removal
         self.image_processor.scnr()
 
@@ -723,6 +718,13 @@ class ImageWorker(Process):
         ##################################################
         ### Image data at this stage will be uint8 BGR ###
         ##################################################
+
+
+        # The localized Milky Way blend belongs after global tonal/color
+        # processing, but before display-only masks, overlays, and scaling.
+        # Rotation, flips, and cropping above have already established the
+        # lens-solve pixel space used by this enhancement.
+        self.image_processor.milkyway_stretch()
 
 
         longterm_keogram_pixels = self.save_longterm_keogram_data(exp_date, camera_id)

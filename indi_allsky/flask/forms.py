@@ -1270,6 +1270,11 @@ def IMAGE_STRETCH__MILKYWAY_FEATHER_validator(form, field):
         raise ValidationError('Value must be between 0 and 500 pixels')
 
 
+def IMAGE_STRETCH__MILKYWAY_OPACITY_validator(form, field):
+    if not isinstance(field.data, (int, float)) or field.data < 0.0 or field.data > 1.0:
+        raise ValidationError('Value must be between 0.0 and 1.0')
+
+
 def IMAGE_STRETCH__MILKYWAY_SATURATION_validator(form, field):
     if not isinstance(field.data, (int, float)) or field.data < 1.0 or field.data > 3.0:
         raise ValidationError('Value must be between 1.0 and 3.0')
@@ -4679,6 +4684,7 @@ class IndiAllskyConfigForm(FlaskForm):
     IMAGE_STRETCH__MILKYWAY_GAMMA    = FloatField('Milky Way gamma', validators=[IMAGE_STRETCH__MILKYWAY_GAMMA_validator], widget=NumberInput(step=0.05))
     IMAGE_STRETCH__MILKYWAY_BAND_WIDTH = FloatField('Milky Way band width (degrees)', validators=[IMAGE_STRETCH__MILKYWAY_BAND_WIDTH_validator], widget=NumberInput(step=1))
     IMAGE_STRETCH__MILKYWAY_FEATHER  = FloatField('Milky Way feather (pixels)', validators=[IMAGE_STRETCH__MILKYWAY_FEATHER_validator], widget=NumberInput(step=5))
+    IMAGE_STRETCH__MILKYWAY_OPACITY  = FloatField('Milky Way blend opacity', validators=[IMAGE_STRETCH__MILKYWAY_OPACITY_validator], widget=NumberInput(step=0.05))
     IMAGE_STRETCH__MILKYWAY_SATURATION = FloatField('Milky Way saturation boost', validators=[IMAGE_STRETCH__MILKYWAY_SATURATION_validator], widget=NumberInput(step=0.05))
     KEOGRAM_ANGLE                    = FloatField('Keogram Rotation Angle', validators=[KEOGRAM_ANGLE_validator], widget=NumberInput(step=0.1))
     KEOGRAM_H_SCALE                  = IntegerField('Keogram Horizontal Scaling', validators=[DataRequired(), KEOGRAM_H_SCALE_validator])
@@ -9546,6 +9552,7 @@ class IndiAllskyImageProcessingForm(FlaskForm):
     IMAGE_STRETCH__MILKYWAY_GAMMA    = FloatField('Milky Way gamma', validators=[IMAGE_STRETCH__MILKYWAY_GAMMA_validator], widget=NumberInput(step=0.05))
     IMAGE_STRETCH__MILKYWAY_BAND_WIDTH = FloatField('Milky Way band width (degrees)', validators=[IMAGE_STRETCH__MILKYWAY_BAND_WIDTH_validator], widget=NumberInput(step=1))
     IMAGE_STRETCH__MILKYWAY_FEATHER  = FloatField('Milky Way feather (pixels)', validators=[IMAGE_STRETCH__MILKYWAY_FEATHER_validator], widget=NumberInput(step=5))
+    IMAGE_STRETCH__MILKYWAY_OPACITY  = FloatField('Milky Way blend opacity', validators=[IMAGE_STRETCH__MILKYWAY_OPACITY_validator], widget=NumberInput(step=0.05))
     IMAGE_STRETCH__MILKYWAY_SATURATION = FloatField('Milky Way saturation boost', validators=[IMAGE_STRETCH__MILKYWAY_SATURATION_validator], widget=NumberInput(step=0.05))
     CFA_PATTERN                      = SelectField('Bayer Pattern', choices=CFA_PATTERN_choices, validators=[CFA_PATTERN_validator])
     SCNR_ALGORITHM                   = SelectField('SCNR (green reduction)', choices=IndiAllskyConfigForm.SCNR_ALGORITHM_choices, validators=[SCNR_ALGORITHM_validator])

@@ -6,6 +6,7 @@ from indi_allsky.lens_solver.projection import predictAltAz
 from indi_allsky.lens_solver.projection import projectToPixels
 from indi_allsky.milkyway import IndiAllskyMilkyWayStretch
 from indi_allsky.milkyway import _GALACTIC_PLANE_CATALOG
+from indi_allsky.milkyway import _enhance_dark_structure
 from indi_allsky.milkyway import base_stretch_allowed
 
 
@@ -202,6 +203,26 @@ def test_milkyway_saturation_boost_increases_color_saturation_in_band():
     assert int(sat_boosted) > int(sat_no_boost)
 
 
+def test_milkyway_saturation_boost_does_not_amplify_blue_pixels():
+    lat, lon, obstime = -27.0, 153.0, 1767225600.0
+    image = numpy.full((1080, 1920, 3), (80, 40, 20), dtype=numpy.uint8)
+
+    config_no_boost = _config()
+    config_no_boost['IMAGE_STRETCH']['MILKYWAY_SATURATION'] = 1.0
+    config_boosted = _config()
+    config_boosted['IMAGE_STRETCH']['MILKYWAY_SATURATION'] = 2.0
+
+    galactic_center = numpy.array([[266.405, -28.936]])
+    alt, az = predictAltAz(galactic_center, lat, lon, obstime)
+    x, y = projectToPixels(alt, az, (0.0, 0.0, 0.0, 1700, 0, 0), 1920, 1080)
+    ex, ey = int(round(x[0])), int(round(y[0]))
+
+    result_no_boost = IndiAllskyMilkyWayStretch(config_no_boost).apply(image, lat, lon, obstime)
+    result_boosted = IndiAllskyMilkyWayStretch(config_boosted).apply(image, lat, lon, obstime)
+
+    assert numpy.array_equal(result_boosted[ey, ex], result_no_boost[ey, ex])
+
+
 def test_milkyway_stretch_never_raises_on_mono_image():
     # the color-only HSV saturation step must be skipped for 2D grayscale
     # frames, not raise
@@ -283,6 +304,17 @@ def test_milkyway_gamma_lifts_color_image_luminance_only():
         result_lab[:, :, 1].astype(numpy.int16) - original_lab[:, :, 1].astype(numpy.int16))) <= 1
     assert numpy.max(numpy.abs(
         result_lab[:, :, 2].astype(numpy.int16) - original_lab[:, :, 2].astype(numpy.int16))) <= 1
+
+
+def test_dark_structure_preserves_isolated_noise_but_deepens_broad_detail():
+    luminance = numpy.full((160, 160), 120, dtype=numpy.uint8)
+    luminance[50:110, 60:100] = 80
+    luminance[20, 20] = 80
+
+    enhanced = _enhance_dark_structure(luminance, 0.5)
+
+    assert enhanced[80, 80] < luminance[80, 80]
+    assert enhanced[20, 20] == luminance[20, 20]
 
 
 def test_milkyway_stretch_respects_binning():

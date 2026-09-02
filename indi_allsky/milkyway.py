@@ -50,6 +50,17 @@ def _galactic_plane_catalog():
 _GALACTIC_PLANE_CATALOG = _galactic_plane_catalog()
 
 
+def _enhance_dark_structure(luminance, strength):
+    if strength <= 0.0:
+        return luminance
+
+    detail = cv2.GaussianBlur(luminance, (0, 0), sigmaX=3)
+    background = cv2.GaussianBlur(luminance, (0, 0), sigmaX=24)
+    darkness = numpy.maximum(background.astype(numpy.int16) - detail.astype(numpy.int16) - 6, 0)
+    darkened = luminance.astype(numpy.float32) - darkness * min(strength, 1.0)
+    return numpy.clip(darkened, 0, 255).astype(numpy.uint8)
+
+
 class IndiAllskyMilkyWayStretch(object):
     """Create and apply a feathered Galactic-plane enhancement mask."""
 
@@ -209,6 +220,8 @@ class IndiAllskyMilkyWayStretch(object):
             ]
             if image.ndim == 3:
                 lab = cv2.cvtColor(enhanced_region, cv2.COLOR_BGR2LAB)
+                dark_structure = float(settings.get('MILKYWAY_DARK_STRUCTURE', 0.0))
+                lab[:, :, 0] = _enhance_dark_structure(lab[:, :, 0], dark_structure)
                 lab[:, :, 0] = cv2.LUT(lab[:, :, 0], lut)
                 enhanced_region[:] = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
             else:
@@ -218,8 +231,11 @@ class IndiAllskyMilkyWayStretch(object):
                 saturation = float(settings.get('MILKYWAY_SATURATION', 1.4))
                 if saturation != 1.0:
                     hsv = cv2.cvtColor(enhanced_region, cv2.COLOR_BGR2HSV)
-                    hsv[:, :, 1] = cv2.multiply(hsv[:, :, 1], saturation)
-                    enhanced_region[:] = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+                    warm_hues = enhanced_region[:, :, 2] > enhanced_region[:, :, 0]
+                    boosted_saturation = cv2.multiply(hsv[:, :, 1], saturation)
+                    hsv[:, :, 1][warm_hues] = boosted_saturation[warm_hues]
+                    boosted_region = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+                    enhanced_region[warm_hues] = boosted_region[warm_hues]
 
             result = cv2.blendLinear(image, enhanced, 1.0 - alpha, alpha)
             self.last_elapsed_ms = (time.monotonic() - t_start) * 1000.0

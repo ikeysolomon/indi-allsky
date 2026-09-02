@@ -271,6 +271,23 @@ def test_milkyway_gamma_brightens_the_masked_region_monotonically():
     assert strong.astype(numpy.int32).sum() > mild.astype(numpy.int32).sum() > image.astype(numpy.int32).sum()
 
 
+def test_milkyway_opacity_scales_the_enhancement_strength():
+    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+    transparent_config = _config()
+    transparent_config['IMAGE_STRETCH']['MILKYWAY_OPACITY'] = 0.0
+    subtle_config = _config()
+    subtle_config['IMAGE_STRETCH']['MILKYWAY_OPACITY'] = 0.35
+    opaque_config = _config()
+    opaque_config['IMAGE_STRETCH']['MILKYWAY_OPACITY'] = 1.0
+
+    transparent = IndiAllskyMilkyWayStretch(transparent_config).apply(image, 45.0, -93.0, 1767225600.0)
+    subtle = IndiAllskyMilkyWayStretch(subtle_config).apply(image, 45.0, -93.0, 1767225600.0)
+    opaque = IndiAllskyMilkyWayStretch(opaque_config).apply(image, 45.0, -93.0, 1767225600.0)
+
+    assert numpy.array_equal(transparent, image)
+    assert image.astype(numpy.int32).sum() < subtle.astype(numpy.int32).sum() < opaque.astype(numpy.int32).sum()
+
+
 def test_milkyway_stretch_respects_binning():
     # binned frames are smaller and use a proportionally smaller image
     # circle; this must not raise or silently no-op.

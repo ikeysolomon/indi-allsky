@@ -195,7 +195,10 @@ class IndiAllskyMilkyWayStretch(object):
             logger.debug('Milky Way enhancement skipped: band not visible or gamma is a no-op')
             return image
 
-        alpha = mask.astype(numpy.float32) / 255.0
+        opacity = float(settings.get('MILKYWAY_OPACITY', 0.35))
+        if opacity <= 0.0:
+            return image
+        alpha = mask.astype(numpy.float32) / 255.0 * min(opacity, 1.0)
         if image.dtype == numpy.uint8:
             lut = numpy.clip(
                 numpy.power(numpy.arange(256, dtype=numpy.float32) / 255.0, 1.0 / gamma) * 255.0,

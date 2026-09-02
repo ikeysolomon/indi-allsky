@@ -230,7 +230,6 @@ class IndiAllSkyConfigBase(object):
             "MILKYWAY_GAMMA"    : 2.2,
             "MILKYWAY_BAND_WIDTH": 10.0,
             "MILKYWAY_FEATHER"  : 60.0,
-            "MILKYWAY_OPACITY"  : 0.35,
             "MILKYWAY_SATURATION": 1.4,
         },
         "KEOGRAM_ANGLE"         : 0.0,

@@ -206,16 +206,6 @@ class IndiAllskyMilkyWayStretch(object):
             # so it must not be softened by a downscale/upscale round-trip
             enhanced = cv2.LUT(image, lut)
 
-            if image.ndim == 3:
-                # Saturation boost brings out the reds/pinks of emission
-                # nebulosity along the plane, which gamma alone (the same
-                # curve applied identically to every channel) does not
-                saturation = float(settings.get('MILKYWAY_SATURATION', 1.4))
-                if saturation != 1.0:
-                    hsv = cv2.cvtColor(enhanced, cv2.COLOR_BGR2HSV)
-                    hsv[:, :, 1] = cv2.multiply(hsv[:, :, 1], saturation)
-                    enhanced = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-
             result = cv2.blendLinear(image, enhanced, 1.0 - alpha, alpha)
             self.last_elapsed_ms = (time.monotonic() - t_start) * 1000.0
             return result

@@ -180,31 +180,6 @@ def test_enhancement_never_leaks_past_full_resolution_circle_boundary():
     assert numpy.all(radius <= 850.0)
 
 
-def test_milkyway_saturation_boost_increases_color_saturation_in_band():
-    # a slightly reddish background lets us tell the saturation boost apart
-    # from gamma brightening, which does not selectively boost chroma
-    lat, lon, obstime = -27.0, 153.0, 1767225600.0
-    image = numpy.full((1080, 1920, 3), (30, 30, 60), dtype=numpy.uint8)  # BGR: reddish
-
-    config_no_boost = _config()
-    config_no_boost['IMAGE_STRETCH']['MILKYWAY_SATURATION'] = 1.0
-    config_boosted = _config()
-    config_boosted['IMAGE_STRETCH']['MILKYWAY_SATURATION'] = 2.0
-
-    galactic_center = numpy.array([[266.405, -28.936]])
-    alt, az = predictAltAz(galactic_center, lat, lon, obstime)
-    params = (0.0, 0.0, 0.0, 1700, 0, 0)
-    x, y = projectToPixels(alt, az, params, 1920, 1080)
-    ex, ey = int(round(x[0])), int(round(y[0]))
-
-    result_no_boost = IndiAllskyMilkyWayStretch(config_no_boost).apply(image, lat, lon, obstime)
-    result_boosted = IndiAllskyMilkyWayStretch(config_boosted).apply(image, lat, lon, obstime)
-
-    sat_no_boost = cv2.cvtColor(result_no_boost, cv2.COLOR_BGR2HSV)[ey, ex, 1]
-    sat_boosted = cv2.cvtColor(result_boosted, cv2.COLOR_BGR2HSV)[ey, ex, 1]
-    assert int(sat_boosted) > int(sat_no_boost)
-
-
 def test_milkyway_stretch_never_raises_on_mono_image():
     # the color-only HSV saturation step must be skipped for 2D grayscale
     # frames, not raise

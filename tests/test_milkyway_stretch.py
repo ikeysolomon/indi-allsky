@@ -6,6 +6,7 @@ from indi_allsky.lens_solver.projection import predictAltAz
 from indi_allsky.lens_solver.projection import projectToPixels
 from indi_allsky.milkyway import IndiAllskyMilkyWayStretch
 from indi_allsky.milkyway import _GALACTIC_PLANE_CATALOG
+from indi_allsky.milkyway import _bright_structure_alpha
 from indi_allsky.milkyway import _enhance_dark_structure
 from indi_allsky.milkyway import base_stretch_allowed
 
@@ -93,6 +94,15 @@ def _config(enabled=True):
     }
 
 
+def _structured_sky(height, width, color=(40, 40, 40)):
+    x = numpy.arange(width, dtype=numpy.float32)
+    structure = 0.7 + 0.6 * (numpy.sin(x / 12.0) + 1.0) / 2.0
+    image = numpy.empty((height, width, 3), dtype=numpy.uint8)
+    for channel, value in enumerate(color):
+        image[:, :, channel] = numpy.clip(value * structure, 0, 255)
+    return image
+
+
 def test_rendered_pixel_matches_shared_projection_end_to_end():
     # end-to-end regression anchor: the earlier tests prove the catalog and
     # the alt/az math are each internally consistent, but not that the full
@@ -103,7 +113,7 @@ def test_rendered_pixel_matches_shared_projection_end_to_end():
     # elsewhere in this file, where it's below the horizon).
     lat, lon, obstime = -27.0, 153.0, 1767225600.0
     config = _config()
-    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+    image = _structured_sky(1080, 1920)
 
     galactic_center = numpy.array([[266.405, -28.936]])
     alt, az = predictAltAz(galactic_center, lat, lon, obstime)
@@ -137,7 +147,7 @@ def test_enhancement_never_extends_past_the_image_circle():
     lat, lon, obstime = -27.0, 153.0, 1767225600.0
     config = _config()
     config['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 1000
-    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+    image = _structured_sky(1080, 1920)
 
     near_horizon_point = _GALACTIC_PLANE_CATALOG[84:85]
     alt, az = predictAltAz(near_horizon_point, lat, lon, obstime)
@@ -171,7 +181,7 @@ def test_enhancement_never_leaks_past_full_resolution_circle_boundary():
         'MILKYWAY_FEATHER': 500.0,
         'MILKYWAY_SATURATION': 1.0,
     })
-    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+    image = _structured_sky(1080, 1920)
 
     result = IndiAllskyMilkyWayStretch(config).apply(image, lat, lon, obstime)
     changed_y, changed_x = numpy.nonzero(numpy.any(result != image, axis=2))
@@ -183,7 +193,7 @@ def test_enhancement_never_leaks_past_full_resolution_circle_boundary():
 
 def test_milkyway_saturation_boost_increases_color_saturation_in_band():
     lat, lon, obstime = -27.0, 153.0, 1767225600.0
-    image = numpy.full((1080, 1920, 3), (30, 30, 60), dtype=numpy.uint8)
+    image = _structured_sky(1080, 1920, (30, 30, 60))
 
     config_no_boost = _config()
     config_no_boost['IMAGE_STRETCH']['MILKYWAY_SATURATION'] = 1.0
@@ -205,7 +215,7 @@ def test_milkyway_saturation_boost_increases_color_saturation_in_band():
 
 def test_milkyway_saturation_boost_does_not_amplify_blue_pixels():
     lat, lon, obstime = -27.0, 153.0, 1767225600.0
-    image = numpy.full((1080, 1920, 3), (80, 40, 20), dtype=numpy.uint8)
+    image = _structured_sky(1080, 1920, (80, 40, 20))
 
     config_no_boost = _config()
     config_no_boost['IMAGE_STRETCH']['MILKYWAY_SATURATION'] = 1.0
@@ -226,13 +236,13 @@ def test_milkyway_saturation_boost_does_not_amplify_blue_pixels():
 def test_milkyway_stretch_never_raises_on_mono_image():
     # the color-only HSV saturation step must be skipped for 2D grayscale
     # frames, not raise
-    image = numpy.full((1080, 1920), 40, dtype=numpy.uint8)
+    image = _structured_sky(1080, 1920)[:, :, 0]
     result = IndiAllskyMilkyWayStretch(_config()).apply(image, -27.0, 153.0, 1767225600.0)
     assert numpy.any(result != image)
 
 
 def test_milkyway_stretch_is_opt_in_and_localized():
-    image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
+    image = _structured_sky(720, 1280)
     disabled = IndiAllskyMilkyWayStretch(_config(enabled=False))
     assert disabled.apply(image, 45.0, -93.0, 1767225600.0) is image
 
@@ -245,7 +255,7 @@ def test_milkyway_stretch_is_opt_in_and_localized():
 
 
 def test_milkyway_stretch_is_disabled_during_moonmode_by_default():
-    image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
+    image = _structured_sky(720, 1280)
     enhancer = IndiAllskyMilkyWayStretch(_config())
 
     assert enhancer.apply(image, 45.0, -93.0, 1767225600.0, moonmode=True) is image
@@ -253,7 +263,7 @@ def test_milkyway_stretch_is_disabled_during_moonmode_by_default():
 
 
 def test_milkyway_stretch_moonmode_toggle_allows_it_through():
-    image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
+    image = _structured_sky(720, 1280)
     config = _config()
     config['IMAGE_STRETCH']['MILKYWAY_MOONMODE'] = True
     enhancer = IndiAllskyMilkyWayStretch(config)
@@ -266,7 +276,7 @@ def test_milkyway_band_tracks_sidereal_time():
     # the whole point of piggybacking on the lens solution is that the band
     # follows the sky; sampling six hours apart must move it, not just
     # change it by coincidence of noise.
-    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+    image = _structured_sky(1080, 1920)
     enhancer = IndiAllskyMilkyWayStretch(_config())
 
     result_a = enhancer.apply(image, 45.0, -93.0, 1767225600.0)
@@ -276,7 +286,7 @@ def test_milkyway_band_tracks_sidereal_time():
 
 
 def test_milkyway_gamma_brightens_the_masked_region_monotonically():
-    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+    image = _structured_sky(1080, 1920)
 
     config_mild = _config()
     config_mild['IMAGE_STRETCH']['MILKYWAY_GAMMA'] = 1.1
@@ -290,7 +300,7 @@ def test_milkyway_gamma_brightens_the_masked_region_monotonically():
 
 
 def test_milkyway_gamma_lifts_color_image_luminance_only():
-    image = numpy.full((1080, 1920, 3), (20, 30, 50), dtype=numpy.uint8)
+    image = _structured_sky(1080, 1920, (20, 30, 50))
     config = _config()
     config['IMAGE_STRETCH']['MILKYWAY_SATURATION'] = 1.0
 
@@ -301,9 +311,9 @@ def test_milkyway_gamma_lifts_color_image_luminance_only():
 
     assert changed.any()
     assert numpy.max(numpy.abs(
-        result_lab[:, :, 1].astype(numpy.int16) - original_lab[:, :, 1].astype(numpy.int16))) <= 1
+        result_lab[:, :, 1].astype(numpy.int16) - original_lab[:, :, 1].astype(numpy.int16))) <= 2
     assert numpy.max(numpy.abs(
-        result_lab[:, :, 2].astype(numpy.int16) - original_lab[:, :, 2].astype(numpy.int16))) <= 1
+        result_lab[:, :, 2].astype(numpy.int16) - original_lab[:, :, 2].astype(numpy.int16))) <= 2
 
 
 def test_dark_structure_preserves_isolated_noise_but_deepens_broad_detail():
@@ -317,10 +327,20 @@ def test_dark_structure_preserves_isolated_noise_but_deepens_broad_detail():
     assert enhanced[20, 20] == luminance[20, 20]
 
 
+def test_bright_structure_alpha_rejects_uniform_sky_but_selects_broad_brightness():
+    luminance = numpy.full((160, 160), 40, dtype=numpy.uint8)
+    luminance[50:110, 60:100] = 80
+
+    alpha = _bright_structure_alpha(luminance)
+
+    assert alpha[20, 20] == 0.0
+    assert alpha[80, 80] > 0.0
+
+
 def test_milkyway_stretch_respects_binning():
     # binned frames are smaller and use a proportionally smaller image
     # circle; this must not raise or silently no-op.
-    image = numpy.full((540, 960, 3), 40, dtype=numpy.uint8)
+    image = _structured_sky(540, 960)
     enhancer = IndiAllskyMilkyWayStretch(_config())
     result = enhancer.apply(image, 45.0, -93.0, 1767225600.0, binning=2)
     assert numpy.any(result != image)

@@ -180,6 +180,28 @@ def test_enhancement_never_leaks_past_full_resolution_circle_boundary():
     assert numpy.all(radius <= 850.0)
 
 
+def test_milkyway_saturation_boost_increases_color_saturation_in_band():
+    lat, lon, obstime = -27.0, 153.0, 1767225600.0
+    image = numpy.full((1080, 1920, 3), (30, 30, 60), dtype=numpy.uint8)
+
+    config_no_boost = _config()
+    config_no_boost['IMAGE_STRETCH']['MILKYWAY_SATURATION'] = 1.0
+    config_boosted = _config()
+    config_boosted['IMAGE_STRETCH']['MILKYWAY_SATURATION'] = 2.0
+
+    galactic_center = numpy.array([[266.405, -28.936]])
+    alt, az = predictAltAz(galactic_center, lat, lon, obstime)
+    x, y = projectToPixels(alt, az, (0.0, 0.0, 0.0, 1700, 0, 0), 1920, 1080)
+    ex, ey = int(round(x[0])), int(round(y[0]))
+
+    result_no_boost = IndiAllskyMilkyWayStretch(config_no_boost).apply(image, lat, lon, obstime)
+    result_boosted = IndiAllskyMilkyWayStretch(config_boosted).apply(image, lat, lon, obstime)
+
+    sat_no_boost = cv2.cvtColor(result_no_boost, cv2.COLOR_BGR2HSV)[ey, ex, 1]
+    sat_boosted = cv2.cvtColor(result_boosted, cv2.COLOR_BGR2HSV)[ey, ex, 1]
+    assert int(sat_boosted) > int(sat_no_boost)
+
+
 def test_milkyway_stretch_never_raises_on_mono_image():
     # the color-only HSV saturation step must be skipped for 2D grayscale
     # frames, not raise
@@ -244,6 +266,23 @@ def test_milkyway_gamma_brightens_the_masked_region_monotonically():
     strong = IndiAllskyMilkyWayStretch(config_strong).apply(image, 45.0, -93.0, 1767225600.0)
 
     assert strong.astype(numpy.int32).sum() > mild.astype(numpy.int32).sum() > image.astype(numpy.int32).sum()
+
+
+def test_milkyway_gamma_lifts_color_image_luminance_only():
+    image = numpy.full((1080, 1920, 3), (20, 30, 50), dtype=numpy.uint8)
+    config = _config()
+    config['IMAGE_STRETCH']['MILKYWAY_SATURATION'] = 1.0
+
+    result = IndiAllskyMilkyWayStretch(config).apply(image, -27.0, 153.0, 1767225600.0)
+    original_lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    result_lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB)
+    changed = result_lab[:, :, 0] > original_lab[:, :, 0]
+
+    assert changed.any()
+    assert numpy.max(numpy.abs(
+        result_lab[:, :, 1].astype(numpy.int16) - original_lab[:, :, 1].astype(numpy.int16))) <= 1
+    assert numpy.max(numpy.abs(
+        result_lab[:, :, 2].astype(numpy.int16) - original_lab[:, :, 2].astype(numpy.int16))) <= 1
 
 
 def test_milkyway_stretch_respects_binning():

@@ -201,10 +201,25 @@ class IndiAllskyMilkyWayStretch(object):
                 numpy.power(numpy.arange(256, dtype=numpy.float32) / 255.0, 1.0 / gamma) * 255.0,
                 0.0, 255.0).astype(numpy.uint8)
 
-            # deliberately full resolution: this is a quality-focused
-            # enhancement (dust-lane/color detail), not the geometry mask,
-            # so it must not be softened by a downscale/upscale round-trip
-            enhanced = cv2.LUT(image, lut)
+            mask_x, mask_y, mask_width, mask_height = cv2.boundingRect(mask)
+            enhanced = image.copy()
+            enhanced_region = enhanced[
+                mask_y:mask_y + mask_height,
+                mask_x:mask_x + mask_width,
+            ]
+            if image.ndim == 3:
+                lab = cv2.cvtColor(enhanced_region, cv2.COLOR_BGR2LAB)
+                lab[:, :, 0] = cv2.LUT(lab[:, :, 0], lut)
+                enhanced_region[:] = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            else:
+                enhanced_region[:] = cv2.LUT(enhanced_region, lut)
+
+            if image.ndim == 3:
+                saturation = float(settings.get('MILKYWAY_SATURATION', 1.4))
+                if saturation != 1.0:
+                    hsv = cv2.cvtColor(enhanced_region, cv2.COLOR_BGR2HSV)
+                    hsv[:, :, 1] = cv2.multiply(hsv[:, :, 1], saturation)
+                    enhanced_region[:] = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
             result = cv2.blendLinear(image, enhanced, 1.0 - alpha, alpha)
             self.last_elapsed_ms = (time.monotonic() - t_start) * 1000.0

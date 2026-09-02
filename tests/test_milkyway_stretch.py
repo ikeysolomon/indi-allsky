@@ -7,6 +7,7 @@ from indi_allsky.lens_solver.projection import projectToPixels
 from indi_allsky.milkyway import IndiAllskyMilkyWayStretch
 from indi_allsky.milkyway import _GALACTIC_PLANE_CATALOG
 from indi_allsky.milkyway import _bright_structure_alpha
+from indi_allsky.milkyway import _broad_structure_alpha
 from indi_allsky.milkyway import _enhance_dark_structure
 from indi_allsky.milkyway import base_stretch_allowed
 
@@ -321,9 +322,11 @@ def test_dark_structure_preserves_isolated_noise_but_deepens_broad_detail():
     luminance[50:110, 60:100] = 80
     luminance[20, 20] = 80
 
-    enhanced = _enhance_dark_structure(luminance, 0.5)
+    enhanced = _enhance_dark_structure(luminance, 1.0)
+    enhanced_strong = _enhance_dark_structure(luminance, 3.0)
 
     assert enhanced[80, 80] < luminance[80, 80]
+    assert enhanced_strong[80, 80] < enhanced[80, 80]
     assert enhanced[20, 20] == luminance[20, 20]
 
 
@@ -335,6 +338,17 @@ def test_bright_structure_alpha_rejects_uniform_sky_but_selects_broad_brightness
 
     assert alpha[20, 20] == 0.0
     assert alpha[80, 80] > 0.0
+
+
+def test_broad_structure_alpha_rejects_point_detail_but_selects_diffuse_brightness():
+    luminance = numpy.full((256, 256), 40, dtype=numpy.uint8)
+    luminance[96:160, 96:160] = 70
+    luminance[20, 20] = 255
+
+    alpha = _broad_structure_alpha(luminance)
+
+    assert alpha[128, 128] > 0.0
+    assert alpha[20, 20] == 0.0
 
 
 def test_milkyway_stretch_respects_binning():

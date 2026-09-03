@@ -292,7 +292,7 @@ def test_milkyway_gamma_brightens_the_masked_region_monotonically():
     config_mild = _config()
     config_mild['IMAGE_STRETCH']['MILKYWAY_GAMMA'] = 1.1
     config_strong = _config()
-    config_strong['IMAGE_STRETCH']['MILKYWAY_GAMMA'] = 3.0
+    config_strong['IMAGE_STRETCH']['MILKYWAY_GAMMA'] = 6.0
 
     mild = IndiAllskyMilkyWayStretch(config_mild).apply(image, 45.0, -93.0, 1767225600.0)
     strong = IndiAllskyMilkyWayStretch(config_strong).apply(image, 45.0, -93.0, 1767225600.0)
@@ -323,7 +323,7 @@ def test_dark_structure_preserves_isolated_noise_but_deepens_broad_detail():
     luminance[20, 20] = 80
 
     enhanced = _enhance_dark_structure(luminance, 1.0)
-    enhanced_strong = _enhance_dark_structure(luminance, 3.0)
+    enhanced_strong = _enhance_dark_structure(luminance, 6.0)
 
     assert enhanced[80, 80] < luminance[80, 80]
     assert enhanced_strong[80, 80] < enhanced[80, 80]

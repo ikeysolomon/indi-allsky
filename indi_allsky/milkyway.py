@@ -57,15 +57,15 @@ def _enhance_dark_structure(luminance, strength):
     detail = cv2.GaussianBlur(luminance, (0, 0), sigmaX=3)
     background = cv2.GaussianBlur(luminance, (0, 0), sigmaX=24)
     darkness = numpy.maximum(background.astype(numpy.int16) - detail.astype(numpy.int16) - 6, 0)
-    darkened = luminance.astype(numpy.float32) - darkness * min(strength, 3.0)
+    darkened = luminance.astype(numpy.float32) - darkness * min(strength, 6.0)
     return numpy.clip(darkened, 0, 255).astype(numpy.uint8)
 
 
 def _bright_structure_alpha(luminance):
     detail = cv2.GaussianBlur(luminance, (0, 0), sigmaX=3)
     background = cv2.GaussianBlur(luminance, (0, 0), sigmaX=24)
-    brightness = numpy.maximum(detail.astype(numpy.int16) - background.astype(numpy.int16) - 4, 0)
-    return numpy.clip(brightness.astype(numpy.float32) / 24.0, 0.0, 1.0)
+    brightness = numpy.maximum(detail.astype(numpy.int16) - background.astype(numpy.int16) - 2, 0)
+    return numpy.clip(brightness.astype(numpy.float32) / 16.0, 0.0, 1.0)
 
 
 def _broad_structure_alpha(luminance):
@@ -239,7 +239,8 @@ class IndiAllskyMilkyWayStretch(object):
                 if broad_structure > 0.0:
                     broad_alpha = _broad_structure_alpha(lab[:, :, 0])
                     alpha_region = alpha[mask_y:mask_y + mask_height, mask_x:mask_x + mask_width]
-                    alpha_region *= (1.0 - min(broad_structure, 1.0)) + broad_alpha * min(broad_structure, 1.0)
+                    alpha_region *= 1.0 + broad_alpha * min(broad_structure, 3.0)
+                    numpy.minimum(alpha_region, 1.0, out=alpha_region)
                 dark_structure = float(settings.get('MILKYWAY_DARK_STRUCTURE', 0.0))
                 lab[:, :, 0] = _enhance_dark_structure(lab[:, :, 0], dark_structure)
                 lab[:, :, 0] = cv2.LUT(lab[:, :, 0], lut)

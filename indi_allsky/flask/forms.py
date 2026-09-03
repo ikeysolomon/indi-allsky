@@ -1258,33 +1258,33 @@ def IMAGE_STRETCH__MODE3_HIGHLIGHTS_validator(form, field):
 
 
 def IMAGE_STRETCH__MILKYWAY_GAMMA_validator(form, field):
-    if not isinstance(field.data, (int, float)) or field.data < 1.0 or field.data > 4.0:
-        raise ValidationError('Value must be between 1.0 and 4.0')
+    if not isinstance(field.data, (int, float)) or field.data < 1.0 or field.data > 8.0:
+        raise ValidationError('Value must be between 1.0 and 8.0')
 
 
 def IMAGE_STRETCH__MILKYWAY_BAND_WIDTH_validator(form, field):
-    if not isinstance(field.data, (int, float)) or field.data < 1.0 or field.data > 45.0:
-        raise ValidationError('Value must be between 1 and 45 degrees')
+    if not isinstance(field.data, (int, float)) or field.data < 1.0 or field.data > 90.0:
+        raise ValidationError('Value must be between 1 and 90 degrees')
 
 
 def IMAGE_STRETCH__MILKYWAY_FEATHER_validator(form, field):
-    if not isinstance(field.data, (int, float)) or field.data < 0.0 or field.data > 500.0:
-        raise ValidationError('Value must be between 0 and 500 pixels')
+    if not isinstance(field.data, (int, float)) or field.data < 0.0 or field.data > 1000.0:
+        raise ValidationError('Value must be between 0 and 1000 pixels')
 
 
 def IMAGE_STRETCH__MILKYWAY_BROAD_STRUCTURE_validator(form, field):
-    if not isinstance(field.data, (int, float)) or field.data < 0.0 or field.data > 1.0:
-        raise ValidationError('Value must be between 0.0 and 1.0')
+    if not isinstance(field.data, (int, float)) or field.data < 0.0 or field.data > 3.0:
+        raise ValidationError('Value must be between 0.0 and 3.0')
 
 
 def IMAGE_STRETCH__MILKYWAY_DARK_STRUCTURE_validator(form, field):
-    if not isinstance(field.data, (int, float)) or field.data < 1.0 or field.data > 3.0:
-        raise ValidationError('Value must be between 1.0 and 3.0')
+    if not isinstance(field.data, (int, float)) or field.data < 1.0 or field.data > 6.0:
+        raise ValidationError('Value must be between 1.0 and 6.0')
 
 
 def IMAGE_STRETCH__MILKYWAY_SATURATION_validator(form, field):
-    if not isinstance(field.data, (int, float)) or field.data < 1.0 or field.data > 3.0:
-        raise ValidationError('Value must be between 1.0 and 3.0')
+    if not isinstance(field.data, (int, float)) or field.data < 1.0 or field.data > 5.0:
+        raise ValidationError('Value must be between 1.0 and 5.0')
 
 
 def IMAGE_ROTATE_validator(form, field):

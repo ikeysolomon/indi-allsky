@@ -4229,6 +4229,9 @@ class IndiAllskyConfigForm(FlaskForm):
         'Rain Sensors' : (
             ('blinka_rain_sensor_fc37', 'FC-37 Rain Sensor - digital (1 slot)'),
         ),
+        'Wind Sensors' : (
+            ('blinka_wind_speed_sensor_wh_sp_ws01', 'WH-SP-WS01 Cup Anemometer - pulse output (1 slot)'),
+        ),
         'Remote' : (
             ('mqtt_broker_sensor', 'MQTT Broker Sensor - (10 slots)'),
         ),

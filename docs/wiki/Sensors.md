@@ -82,6 +82,12 @@ There are 60 (0-59) sensor slots for user data.
 {sensor_user_59:0.1f}
 ```
 
+### WH-SP-WS01 Cup Anemometer
+
+Select **WH-SP-WS01 Cup Anemometer** in any sensor slot and set that slot's **Pin/Port 1** to the GPIO input connected to the anemometer pulse wire. The sensor reads rising-edge pulses continuously and converts them using the WH-SP-WS01 rate of 2.4 km/h per pulse per second. The reported value follows the global Wind Speed Display setting.
+
+Use `{windspeed:0.1f}` in an image-label template to show the current wind speed. The selected slot also records the numeric value in its normal user-sensor slot.
+
 ## Chart Titles
 Chart titles may be customized by updating the title template
 

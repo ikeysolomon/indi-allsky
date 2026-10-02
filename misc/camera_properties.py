@@ -8,6 +8,7 @@ import PyIndi
 import time
 import sys
 import ctypes
+import importlib.metadata
 from pprint import pformat  # noqa: F401
 from prettytable import PrettyTable
 import logging
@@ -74,13 +75,21 @@ class IndiProperties(PyIndi.BaseClient):
     def __init__(self):
         super(IndiProperties, self).__init__()
 
-        pyindi_version = '.'.join((
-            str(getattr(PyIndi, 'INDI_VERSION_MAJOR', -1)),
-            str(getattr(PyIndi, 'INDI_VERSION_MINOR', -1)),
-            str(getattr(PyIndi, 'INDI_VERSION_RELEASE', -1)),
-        ))
 
-        logger.info("INDI version: %s", pyindi_version)
+        try:
+            import pkgconfig
+            libindi_version = pkgconfig.modversion('libindi')
+        except ImportError:
+            # separate exception handling
+            libindi_version = 'Info not available'
+        except pkgconfig.pkgconfig.PackageNotFoundError:
+            libindi_version = 'Info not available'
+
+        logger.info('INDI version: %s', libindi_version)
+
+
+        pyindi_client_version = importlib.metadata.version('pyindi-client')
+        logger.info('PyIndi version: %s', pyindi_client_version)
 
 
     def newDevice(self, d):
@@ -169,11 +178,18 @@ class IndiProperties(PyIndi.BaseClient):
                 if prop_v['type'] == PyIndi.INDI_NUMBER:
                     # number
                     for c in prop_v['controls']:
+                        if c['name'] == 'CCD_EXPOSURE_VALUE':
+                            ### ensure precision for exposure
+                            c_format = '%0.8f'
+                        else:
+                            c_format = c['format']
+
+
                         try:
                             # try to use embedded C formatting
-                            c_value = c['format'] % c['value']
-                            c_min = c['format'] % c['min']
-                            c_max = c['format'] % c['max']
+                            c_value = c_format % c['value']
+                            c_min = c_format % c['min']
+                            c_max = c_format % c['max']
                         except ValueError:
                             c_value = c['value']
                             c_min = c['min']

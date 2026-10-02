@@ -1,9 +1,16 @@
+import ast
+import math
+from pathlib import Path
+from types import SimpleNamespace
+
 import cv2
 import numpy
 import pytest
 
 from indi_allsky.lens_solver.projection import predictAltAz
+from indi_allsky.lens_solver.projection import precessCatalog
 from indi_allsky.lens_solver.projection import projectToPixels
+from indi_allsky.lens_solver.calibration import displacement, pipelineSignature, validateCalibration
 from indi_allsky.milkyway import IndiAllskyMilkyWayStretch
 from indi_allsky.milkyway import _GALACTIC_PLANE_CATALOG
 from indi_allsky.milkyway import base_stretch_allowed
@@ -301,3 +308,134 @@ def test_base_stretch_can_run_during_daytime():
 def test_base_stretch_is_disabled_when_not_configured():
     assert base_stretch_allowed(
         {}, is_night=True, is_moonmode=False, has_base_stretch=False) is False
+
+
+@pytest.mark.parametrize('altitude,heading,radial,precession', [
+    (54.0, 123.0, 0.0, False),
+    (90.0, 0.0, 0.5, False),
+    (54.0, 123.0, 0.2, True),
+])
+def test_band_matches_extended_lens_projection(altitude, heading, radial, precession):
+    config = _config()
+    config['LENS_ALTITUDE'] = altitude
+    config['VIRTUALSKY'].update(POINTING_AZIMUTH=heading, RADIAL_DISTORTION=radial,
+                               PRECESSION=precession)
+    config['IMAGE_STRETCH'].update(MILKYWAY_BAND_WIDTH=1.0, MILKYWAY_FEATHER=0.0)
+    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+    catalog = _GALACTIC_PLANE_CATALOG
+    timestamp = 1767225600.0
+    if precession:
+        catalog = precessCatalog(catalog, timestamp)
+    alt, az = predictAltAz(catalog, -27.0, 153.0, timestamp)
+    params = (0.0, 0.0, 0.0, 1700.0, 0.0, 0.0, radial)
+    x, y = projectToPixels(alt, az, params, 1920, 1080,
+                          lens_altitude=altitude, pointing_azimuth=heading)
+    keep = ((alt > numpy.radians(10.0)) & (numpy.hypot(x - 960, y - 540) < 800)
+            & (x > 20) & (x < 1900) & (y > 20) & (y < 1060))
+    assert keep.sum() > 10
+    result = IndiAllskyMilkyWayStretch(config).apply(image, -27.0, 153.0, timestamp)
+    assert numpy.all(result[numpy.rint(y[keep]).astype(int), numpy.rint(x[keep]).astype(int), 0] > 40)
+
+
+def test_preview_applies_enhancement_before_colormap_with_exposure_date():
+    source = Path(__file__).resolve().parents[1] / 'indi_allsky' / 'flask' / 'views.py'
+    tree = ast.parse(source.read_text(encoding='utf-8'))
+    view = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                and node.name == 'JsonImageProcessingView')
+    calls = [node for node in ast.walk(view) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute)
+             and isinstance(node.func.value, ast.Name)
+             and node.func.value.id == 'image_processor']
+    enhancement = next(node for node in calls if node.func.attr == 'milkyway_stretch')
+    colormap = next(node for node in calls if node.func.attr == 'colormap')
+    assert enhancement.lineno < colormap.lineno
+    for node in calls:
+        if node.func.attr == 'add':
+            assert isinstance(node.args[4], ast.Name)
+            assert node.args[4].id in ('image_date', 'pre_image_date')
+
+
+@pytest.mark.parametrize('shape,scale,border', [
+    ((1080, 1920), 50, {'TOP': 10, 'RIGHT': 70, 'BOTTOM': 30, 'LEFT': 20}),
+    ((1081, 1923), 33, {'TOP': 5, 'RIGHT': 17, 'BOTTOM': 30, 'LEFT': 11}),
+])
+def test_band_undoes_saved_image_scale_and_asymmetric_border(shape, scale, border):
+    config = _config()
+    config.update(IMAGE_SCALE=scale, IMAGE_BORDER=border)
+    config['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 1700 * scale / 100
+    config['IMAGE_STRETCH'].update(MILKYWAY_BAND_WIDTH=1.0, MILKYWAY_FEATHER=0.0)
+    height, width = shape
+    image = numpy.full((height, width, 3), 40, dtype=numpy.uint8)
+    scaled_width = int(width * scale / 100)
+    scaled_width -= scaled_width % 2
+    scaled_height = int(height * scale / 100)
+    scaled_height -= scaled_height % 2
+    alt, az = predictAltAz(_GALACTIC_PLANE_CATALOG, -27.0, 153.0, 1767225600.0)
+    params = (0.0, 0.0, 0.0, config['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'], 0.0, 0.0)
+    x, y = projectToPixels(alt, az, params, scaled_width + border['LEFT'] + border['RIGHT'],
+                          scaled_height + border['TOP'] + border['BOTTOM'])
+    x = (x - border['LEFT']) * width / scaled_width
+    y = (y - border['TOP']) * height / scaled_height
+    keep = ((alt > numpy.radians(10)) & (x > 20) & (x < width - 20)
+            & (y > 20) & (y < height - 20))
+    assert keep.sum() > 10
+    result = IndiAllskyMilkyWayStretch(config).apply(image, -27.0, 153.0, 1767225600.0)
+    assert numpy.all(result[numpy.rint(y[keep]).astype(int), numpy.rint(x[keep]).astype(int), 0] > 40)
+
+
+def test_band_applies_calibration_correction_and_rejects_stale_models():
+    config = _config()
+    config['IMAGE_STRETCH'].update(MILKYWAY_BAND_WIDTH=1.0, MILKYWAY_FEATHER=0.0)
+    coefficients = numpy.zeros((10, 2))
+    coefficients[0] = [0.03, 0.0]
+    model = dict(version=2, coefficients=coefficients.tolist(), bounds=[-1, -1, 1, 1],
+                 geometry=[0, 0, 0, 1700, 0, 0, 90, 0, 0, 0], image_size=[1920, 1080],
+                 context=[-27, 153, 0], camera_uuid='', summary='', pipeline=pipelineSignature(config))
+    assert validateCalibration(model)
+    config['VIRTUALSKY'].update(CALIBRATION_ENABLED=True, CALIBRATION=model)
+    image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
+    enhancer = IndiAllskyMilkyWayStretch(config)
+    alt, az = predictAltAz(_GALACTIC_PLANE_CATALOG, -27.0, 153.0, 1767225600.0)
+    x, y = projectToPixels(alt, az, model['geometry'][:6], 1920, 1080)
+    points = numpy.column_stack((x, y))
+    points += displacement((points - [960, 540]) / 850, model) * 850
+    x, y = points.T
+    keep = ((alt > numpy.radians(10)) & (numpy.hypot(x - 960, y - 540) < 800)
+            & (x > 20) & (x < 1900) & (y > 20) & (y < 1060))
+    assert keep.sum() > 10
+    result = enhancer.apply(image, -27.0, 153.0, 1767225600.0)
+    assert numpy.all(result[numpy.rint(y[keep]).astype(int), numpy.rint(x[keep]).astype(int), 0] > 40)
+    config['VIRTUALSKY']['CALIBRATION_ENABLED'] = False
+    uncorrected = enhancer.apply(image, -27.0, 153.0, 1767225600.0)
+    assert not numpy.array_equal(result, uncorrected)
+    config['VIRTUALSKY']['CALIBRATION_ENABLED'] = True
+    model['pipeline'] = '0' * 64
+    assert enhancer.apply(image, -27.0, 153.0, 1767225600.0) is image
+    assert enhancer.last_elapsed_ms == 0.0
+
+
+@pytest.mark.parametrize('key', ['MILKYWAY_GAMMA', 'MILKYWAY_BAND_WIDTH', 'MILKYWAY_FEATHER'])
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), -float('inf')])
+def test_nonfinite_settings_are_rejected_by_form_and_runtime(key, value):
+    source = Path(__file__).resolve().parents[1] / 'indi_allsky' / 'flask' / 'forms.py'
+    tree = ast.parse(source.read_text(encoding='utf-8'))
+    name = 'IMAGE_STRETCH__' + key + '_validator'
+    validator = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    namespace = {'math': math, 'ValidationError': ValueError}
+    exec(compile(ast.Module(body=[validator], type_ignores=[]), str(source), 'exec'), namespace)
+    with pytest.raises(ValueError):
+        namespace[name](None, SimpleNamespace(data=value))
+    config = _config()
+    config['IMAGE_STRETCH'][key] = value
+    image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
+    assert IndiAllskyMilkyWayStretch(config).apply(image, -27.0, 153.0, 1767225600.0) is image
+
+
+def test_circle_cache_is_bounded_when_geometry_changes():
+    config = _config()
+    enhancer = IndiAllskyMilkyWayStretch(config)
+    image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
+    for offset in (0, 10, 20):
+        config['VIRTUALSKY']['OFFSET_X'] = offset
+        enhancer.apply(image, -27.0, 153.0, 1767225600.0)
+        assert len(enhancer._image_circle_mask_cache) == 1

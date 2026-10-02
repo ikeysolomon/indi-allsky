@@ -7,7 +7,11 @@ import cv2
 import numpy
 
 from .lens_solver.projection import predictAltAz
+from .lens_solver.projection import precessCatalog
 from .lens_solver.projection import projectToPixels
+from .lens_solver.calibration import displacement
+from .lens_solver.calibration import pipelineSignature
+from .lens_solver.calibration import validateCalibration
 
 
 logger = logging.getLogger('indi_allsky')
@@ -62,6 +66,7 @@ class IndiAllskyMilkyWayStretch(object):
         """Apply the enhancement, never raising -- any failure returns
         ``image`` unchanged so a bad frame/config cannot break capture.
         """
+        self.last_elapsed_ms = 0.0
         settings = self.config.get('IMAGE_STRETCH', {})
         if not settings.get('MILKYWAY_ENABLE', False):
             return image
@@ -93,10 +98,33 @@ class IndiAllskyMilkyWayStretch(object):
 
     def _apply(self, image, settings, latitude, longitude, obstime_unix, binning):
         t_start = time.monotonic()
+        gamma = float(settings.get('MILKYWAY_GAMMA', 2.2))
+        band_width_deg = float(settings.get('MILKYWAY_BAND_WIDTH', 10.0))
+        feather = float(settings.get('MILKYWAY_FEATHER', 60.0))
+        if not (numpy.isfinite([gamma, band_width_deg, feather]).all()
+                and 1.0 <= gamma <= 4.0 and 1.0 <= band_width_deg <= 45.0
+                and 0.0 <= feather <= 500.0):
+            raise ValueError('invalid Milky Way enhancement settings')
+        if gamma == 1.0:
+            return image
         image_height, image_width = image.shape[:2]
         virtualsky = self.config.get('VIRTUALSKY', {})
-        diameter = float(virtualsky.get('IMAGE_CIRCLE_DIAMETER', 0)) / binning
-        if diameter <= 0.0:
+        output_scale = float(self.config.get('IMAGE_SCALE', 100)) / 100.0
+        border = self.config.get('IMAGE_BORDER', {})
+        top, right, bottom, left = (int(border.get(key, 0)) for key in ('TOP', 'RIGHT', 'BOTTOM', 'LEFT'))
+        output_width, output_height = image_width, image_height
+        if output_scale != 1.0:
+            output_width = int(image_width * output_scale)
+            output_height = int(image_height * output_scale)
+            output_width -= output_width % 2
+            output_height -= output_height % 2
+        if output_width <= 0 or output_height <= 0:
+            return image
+        scale_x, scale_y = output_width / image_width, output_height / image_height
+        output_width += left + right
+        output_height += top + bottom
+        solved_diameter = float(virtualsky.get('IMAGE_CIRCLE_DIAMETER', 0)) / binning
+        if solved_diameter <= 0.0:
             logger.debug('Milky Way enhancement skipped: no image circle diameter configured')
             return image
 
@@ -104,16 +132,47 @@ class IndiAllskyMilkyWayStretch(object):
             float(self.config.get('LENS_AZIMUTH', 0.0)),
             float(virtualsky.get('LATITUDE_OFFSET', 0.0)),
             float(virtualsky.get('LONGITUDE_OFFSET', 0.0)),
-            diameter,
+            solved_diameter,
             float(virtualsky.get('OFFSET_X', 0)) / binning,
             float(virtualsky.get('OFFSET_Y', 0)) / binning,
+            float(virtualsky.get('RADIAL_DISTORTION', 0.0)),
         )
         latitude += params[1]
         longitude += params[2]
 
+        catalog = _GALACTIC_PLANE_CATALOG
+        if virtualsky.get('PRECESSION', False):
+            catalog = precessCatalog(catalog, obstime_unix)
         alt, az = predictAltAz(
-            _GALACTIC_PLANE_CATALOG, latitude, longitude, obstime_unix)
-        x, y = projectToPixels(alt, az, params, image_width, image_height)
+            catalog, latitude, longitude, obstime_unix)
+        lens_altitude = float(self.config.get('LENS_ALTITUDE', 90.0))
+        pointing_azimuth = float(virtualsky.get('POINTING_AZIMUTH', 0.0))
+        x, y = projectToPixels(
+            alt, az, params, output_width, output_height,
+            lens_altitude=lens_altitude, pointing_azimuth=pointing_azimuth)
+        model = virtualsky.get('CALIBRATION')
+        if virtualsky.get('CALIBRATION_ENABLED', False) and model is not None:
+            geometry = [params[0], params[1], params[2], solved_diameter * binning,
+                        params[4] * binning, params[5] * binning,
+                        lens_altitude, pointing_azimuth, params[6],
+                        int(bool(virtualsky.get('PRECESSION', False)))]
+            if not validateCalibration(model):
+                raise ValueError('invalid lens calibration')
+            saved_geometry = model['geometry'] + ([0, 0] if model['version'] == 1 else [])
+            if saved_geometry != geometry:
+                raise ValueError('lens calibration geometry has changed')
+            if (model['pipeline'] != pipelineSignature(self.config)
+                    or model['image_size'] != [output_width, output_height]):
+                raise ValueError('lens calibration image pipeline has changed')
+            center = numpy.array([output_width / 2.0 + params[4], output_height / 2.0 - params[5]])
+            points = numpy.column_stack((x, y))
+            points += displacement((points - center) / (solved_diameter / 2.0), model) * (solved_diameter / 2.0)
+            x, y = points.T
+        x, y = (x - left) / scale_x, (y - top) / scale_y
+        center_x = (output_width / 2.0 + params[4] - left) / scale_x
+        center_y = (output_height / 2.0 - params[5] - top) / scale_y
+        radius_x, radius_y = solved_diameter / (2.0 * scale_x), solved_diameter / (2.0 * scale_y)
+        diameter = 2.0 * max(radius_x, radius_y)
 
         # Rasterize at a bounded resolution.  This makes the mask generation
         # cost predictable on high-resolution camera frames.
@@ -128,7 +187,6 @@ class IndiAllskyMilkyWayStretch(object):
         # no matter how much feather is applied. Measuring distance from
         # the centerline instead lets alpha taper continuously across the
         # entire band, so there is no hard edge anywhere.
-        band_width_deg = float(settings.get('MILKYWAY_BAND_WIDTH', 10.0))
         half_width_px = max(1.0, diameter * band_width_deg * numpy.pi / 360.0 * scale / 2.0)
         centerline_px = max(1, int(round(scale)))
         points = numpy.rint(numpy.column_stack((x * scale, y * scale))).astype(numpy.int32)
@@ -149,7 +207,7 @@ class IndiAllskyMilkyWayStretch(object):
         if len(segment) > 1:
             cv2.polylines(mask, [numpy.asarray(segment)], False, 255, centerline_px, cv2.LINE_8)
 
-        feather_px = float(settings.get('MILKYWAY_FEATHER', 60.0)) * scale
+        feather_px = feather * scale
         falloff_px = half_width_px + feather_px
         if falloff_px > 0.0:
             # Smoothstep of distance-from-centerline is a cheap, seamless
@@ -163,11 +221,10 @@ class IndiAllskyMilkyWayStretch(object):
         # falloff itself) can otherwise push it past the circle edge, and
         # this must not depend on some other pipeline stage (e.g. circular
         # cropping) to clean it up
-        circle_cx = (image_width / 2.0 + params[4]) * scale
-        circle_cy = (image_height / 2.0 - params[5]) * scale
-        circle_radius = (diameter / 2.0) * scale
+        circle_cx = center_x * scale
+        circle_cy = center_y * scale
         yy, xx = numpy.ogrid[:mask_height, :mask_width]
-        outside_circle = (xx - circle_cx) ** 2 + (yy - circle_cy) ** 2 > circle_radius ** 2
+        outside_circle = ((xx - circle_cx) / (radius_x * scale)) ** 2 + ((yy - circle_cy) / (radius_y * scale)) ** 2 > 1.0
         mask[outside_circle] = 0
 
         if scale < 1.0:
@@ -176,22 +233,16 @@ class IndiAllskyMilkyWayStretch(object):
         # Linear upscaling can interpolate non-zero alpha just outside the
         # low-resolution circle edge. Reapply the exact full-resolution
         # boundary so no enhancement reaches invalid camera pixels.
-        circle_key = (image_width, image_height, diameter, params[4], params[5])
+        circle_key = (image_width, image_height, center_x, center_y, radius_x, radius_y)
         circle_mask = self._image_circle_mask_cache.get(circle_key)
         if circle_mask is None:
-            circle_mask = numpy.zeros_like(mask)
-            cv2.circle(
-                circle_mask,
-                (int(round(image_width / 2.0 + params[4])), int(round(image_height / 2.0 - params[5]))),
-                int(round(diameter / 2.0)),
-                255,
-                -1,
-            )
+            yy, xx = numpy.ogrid[:image_height, :image_width]
+            circle_mask = (((xx - center_x) / radius_x) ** 2 + ((yy - center_y) / radius_y) ** 2 <= 1.0).astype(numpy.uint8) * 255
+            self._image_circle_mask_cache.clear()
             self._image_circle_mask_cache[circle_key] = circle_mask
         mask = cv2.bitwise_and(mask, circle_mask)
 
-        gamma = float(settings.get('MILKYWAY_GAMMA', 2.2))
-        if gamma <= 1.0 or not numpy.any(mask):
+        if not numpy.any(mask):
             logger.debug('Milky Way enhancement skipped: band not visible or gamma is a no-op')
             return image
 

@@ -807,25 +807,25 @@ def LOCATION_NAME_validator(form, field):
 
 
 def LOCATION_LATITUDE_validator(form, field):
-    if not isinstance(field.data, (int, float)):
-        raise ValidationError('Please enter valid number')
+    if field.data is not None and str(field.data).strip() != '':
+        try:
+            val = float(field.data)
+        except (ValueError, TypeError):
+            raise ValidationError('Please enter a valid number for latitude')
 
-    if field.data < -90:
-        raise ValidationError('Latitude must be greater than -90')
-
-    if field.data > 90:
-        raise ValidationError('Latitude must be less than 90')
+        if val < -90.0 or val > 90.0:
+            raise ValidationError('Latitude must be between -90 and 90')
 
 
 def LOCATION_LONGITUDE_validator(form, field):
-    if not isinstance(field.data, (int, float)):
-        raise ValidationError('Please enter valid number')
+    if field.data is not None and str(field.data).strip() != '':
+        try:
+            val = float(field.data)
+        except (ValueError, TypeError):
+            raise ValidationError('Please enter a valid number for longitude')
 
-    if field.data < -180:
-        raise ValidationError('Longitude must be greater than -180')
-
-    if field.data > 180:
-        raise ValidationError('Longitude must be less than 180')
+        if val < -180.0 or val > 180.0:
+            raise ValidationError('Longitude must be between -180 and 180')
 
 
 def LOCATION_ELEVATION_validator(form, field):
@@ -1256,17 +1256,17 @@ def IMAGE_STRETCH__MODE3_HIGHLIGHTS_validator(form, field):
 
 
 def IMAGE_STRETCH__MILKYWAY_GAMMA_validator(form, field):
-    if not isinstance(field.data, (int, float)) or field.data < 1.0 or field.data > 4.0:
+    if not isinstance(field.data, (int, float)) or not math.isfinite(field.data) or not 1.0 <= field.data <= 4.0:
         raise ValidationError('Value must be between 1.0 and 4.0')
 
 
 def IMAGE_STRETCH__MILKYWAY_BAND_WIDTH_validator(form, field):
-    if not isinstance(field.data, (int, float)) or field.data < 1.0 or field.data > 45.0:
+    if not isinstance(field.data, (int, float)) or not math.isfinite(field.data) or not 1.0 <= field.data <= 45.0:
         raise ValidationError('Value must be between 1 and 45 degrees')
 
 
 def IMAGE_STRETCH__MILKYWAY_FEATHER_validator(form, field):
-    if not isinstance(field.data, (int, float)) or field.data < 0.0 or field.data > 500.0:
+    if not isinstance(field.data, (int, float)) or not math.isfinite(field.data) or not 0.0 <= field.data <= 500.0:
         raise ValidationError('Value must be between 0 and 500 pixels')
 
 
@@ -2902,6 +2902,55 @@ def ALLSKYMAP__INTERVAL_validator(form, field):
             raise ValidationError('Please enter a valid number')
 
 
+def ALLSKYMAP__MAP_LATITUDE_validator(form, field):
+    if field.data is not None and str(field.data).strip() != '':
+        try:
+            val = float(field.data)
+        except (ValueError, TypeError):
+            raise ValidationError('Please enter a valid number for latitude')
+
+        if val < -90.0 or val > 90.0:
+            raise ValidationError('Latitude must be between -90 and 90')
+
+        loc_lat = getattr(form, 'LOCATION_LATITUDE', None)
+        if loc_lat and loc_lat.data is not None and str(loc_lat.data).strip() != '':
+            try:
+                actual_lat = float(loc_lat.data)
+                if actual_lat < -90.0 or actual_lat > 90.0:
+                    actual_lat = None
+            except (ValueError, TypeError):
+                actual_lat = None
+
+            if actual_lat is not None and abs(val - actual_lat) > 1.0:
+                raise ValidationError('Map latitude must be within 1 degree of your configured location latitude')
+
+
+def ALLSKYMAP__MAP_LONGITUDE_validator(form, field):
+    if field.data is not None and str(field.data).strip() != '':
+        try:
+            val = float(field.data)
+        except (ValueError, TypeError):
+            raise ValidationError('Please enter a valid number for longitude')
+
+        if val < -180.0 or val > 180.0:
+            raise ValidationError('Longitude must be between -180 and 180')
+
+        loc_lng = getattr(form, 'LOCATION_LONGITUDE', None)
+        if loc_lng and loc_lng.data is not None and str(loc_lng.data).strip() != '':
+            try:
+                actual_lng = float(loc_lng.data)
+                if actual_lng < -180.0 or actual_lng > 180.0:
+                    actual_lng = None
+            except (ValueError, TypeError):
+                actual_lng = None
+
+            if actual_lng is not None:
+                diff = abs(val - actual_lng) % 360.0
+                min_diff = min(diff, 360.0 - diff)
+                if min_diff > 1.0:
+                    raise ValidationError('Map longitude must be within 1 degree of your configured location longitude')
+
+
 def YOUTUBE__SECRETS_FILE_validator(form, field):
     if not field.data:
         return
@@ -3117,12 +3166,12 @@ def VIRTUALSKY__IMAGE_CIRCLE_DIAMETER_validator(form, field):
 
 
 def VIRTUALSKY__LATITUDE_OFFSET_validator(form, field):
-    if not isinstance(field.data, (int, float)):
+    if not isinstance(field.data, (int, float)) or not math.isfinite(field.data):
         raise ValidationError('Please enter a valid number')
 
 
 def VIRTUALSKY__LONGITUDE_OFFSET_validator(form, field):
-    if not isinstance(field.data, (int, float)):
+    if not isinstance(field.data, (int, float)) or not math.isfinite(field.data):
         raise ValidationError('Please enter a valid number')
 
 
@@ -5003,6 +5052,8 @@ class IndiAllskyConfigForm(FlaskForm):
     ALLSKYMAP__CAMERA_NAME           = StringField('Camera Name')
     ALLSKYMAP__CAMERA_OWNER          = StringField('Camera Owner')
     ALLSKYMAP__WEBSITE_URL           = StringField('Website URL')
+    ALLSKYMAP__MAP_LATITUDE          = StringField('Map Latitude', validators=[ALLSKYMAP__MAP_LATITUDE_validator])
+    ALLSKYMAP__MAP_LONGITUDE         = StringField('Map Longitude', validators=[ALLSKYMAP__MAP_LONGITUDE_validator])
     ALLSKYMAP__UPLOAD_IMAGE          = BooleanField('Upload Latest Image')
     ALLSKYMAP__INTERVAL              = IntegerField('Interval (Minutes)', validators=[ALLSKYMAP__INTERVAL_validator])
     YOUTUBE__ENABLE                  = BooleanField('Enable')
@@ -5069,6 +5120,7 @@ class IndiAllskyConfigForm(FlaskForm):
     TEST_CAMERA__ROTATING_STAR_FACTOR   = FloatField('Test Camera - Rotating Star Rotation Factor', validators=[DataRequired(), TEST_CAMERA__ROTATING_STAR_FACTOR_validator])
     TEST_CAMERA__BUBBLE_COUNT           = IntegerField('Test Camera - Bubble Count', validators=[DataRequired(), TEST_CAMERA__BUBBLE_COUNT_validator])
     VIRTUALSKY__MAGNITUDE               = FloatField('VirtualSky Limiting Magnitude', validators=[VIRTUALSKY__MAGNITUDE_validator], widget=NumberInput(step=0.25))
+    VIRTUALSKY__POINTING_AZIMUTH        = FloatField('Camera pointing direction', default=0.0, validators=[NumberRange(min=0.0, max=360.0)], widget=NumberInput(min=0, max=360, step=0.1))
     VIRTUALSKY__CONSTELLATIONS          = BooleanField('Show Constellations')
     VIRTUALSKY__CONSTELLATIONLABELS     = BooleanField('Constellation Labels')
     VIRTUALSKY__SHOWSTARS               = BooleanField('Show Stars')
@@ -5738,7 +5790,7 @@ class IndiAllskyConfigForm(FlaskForm):
                         result = False
 
                 except NotImplementedError:
-                    self.FOCUSER__CLASSNAME.errors.append('System not suppored by Adafruit Blinka module')
+                    self.FOCUSER__CLASSNAME.errors.append('System not supported by Adafruit Blinka module')
                     result = False
 
                 except ImportError:
@@ -5750,6 +5802,10 @@ class IndiAllskyConfigForm(FlaskForm):
                     self.FOCUSER__GPIO_PIN_2.errors.append('GPIO permissions need to be fixed')
                     self.FOCUSER__GPIO_PIN_3.errors.append('GPIO permissions need to be fixed')
                     self.FOCUSER__GPIO_PIN_4.errors.append('GPIO permissions need to be fixed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.FOCUSER__CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -5796,7 +5852,7 @@ class IndiAllskyConfigForm(FlaskForm):
                         result = False
 
                 except NotImplementedError:
-                    self.FOCUSER__CLASSNAME.errors.append('System not suppored by Adafruit Blinka module')
+                    self.DEW_HEATER__CLASSNAME.errors.append('System not supported by Adafruit Blinka module')
                     result = False
 
                 except ImportError:
@@ -5805,6 +5861,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except PermissionError:
                     self.DEW_HEATER__PIN_1.errors.append('GPIO permissions need to be fixed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.DEW_HEATER__CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -5900,6 +5960,9 @@ class IndiAllskyConfigForm(FlaskForm):
                 except PermissionError:
                     self.DEW_HEATER__PIN_1.errors.append('GPIO permissions need to be fixed')
                     result = False
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.DEW_HEATER__CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
+                    result = False
 
 
                 try:
@@ -5918,7 +5981,7 @@ class IndiAllskyConfigForm(FlaskForm):
                         self.DEW_HEATER__PIN_1.errors.append('PIN must be defined')
                         result = False
 
-                except AttributeError:
+                except (AttributeError, RuntimeError, ValueError, FileNotFoundError, OSError):
                     self.DEW_HEATER__CLASSNAME.errors.append('I2C not available for your system')
                     result = False
 
@@ -5956,7 +6019,7 @@ class IndiAllskyConfigForm(FlaskForm):
                         result = False
 
                 except NotImplementedError:
-                    self.FOCUSER__CLASSNAME.errors.append('System not suppored by Adafruit Blinka module')
+                    self.FAN__CLASSNAME.errors.append('System not supported by Adafruit Blinka module')
                     result = False
 
                 except ImportError:
@@ -5965,6 +6028,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except PermissionError:
                     self.FAN__PIN_1.errors.append('GPIO permissions need to be fixed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.FAN__CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -6061,6 +6128,9 @@ class IndiAllskyConfigForm(FlaskForm):
                 except PermissionError:
                     self.FAN__PIN_1.errors.append('GPIO permissions need to be fixed')
                     result = False
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.FAN__CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
+                    result = False
 
 
                 try:
@@ -6079,7 +6149,7 @@ class IndiAllskyConfigForm(FlaskForm):
                         self.FAN__PIN_1.errors.append('PIN must be defined')
                         result = False
 
-                except AttributeError:
+                except (AttributeError, RuntimeError, ValueError, FileNotFoundError, OSError):
                     self.FAN__CLASSNAME.errors.append('I2C not available for your system')
                     result = False
 
@@ -6116,7 +6186,7 @@ class IndiAllskyConfigForm(FlaskForm):
                         result = False
 
                 except NotImplementedError:
-                    self.FOCUSER__CLASSNAME.errors.append('System not suppored by Adafruit Blinka module')
+                    self.GENERIC_GPIO__A_CLASSNAME.errors.append('System not supported by Adafruit Blinka module')
                     result = False
 
                 except ImportError:
@@ -6125,6 +6195,14 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except PermissionError:
                     self.GENERIC_GPIO__A_PIN_1.errors.append('GPIO permissions need to be fixed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.GENERIC_GPIO__A_CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
+                    result = False
+
+                except AttributeError as e:
+                    self.GENERIC_GPIO__A_CLASSNAME.errors.append('AttributeError: {0:s}'.format(str(e)))
                     result = False
 
             elif self.GENERIC_GPIO__A_CLASSNAME.data == 'gpio_dockerpi_4channel_relay':
@@ -6136,6 +6214,9 @@ class IndiAllskyConfigForm(FlaskForm):
                     result = False
                 except PermissionError:
                     self.GENERIC_GPIO__A_PIN_1.errors.append('GPIO permissions need to be fixed')
+                    result = False
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.GENERIC_GPIO__A_CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
 
@@ -6155,7 +6236,7 @@ class IndiAllskyConfigForm(FlaskForm):
                         self.GENERIC_GPIO__A_PIN_1.errors.append('PIN must be defined')
                         result = False
 
-                except AttributeError:
+                except (AttributeError, RuntimeError, ValueError, FileNotFoundError, OSError):
                     self.GENERIC_GPIO__A_CLASSNAME.errors.append('I2C not available for your system')
                     result = False
 
@@ -6255,7 +6336,7 @@ class IndiAllskyConfigForm(FlaskForm):
                         pass
 
                 except NotImplementedError:
-                    self.TEMP_SENSOR__A_CLASSNAME.errors.append('System not suppored by Adafruit Blinka module')
+                    self.TEMP_SENSOR__A_CLASSNAME.errors.append('System not supported by Adafruit Blinka module')
                     result = False
 
                 except ImportError:
@@ -6264,6 +6345,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except PermissionError:
                     self.TEMP_SENSOR__A_PIN_1.errors.append('GPIO permissions need to be fixed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.TEMP_SENSOR__A_CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -6296,6 +6381,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except ImportError:
                     self.TEMP_SENSOR__A_CLASSNAME.errors.append('GPIO python modules not installed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.TEMP_SENSOR__A_CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -6347,7 +6436,7 @@ class IndiAllskyConfigForm(FlaskForm):
                         pass
 
                 except NotImplementedError:
-                    self.TEMP_SENSOR__B_CLASSNAME.errors.append('System not suppored by Adafruit Blinka module')
+                    self.TEMP_SENSOR__B_CLASSNAME.errors.append('System not supported by Adafruit Blinka module')
                     result = False
 
                 except ImportError:
@@ -6356,6 +6445,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except PermissionError:
                     self.TEMP_SENSOR__B_PIN_1.errors.append('GPIO permissions need to be fixed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.TEMP_SENSOR__B_CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -6388,6 +6481,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except ImportError:
                     self.TEMP_SENSOR__B_CLASSNAME.errors.append('GPIO python modules not installed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.TEMP_SENSOR__B_CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -6440,7 +6537,7 @@ class IndiAllskyConfigForm(FlaskForm):
                         pass
 
                 except NotImplementedError:
-                    self.TEMP_SENSOR__C_CLASSNAME.errors.append('System not suppored by Adafruit Blinka module')
+                    self.TEMP_SENSOR__C_CLASSNAME.errors.append('System not supported by Adafruit Blinka module')
                     result = False
 
                 except ImportError:
@@ -6449,6 +6546,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except PermissionError:
                     self.TEMP_SENSOR__C_PIN_1.errors.append('GPIO permissions need to be fixed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.TEMP_SENSOR__C_CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -6481,6 +6582,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except ImportError:
                     self.TEMP_SENSOR__C_CLASSNAME.errors.append('GPIO python modules not installed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.TEMP_SENSOR__C_CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -6533,7 +6638,7 @@ class IndiAllskyConfigForm(FlaskForm):
                         pass
 
                 except NotImplementedError:
-                    self.TEMP_SENSOR__D_CLASSNAME.errors.append('System not suppored by Adafruit Blinka module')
+                    self.TEMP_SENSOR__D_CLASSNAME.errors.append('System not supported by Adafruit Blinka module')
                     result = False
 
                 except ImportError:
@@ -6542,6 +6647,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except PermissionError:
                     self.TEMP_SENSOR__D_PIN_1.errors.append('GPIO permissions need to be fixed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.TEMP_SENSOR__D_CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -6574,6 +6683,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except ImportError:
                     self.TEMP_SENSOR__D_CLASSNAME.errors.append('GPIO python modules not installed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.TEMP_SENSOR__D_CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -6626,7 +6739,7 @@ class IndiAllskyConfigForm(FlaskForm):
                         pass
 
                 except NotImplementedError:
-                    self.TEMP_SENSOR__E_CLASSNAME.errors.append('System not suppored by Adafruit Blinka module')
+                    self.TEMP_SENSOR__E_CLASSNAME.errors.append('System not supported by Adafruit Blinka module')
                     result = False
 
                 except ImportError:
@@ -6635,6 +6748,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except PermissionError:
                     self.TEMP_SENSOR__E_PIN_1.errors.append('GPIO permissions need to be fixed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.TEMP_SENSOR__E_CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -6667,6 +6784,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except ImportError:
                     self.TEMP_SENSOR__E_CLASSNAME.errors.append('GPIO python modules not installed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.TEMP_SENSOR__E_CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -6719,7 +6840,7 @@ class IndiAllskyConfigForm(FlaskForm):
                         pass
 
                 except NotImplementedError:
-                    self.TEMP_SENSOR__F_CLASSNAME.errors.append('System not suppored by Adafruit Blinka module')
+                    self.TEMP_SENSOR__F_CLASSNAME.errors.append('System not supported by Adafruit Blinka module')
                     result = False
 
                 except ImportError:
@@ -6728,6 +6849,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except PermissionError:
                     self.TEMP_SENSOR__F_PIN_1.errors.append('GPIO permissions need to be fixed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.TEMP_SENSOR__F_CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -6760,6 +6885,10 @@ class IndiAllskyConfigForm(FlaskForm):
 
                 except ImportError:
                     self.TEMP_SENSOR__F_CLASSNAME.errors.append('GPIO python modules not installed')
+                    result = False
+
+                except (FileNotFoundError, OSError, RuntimeError) as e:
+                    self.TEMP_SENSOR__F_CLASSNAME.errors.append('GPIO hardware error: {0:s}'.format(str(e)))
                     result = False
 
                 except AttributeError as e:
@@ -7437,7 +7566,9 @@ class IndiAllskyFitsImageViewer(FlaskForm):
     def __init__(self, *args, **kwargs):
         super(IndiAllskyFitsImageViewer, self).__init__(*args, **kwargs)
 
+        self.s3_prefix = kwargs.get('s3_prefix', '')
         self.camera_id = kwargs.get('camera_id')
+        self.local = kwargs.get('local', True)
 
 
     def getYears(self):
@@ -7445,6 +7576,17 @@ class IndiAllskyFitsImageViewer(FlaskForm):
             self.model.createDate_year,
         )\
             .filter(self.model.camera_id == self.camera_id)
+
+
+        if not self.local:
+            # Do not serve local assets
+            years_query = years_query\
+                .filter(
+                    or_(
+                        self.model.remote_url != sa_null(),
+                        self.model.s3_key != sa_null(),
+                    )
+                )
 
 
         years_query = years_query\
@@ -7473,7 +7615,18 @@ class IndiAllskyFitsImageViewer(FlaskForm):
                     self.model.camera_id == self.camera_id,
                     self.model.createDate_year == year,
                 )
-        )
+            )
+
+
+        if not self.local:
+            # Do not serve local assets
+            months_query = months_query\
+                .filter(
+                    or_(
+                        self.model.remote_url != sa_null(),
+                        self.model.s3_key != sa_null(),
+                    )
+                )
 
 
         months_query = months_query\
@@ -7504,7 +7657,18 @@ class IndiAllskyFitsImageViewer(FlaskForm):
                     self.model.createDate_year == year,
                     self.model.createDate_month == month,
                 )
-        )
+            )
+
+
+        if not self.local:
+            # Do not serve local assets
+            days_query = days_query\
+                .filter(
+                    or_(
+                        self.model.remote_url != sa_null(),
+                        self.model.s3_key != sa_null(),
+                    )
+                )
 
 
         days_query = days_query\
@@ -7535,7 +7699,18 @@ class IndiAllskyFitsImageViewer(FlaskForm):
                     self.model.createDate_month == month,
                     self.model.createDate_day == day,
                 )
-        )
+            )
+
+
+        if not self.local:
+            # Do not serve local assets
+            hours_query = hours_query\
+                .filter(
+                    or_(
+                        self.model.remote_url != sa_null(),
+                        self.model.s3_key != sa_null(),
+                    )
+                )
 
 
         hours_query = hours_query\
@@ -7564,7 +7739,18 @@ class IndiAllskyFitsImageViewer(FlaskForm):
                     self.model.createDate_day == day,
                     self.model.createDate_hour == hour,
                 )
-        )
+            )
+
+
+        if not self.local:
+            # Do not serve local assets
+            images_query = images_query\
+                .filter(
+                    or_(
+                        self.model.remote_url != sa_null(),
+                        self.model.s3_key != sa_null(),
+                    )
+                )
 
 
         images_query = images_query\
@@ -7590,7 +7776,11 @@ class IndiAllskyFitsImageViewer(FlaskForm):
                     role_names,
                 )
 
-            fits_url = img.getUrl(local=True)
+            try:
+                fits_url = img.getUrl(s3_prefix=self.s3_prefix, local=self.local)
+            except ValueError as e:
+                app.logger.error('Error determining relative file name: %s', str(e))
+                continue
 
             image_dict = dict()
             image_dict['id'] = img.id
@@ -7616,7 +7806,18 @@ class IndiAllskyFitsImageViewerPreload(IndiAllskyFitsImageViewer):
         last_fits_image = db.session.query(
             self.model,
         )\
-            .filter(self.model.camera_id == self.camera_id)\
+            .filter(self.model.camera_id == self.camera_id)
+
+        if not self.local:
+            last_fits_image = last_fits_image\
+                .filter(
+                    or_(
+                        self.model.remote_url != sa_null(),
+                        self.model.s3_key != sa_null(),
+                    )
+                )
+
+        last_fits_image = last_fits_image\
             .order_by(self.model.createDate.desc())\
             .first()
 
@@ -10481,19 +10682,22 @@ class IndiAllskyImageCircleHelperForm(FlaskForm):
 
 
 class IndiAllskyVirtualSkyHelperForm(FlaskForm):
-    AZIMUTH_ANGLE           = FloatField('Azimuth Angle', widget=NumberInput(min=0.0, max=359.9, step=0.1))
-    LATITUDE_OFFSET         = FloatField('Latitude Offset', widget=NumberInput(step=0.25))
-    LONGITUDE_OFFSET        = FloatField('Longitude Offset', widget=NumberInput(step=0.25))
-    IMAGE_CIRCLE_DIAMETER   = IntegerField('Diameter', widget=NumberInput(step=5))
+    # Match Config labels; Azimuth is image roll, not the camera's pointing direction.
+    RADIAL_DISTORTION       = FloatField('Lens curvature', default=0.0, validators=[NumberRange(min=-0.5, max=1.0)], widget=NumberInput(min=-0.5, max=1, step=0.001))
+    POINTING_AZIMUTH        = FloatField('Camera pointing direction', default=0.0, validators=[NumberRange(min=0.0, max=360.0)], widget=NumberInput(min=0, max=360, step=0.1))
+    AZIMUTH_ANGLE           = FloatField('Azimuth', widget=NumberInput(min=0.0, max=359.9, step=0.1))
+    LATITUDE_OFFSET         = FloatField('VirtualSky Latitude Offset', widget=NumberInput(step=0.25))
+    LONGITUDE_OFFSET        = FloatField('VirtualSky Longitude Offset', widget=NumberInput(step=0.25))
+    IMAGE_CIRCLE_DIAMETER   = IntegerField('Image Circle', widget=NumberInput(step=5))
     OFFSET_X                = IntegerField('X Offset', default=0, widget=NumberInput(step=10))
     OFFSET_Y                = IntegerField('Y Offset', default=0, widget=NumberInput(step=10))
-    MAGNITUDE               = FloatField('Magnitude', widget=NumberInput(step=0.25))
-    CONSTELLATIONS          = BooleanField('Constellations')
-    CONSTELLATIONLABELS     = BooleanField('Label')
-    SHOWSTARS               = BooleanField('Stars')
-    SHOWSTARLABELS          = BooleanField('Label')
-    SHOWPLANETS             = BooleanField('Planets')
-    SHOWPLANETLABELS        = BooleanField('Label')
+    MAGNITUDE               = FloatField('VirtualSky Limiting Magnitude', widget=NumberInput(step=0.25))
+    CONSTELLATIONS          = BooleanField('Show Constellations')
+    CONSTELLATIONLABELS     = BooleanField('Constellation Labels')
+    SHOWSTARS               = BooleanField('Show Stars')
+    SHOWSTARLABELS          = BooleanField('Star Labels')
+    SHOWPLANETS             = BooleanField('Show Planets')
+    SHOWPLANETLABELS        = BooleanField('Planet Labels')
     #FLIP_NS                 = BooleanField('Flip North/South')
     #FLIP_EW                 = BooleanField('Flip East/West')
 

@@ -108,10 +108,6 @@ class IndiAllSkyConfigBase(object):
         "IMAGE_DENOISE_DAY"          : "",
         "IMAGE_DENOISE_STRENGTH"     : 3,
         "IMAGE_DENOISE_STRENGTH_DAY" : 3,
-        # Denoise tuning knobs (advanced): scale & exponent reshape the
-        # mapping from user-facing `strength` (1-5) to algorithm parameters.
-        # These defaults are autotuned for typical Pi all-sky images but can
-        # be adjusted for your camera. These are baked-in runtime defaults used by `indi_allsky.denoise`.
         "MEDIAN_SCALE_FACTOR" : 2.4,
         "MEDIAN_SCALE_EXP"    : 2.0,
         "GAUSSIAN_SCALE_FACTOR" : 0.2,
@@ -605,6 +601,8 @@ class IndiAllSkyConfigBase(object):
             "CAMERA_NAME"            : "",
             "CAMERA_OWNER"           : "",
             "WEBSITE_URL"            : "",
+            "MAP_LATITUDE"           : "",
+            "MAP_LONGITUDE"          : "",
             "UPLOAD_IMAGE"           : True,
             "INTERVAL"               : 10,
         },
@@ -687,6 +685,11 @@ class IndiAllSkyConfigBase(object):
             "BUBBLE_COUNT"           : 1000,
         },
         "VIRTUALSKY" : {
+            "CALIBRATION_ENABLED"    : False,
+            "CALIBRATION"            : None,
+            "POINTING_AZIMUTH"       : 0.0,
+            "PRECESSION"             : False,
+            "RADIAL_DISTORTION"      : 0.0,
             "MAGNITUDE"              : 6.0,
             "CONSTELLATIONS"         : True,
             "CONSTELLATIONLABELS"    : False,
@@ -1276,7 +1279,10 @@ class IndiAllSkyConfig(IndiAllSkyConfigBase):
 
 
                     try:
-                        if isinstance(self.config[key][key_l2], int):
+                        if (key, key_l2) == ('VIRTUALSKY', 'CALIBRATION'):
+                            # An absent correction is null; a learned model is an object.
+                            valid_types = (dict, type(None))
+                        elif isinstance(self.config[key][key_l2], int):
                             # jq will convert floats that end in .0 to ints
                             valid_types = (int, float)
                         else:
@@ -1544,9 +1550,9 @@ class IndiAllSkyConfigUtil(IndiAllSkyConfig):
         try:
             self._getConfigEntry()
 
-            logger.warning('Configuration already initialized')
+            logger.info('Configuration already initialized')
 
-            sys.exit(1)
+            sys.exit(0)
         except NoResultFound:
             pass
 
@@ -1608,7 +1614,6 @@ class IndiAllSkyConfigUtil(IndiAllSkyConfig):
         if not isinstance(c.get('INDI_SERVER'), str) or not isinstance(c.get('CCD_CONFIG'), dict) or not isinstance(c.get('INDI_CONFIG_DEFAULTS'), dict):
             logger.error('Not a valid indi-allsky config')
             sys.exit(1)
-
 
         self.config.update(c)
 

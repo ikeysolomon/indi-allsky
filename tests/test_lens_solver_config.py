@@ -1,3 +1,5 @@
+import pytest
+
 from indi_allsky.lens_solver import applySolvedValuesToConfig
 from indi_allsky.lens_solver import captureLensGeometrySnapshot
 from indi_allsky.lens_solver import invalidateLensSolveIfGeometryChanged
@@ -186,3 +188,37 @@ def test_invalidate_ignores_unrelated_key_changes():
 
     assert changed is False
     assert config['LENS_SOLVED'] is True
+
+
+def test_solve_preserves_optional_pointing_and_marks_geometry_solved():
+    config = _base_config()
+    applySolvedValuesToConfig(config, dict(VALUES, LENS_ALTITUDE=54.0, POINTING_AZIMUTH=123.0))
+    assert config['LENS_ALTITUDE'] == 54.0
+    assert config['VIRTUALSKY']['POINTING_AZIMUTH'] == 123.0
+    assert config['LENS_SOLVED'] is True
+
+
+@pytest.mark.parametrize('section,key,value', [
+    (None, 'LENS_ALTITUDE', 54.0),
+    (None, 'IMAGE_SCALE', 50),
+    (None, 'IMAGE_BORDER', {'TOP': 10}),
+    ('VIRTUALSKY', 'POINTING_AZIMUTH', 123.0),
+    ('VIRTUALSKY', 'PRECESSION', True),
+    ('VIRTUALSKY', 'RADIAL_DISTORTION', 0.2),
+    ('VIRTUALSKY', 'CALIBRATION_ENABLED', True),
+    ('VIRTUALSKY', 'CALIBRATION', {'coefficients': [[0.01, 0.0]]}),
+])
+def test_invalidate_extended_geometry(section, key, value):
+    config = _solved_config()
+    snapshot = captureLensGeometrySnapshot(config)
+    target = config if section is None else config[section]
+    target[key] = value
+    assert invalidateLensSolveIfGeometryChanged(config, snapshot) is True
+
+
+def test_snapshot_is_independent_of_mutable_crop_values():
+    config = _solved_config()
+    config['IMAGE_CROP_ROI'] = [0, 0, 1920, 1080]
+    snapshot = captureLensGeometrySnapshot(config)
+    config['IMAGE_CROP_ROI'][0] = 100
+    assert invalidateLensSolveIfGeometryChanged(config, snapshot) is True

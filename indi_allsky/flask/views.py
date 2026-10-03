@@ -29,11 +29,6 @@ from .. import constants
 from .. import asi676mc
 from .. import asi676mc_calibration
 from ..processing import ImageProcessor
-from ..lens_solver import IndiAllSkyLensSolver
-from ..lens_solver import parseSolverRequestValues
-from ..lens_solver import applySolvedValuesToConfig
-from ..lens_solver import captureLensGeometrySnapshot
-from ..lens_solver import invalidateLensSolveIfGeometryChanged
 from ..panorama import panoramaSourceCircleClipped
 from ..panorama import validatePanoramaMiniTimelapseRequest
 
@@ -3556,6 +3551,8 @@ class AjaxConfigView(BaseView):
 
         if not self.indi_allsky_config:
             return jsonify({}), 400
+
+        from ..lens_solver import captureLensGeometrySnapshot, invalidateLensSolveIfGeometryChanged
 
         # a stale solve is worse than no solve -- compare against this once
         # the form's new values have all been applied, right before saving
@@ -8114,6 +8111,8 @@ class AjaxLensSolverView(BaseView):
 
 
     def solve(self):
+        from ..lens_solver import parseSolverRequestValues
+
         values, error = parseSolverRequestValues(request.json)
         if error:
             return jsonify({'success': False, 'message': error}), 400
@@ -8165,6 +8164,8 @@ class AjaxLensSolverView(BaseView):
         # identical effective-time computation to VirtualSkyView.get_context
         obstime_unix = timestamp - self.camera_time_offset
 
+        from ..lens_solver import IndiAllSkyLensSolver
+
         solver = IndiAllSkyLensSolver(self.indi_allsky_config)
 
         if not self._solve_lock.acquire(blocking=False):
@@ -8202,6 +8203,8 @@ class AjaxLensSolverView(BaseView):
         if not app.config['LOGIN_DISABLED']:
             if not current_user.is_admin:
                 return jsonify({'success': False, 'message': 'You do not have permission to make configuration changes'}), 403
+
+        from ..lens_solver import parseSolverRequestValues, applySolvedValuesToConfig
 
         values, error = parseSolverRequestValues(request.json, for_save=True)
         if error:

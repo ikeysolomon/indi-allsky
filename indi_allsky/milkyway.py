@@ -6,13 +6,6 @@ import time
 import cv2
 import numpy
 
-from .lens_solver.projection import predictAltAz
-from .lens_solver.projection import precessCatalog
-from .lens_solver.projection import projectToPixels
-from .lens_solver.calibration import displacement
-from .lens_solver.calibration import pipelineSignature
-from .lens_solver.calibration import validateCalibration
-
 
 logger = logging.getLogger('indi_allsky')
 
@@ -140,6 +133,8 @@ class IndiAllskyMilkyWayStretch(object):
         latitude += params[1]
         longitude += params[2]
 
+        from .lens_solver.projection import predictAltAz, precessCatalog, projectToPixels
+
         catalog = _GALACTIC_PLANE_CATALOG
         if virtualsky.get('PRECESSION', False):
             catalog = precessCatalog(catalog, obstime_unix)
@@ -152,6 +147,8 @@ class IndiAllskyMilkyWayStretch(object):
             lens_altitude=lens_altitude, pointing_azimuth=pointing_azimuth)
         model = virtualsky.get('CALIBRATION')
         if virtualsky.get('CALIBRATION_ENABLED', False) and model is not None:
+            from .lens_solver.calibration import displacement, pipelineSignature, validateCalibration
+
             geometry = [params[0], params[1], params[2], solved_diameter * binning,
                         params[4] * binning, params[5] * binning,
                         lens_altitude, pointing_azimuth, params[6],

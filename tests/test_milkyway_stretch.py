@@ -1,5 +1,7 @@
 import ast
 import math
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +16,68 @@ from indi_allsky.lens_solver.calibration import displacement, pipelineSignature,
 from indi_allsky.milkyway import IndiAllskyMilkyWayStretch
 from indi_allsky.milkyway import _GALACTIC_PLANE_CATALOG
 from indi_allsky.milkyway import base_stretch_allowed
+
+
+def test_milkyway_import_and_skipped_frames_do_not_load_lens_dependencies():
+    script = '''
+import sys
+import numpy
+from indi_allsky.milkyway import IndiAllskyMilkyWayStretch, base_stretch_allowed
+
+def assert_dependencies_unloaded():
+    assert not any(name == 'astropy' or name.startswith('astropy.')
+                   or name == 'scipy' or name.startswith('scipy.')
+                   or name.startswith('indi_allsky.lens_solver') for name in sys.modules)
+
+assert_dependencies_unloaded()
+assert base_stretch_allowed({}, True, False)
+image = numpy.full((32, 32, 3), 40, dtype=numpy.uint8)
+for enabled, solved, is_night, moonmode, gamma, diameter in (
+    (False, True, True, False, 2.2, 30),
+    (True, False, True, False, 2.2, 30),
+    (True, True, False, False, 2.2, 30),
+    (True, True, True, True, 2.2, 30),
+    (True, True, True, False, 1.0, 30),
+    (True, True, True, False, 2.2, 0),
+):
+    config = {'LENS_SOLVED': solved,
+              'IMAGE_STRETCH': {'MILKYWAY_ENABLE': enabled, 'MILKYWAY_GAMMA': gamma},
+              'VIRTUALSKY': {'IMAGE_CIRCLE_DIAMETER': diameter}}
+    enhancer = IndiAllskyMilkyWayStretch(config)
+    assert enhancer.apply(image, -27.0, 153.0, 1767225600.0,
+                          is_night=is_night, moonmode=moonmode) is image
+    assert_dependencies_unloaded()
+'''
+    result = subprocess.run(
+        [sys.executable, '-c', script], cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_views_do_not_import_lens_solver_at_module_scope():
+    source = Path(__file__).resolve().parents[1] / 'indi_allsky' / 'flask' / 'views.py'
+    tree = ast.parse(source.read_text(encoding='utf-8'))
+    assert not any(isinstance(node, ast.ImportFrom)
+                   and (node.module or '').startswith('lens_solver') for node in tree.body)
+
+
+def test_missing_lens_dependencies_leave_image_unchanged(monkeypatch, caplog):
+    import builtins
+
+    original_import = builtins.__import__
+
+    def import_without_lens_dependencies(name, *args, **kwargs):
+        if name.startswith('lens_solver'):
+            raise ImportError('lens dependencies unavailable')
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, '__import__', import_without_lens_dependencies)
+    image = numpy.full((32, 32, 3), 40, dtype=numpy.uint8)
+    enhancer = IndiAllskyMilkyWayStretch(_config())
+    assert enhancer.apply(image, -27.0, 153.0, 1767225600.0) is image
+    assert enhancer.last_elapsed_ms == 0.0
+    assert 'lens dependencies unavailable' in caplog.text
 
 
 def test_galactic_plane_catalog_matches_known_galactic_center():

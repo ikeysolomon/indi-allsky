@@ -640,9 +640,7 @@ const field_names = [
     'TEMP_SENSOR__F_USER_VAR_SLOT',
     'TEMP_SENSOR__F_I2C_ADDRESS',
     'TEMP_SENSOR__F_TITLE_TEMPLATE',
-    'TEMP_SENSOR__CLOUDINESS_INDEX_ENABLE',
     'TEMP_SENSOR__CLOUDINESS_INDEX_SENSOR',
-    'TEMP_SENSOR__CLOUDINESS_INDEX_USE_GROUND_SENSOR',
     'TEMP_SENSOR__CLOUDINESS_INDEX_GROUND_SENSOR',
     'TEMP_SENSOR__CLOUDINESS_INDEX_TEMP_UNIT',
     'TEMP_SENSOR__CLOUDINESS_INDEX_CLEAR_TEMP',
@@ -852,6 +850,8 @@ const checkbox_field_names = [
     'VIRTUALSKY__SHOWPLANETLABELS',
     'TEMP_SENSOR__DHT_USE_PULSEIO',
     'TEMP_SENSOR__FC37_ACTIVE_LOW',
+    'TEMP_SENSOR__CLOUDINESS_INDEX_ENABLE',
+    'TEMP_SENSOR__CLOUDINESS_INDEX_USE_GROUND_SENSOR',
     'TEMP_SENSOR__SHT3X_HEATER_NIGHT',
     'TEMP_SENSOR__SHT3X_HEATER_DAY',
     'TEMP_SENSOR__HTU31D_HEATER_NIGHT',
@@ -934,6 +934,34 @@ function updateSensorI2cAddressState(sensorSlot) {
     });
     updateSensorI2cAddressState(sensorSlot);
 });
+
+function updateCloudinessIndexVisibility() {
+    const panel = $('#cloudiness-index-panel');
+    const sensorClassnames = panel.data('sensor-classnames');
+    const hasCloudSensor = ['A', 'B', 'C', 'D', 'E', 'F'].some(sensorSlot =>
+        sensorClassnames.includes($('#TEMP_SENSOR__' + sensorSlot + '_CLASSNAME').val())
+    );
+    panel.toggle(hasCloudSensor);
+    if (!hasCloudSensor) {
+        $('#TEMP_SENSOR__CLOUDINESS_INDEX_ENABLE').prop('checked', false);
+    }
+    $('#cloudiness-index-settings').toggle($('#TEMP_SENSOR__CLOUDINESS_INDEX_ENABLE').prop('checked'));
+}
+
+$('#TEMP_SENSOR__CLOUDINESS_INDEX_ENABLE').on('change', updateCloudinessIndexVisibility);
+['A', 'B', 'C', 'D', 'E', 'F'].forEach(sensorSlot => {
+    $('#TEMP_SENSOR__' + sensorSlot + '_CLASSNAME').on('change', updateCloudinessIndexVisibility);
+});
+updateCloudinessIndexVisibility();
+
+function updateCloudinessIndexTuningVisibility() {
+    const enabled = $('#cloudiness-index-tuning-toggle').prop('checked');
+    $('#cloudiness-index-tuning').toggle(enabled);
+    $('#cloudiness-index-tuning-toggle').attr('aria-expanded', enabled ? 'true' : 'false');
+}
+
+$('#cloudiness-index-tuning-toggle').on('change', updateCloudinessIndexTuningVisibility);
+updateCloudinessIndexTuningVisibility();
 
 
 

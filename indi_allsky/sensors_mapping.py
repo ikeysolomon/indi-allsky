@@ -61,11 +61,17 @@ def get_fresh_sensor_value(values, read_times, index, now=None, max_age=60.0):
     if now is None:
         now = time.monotonic()
 
-    read_time = read_times[index]
-    if not math.isfinite(read_time) or read_time <= 0.0 or not 0.0 <= now - read_time <= max_age:
+    try:
+        read_time = read_times[index]
+        value = values[index]
+        if not math.isfinite(read_time) or read_time <= 0.0 or not 0.0 <= now - read_time <= max_age:
+            return None
+        if not math.isfinite(value):
+            return None
+    except (IndexError, TypeError, OverflowError):
         return None
 
-    return values[index]
+    return value
 
 
 def _display_temperature_to_celsius(value: float, temp_display: str) -> float:
@@ -209,6 +215,8 @@ def calculate_cloudiness_index(config: Dict[str, Any], get_sensor_value) -> Any:
     clear_delta = clear_ground_temp - clear_sky_temp
     cloudy_delta = cloudy_ground_temp - cloudy_sky_temp
     span = clear_delta - cloudy_delta
+    # Require a meaningful difference (> 2 C) between clear and cloudy calibration deltas
+    # so small temperature changes do not cause large cloudiness-index fluctuations.
     if not math.isfinite(span) or span <= 2.0 or math.isclose(span, 2.0, rel_tol=0.0, abs_tol=1e-12):
         logger.error('Calculated delta between cloudy and clear references is insufficient; '
                      'the ground-to-sky temperature difference under clear skies must be more than '

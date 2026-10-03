@@ -54,6 +54,24 @@ TYPE_DEVICE_CLASS_MAP = {
 CLOUD_SKY_TEMP_LABEL = 'Sky Temperature'
 
 
+def get_cloudiness_ground_sensor_offsets(classname):
+    from .devices import sensors as indi_allsky_sensors
+
+    if not isinstance(classname, str) or not classname.startswith(('blinka_', 'cpads_', 'kernel_')):
+        return ()
+
+    try:
+        metadata = getattr(indi_allsky_sensors, classname).METADATA
+    except AttributeError:
+        return ()
+
+    return tuple(
+        offset for offset, (sensor_type, label) in enumerate(zip(
+            metadata.get('types', ()), metadata.get('labels', ())))
+        if sensor_type == constants.SENSOR_TEMPERATURE and label == constants.CLOUD_AMBIENT_TEMP_LABEL
+    )
+
+
 def get_fresh_sensor_value(values, read_times, index, now=None, max_age=60.0):
     if read_times is None:
         return None
@@ -82,6 +100,25 @@ def _display_temperature_to_celsius(value: float, temp_display: str) -> float:
         return value - 273.15
 
     return value
+
+
+def validate_cloudiness_calibration(clear_sky_temp, cloudy_sky_temp,
+                                   clear_ground_temp, cloudy_ground_temp, temp_unit='c'):
+    """Require a finite calibration separation greater than 2 C in any reference unit."""
+    try:
+        references = tuple(_display_temperature_to_celsius(float(value), temp_unit)
+                           for value in (clear_sky_temp, cloudy_sky_temp,
+                                         clear_ground_temp, cloudy_ground_temp))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+    if not all(math.isfinite(value) for value in references):
+        return False
+
+    clear_sky_c, cloudy_sky_c, clear_ground_c, cloudy_ground_c = references
+    span = (clear_ground_c - clear_sky_c) - (cloudy_ground_c - cloudy_sky_c)
+    return (math.isfinite(span) and span > 2.0
+            and not math.isclose(span, 2.0, rel_tol=0.0, abs_tol=1e-12))
 
 
 def calculate_cloudiness_index(config: Dict[str, Any], get_sensor_value) -> Any:
@@ -188,6 +225,24 @@ def calculate_cloudiness_index(config: Dict[str, Any], get_sensor_value) -> Any:
         logger.error('Select a ground temperature sensor for this cloudiness index')
         return None
 
+    if ground_index == candidate['sky_index']:
+        logger.error('The cloudiness ambient reference cannot be the selected sky-temperature channel')
+        return None
+
+    if use_ground_sensor or candidate['ambient_index'] is None:
+        ground_indices = set()
+        for letter in ('A', 'B', 'C', 'D', 'E', 'F'):
+            base_index = constants.SENSOR_INDEX_MAP.get(str(temp_sensor_cfg.get('{0:s}_USER_VAR_SLOT'.format(letter))))
+            if base_index is None:
+                continue
+            for offset in get_cloudiness_ground_sensor_offsets(temp_sensor_cfg.get('{0:s}_CLASSNAME'.format(letter))):
+                ground_indices.add(base_index + offset)
+
+        if ground_index not in ground_indices:
+            logger.error('Cloudiness requires a configured hardware ambient temperature sensor; '
+                         'cached/API and sky-temperature readings are not supported')
+            return None
+
     ground_temp = get_sensor_value(ground_index)
     if ground_temp is None:
         return None
@@ -215,9 +270,8 @@ def calculate_cloudiness_index(config: Dict[str, Any], get_sensor_value) -> Any:
     clear_delta = clear_ground_temp - clear_sky_temp
     cloudy_delta = cloudy_ground_temp - cloudy_sky_temp
     span = clear_delta - cloudy_delta
-    # Require a meaningful difference (> 2 C) between clear and cloudy calibration deltas
-    # so small temperature changes do not cause large cloudiness-index fluctuations.
-    if not math.isfinite(span) or span <= 2.0 or math.isclose(span, 2.0, rel_tol=0.0, abs_tol=1e-12):
+    if not validate_cloudiness_calibration(
+            clear_sky_temp, cloudy_sky_temp, clear_ground_temp, cloudy_ground_temp):
         logger.error('Calculated delta between cloudy and clear references is insufficient; '
                      'the ground-to-sky temperature difference under clear skies must be more than '
                      '2.0 C greater than under cloudy skies. '

@@ -19,6 +19,7 @@ import dbus
 from passlib.hash import argon2
 
 from .. import constants
+from .. import sensors_mapping
 from .. import asi676mc
 from .. import asi676mc_calibration
 
@@ -3472,6 +3473,9 @@ def CLOUDINESS_INDEX_SENSOR_validator(form, field):
 
 
 def CLOUDINESS_INDEX_GROUND_SENSOR_validator(form, field):
+    if not form.TEMP_SENSOR__CLOUDINESS_INDEX_ENABLE.data:
+        return
+
     if not field.data:
         return
 
@@ -3482,7 +3486,10 @@ def CLOUDINESS_INDEX_GROUND_SENSOR_validator(form, field):
     ]
 
     if field.data not in slots:
-        raise ValidationError('Invalid selection')
+        raise ValidationError(
+            'Select a configured hardware ambient temperature sensor; '
+            'cached/API and sky-temperature readings are not supported'
+        )
 
 
 def DEVICE_PIN_NAME_validator(form, field):
@@ -5310,7 +5317,7 @@ class IndiAllskyConfigForm(FlaskForm):
     TEMP_SENSOR__CLOUDINESS_INDEX_ENABLE      = BooleanField('Enable Cloudiness Index')
     TEMP_SENSOR__CLOUDINESS_INDEX_SENSOR      = SelectField('Cloudiness Sensor', choices=[], validators=[CLOUDINESS_INDEX_SENSOR_validator])
     TEMP_SENSOR__CLOUDINESS_INDEX_USE_GROUND_SENSOR = BooleanField('Use External Ambient Sensor')
-    TEMP_SENSOR__CLOUDINESS_INDEX_GROUND_SENSOR = SelectField('Ground Temperature Sensor', choices=[], validators=[CLOUDINESS_INDEX_GROUND_SENSOR_validator])
+    TEMP_SENSOR__CLOUDINESS_INDEX_GROUND_SENSOR = SelectField('Ground Temperature Sensor', choices=[], validate_choice=False, validators=[CLOUDINESS_INDEX_GROUND_SENSOR_validator])
     TEMP_SENSOR__CLOUDINESS_INDEX_TEMP_UNIT   = SelectField('Reference Reading Units', choices=TEMP_DISPLAY_choices, validators=[DataRequired(), CLOUDINESS_INDEX_TEMP_UNIT_validator])
     TEMP_SENSOR__CLOUDINESS_INDEX_CLEAR_TEMP  = FloatField('Clear-Sky Reference: Sky Reading', validators=[CLOUDINESS_INDEX_CLEAR_TEMP_validator], widget=NumberInput(step=0.1))
     TEMP_SENSOR__CLOUDINESS_INDEX_CLOUDY_TEMP = FloatField('Cloudy-Sky Reference: Sky Reading', validators=[CLOUDINESS_INDEX_CLOUDY_TEMP_validator], widget=NumberInput(step=0.1))
@@ -5677,13 +5684,11 @@ class IndiAllskyConfigForm(FlaskForm):
                 continue
 
             try:
-                sensor_class = getattr(indi_allsky_sensors, classname)
                 base_index = constants.SENSOR_INDEX_MAP[user_var_slot]
-                for offset, sensor_type in enumerate(sensor_class.METADATA.get('types', ())):
-                    if sensor_type == constants.SENSOR_TEMPERATURE:
-                        slot = 'sensor_user_{0:d}'.format(base_index + offset)
-                        label = self.SENSOR_SLOT_choices['User Sensors'][base_index + offset][1]
-                        ground_sensor_choices.append((slot, label))
+                for offset in sensors_mapping.get_cloudiness_ground_sensor_offsets(classname):
+                    slot = 'sensor_user_{0:d}'.format(base_index + offset)
+                    label = self.SENSOR_SLOT_choices['User Sensors'][base_index + offset][1]
+                    ground_sensor_choices.append((slot, label))
             except (AttributeError, KeyError, IndexError):
                 app.logger.error('Unable to identify temperature outputs for sensor class: %s', classname)
 
@@ -5718,13 +5723,9 @@ class IndiAllskyConfigForm(FlaskForm):
                 self.TEMP_SENSOR__CLOUDINESS_INDEX_CLOUDY_GROUND_TEMP,
             )
             if all(isinstance(field.data, (int, float)) for field in calibration_fields):
-                clear_delta = self.TEMP_SENSOR__CLOUDINESS_INDEX_CLEAR_GROUND_TEMP.data - self.TEMP_SENSOR__CLOUDINESS_INDEX_CLEAR_TEMP.data
-                cloudy_delta = self.TEMP_SENSOR__CLOUDINESS_INDEX_CLOUDY_GROUND_TEMP.data - self.TEMP_SENSOR__CLOUDINESS_INDEX_CLOUDY_TEMP.data
-                span = clear_delta - cloudy_delta
-                # Require a meaningful difference (> 2 C) between clear and cloudy calibration deltas
-                # so small temperature changes do not cause large cloudiness-index fluctuations.
-                minimum_span = 3.6 if self.TEMP_SENSOR__CLOUDINESS_INDEX_TEMP_UNIT.data == 'f' else 2.0
-                if not math.isfinite(span) or span <= minimum_span or math.isclose(span, minimum_span, rel_tol=0.0, abs_tol=1e-12):
+                if not sensors_mapping.validate_cloudiness_calibration(
+                        *(field.data for field in calibration_fields),
+                        temp_unit=self.TEMP_SENSOR__CLOUDINESS_INDEX_TEMP_UNIT.data):
                     self.TEMP_SENSOR__CLOUDINESS_INDEX_CLEAR_TEMP.errors.append(
                         'Calculated delta between cloudy and clear references is insufficient; '
                         'the ground-to-sky temperature difference under clear skies must be more than '

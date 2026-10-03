@@ -3965,7 +3965,7 @@ class ImageProcessor(object):
         self.image = stretched_image
 
 
-    def milkyway_stretch(self):
+    def milkyway_stretch(self, time_offset=0.0):
         """Blend the Milky Way enhancement onto the final image. Must run
         after rotate_90/rotate_angle/flip_v/flip_h/crop_image -- the lens
         solve was fit against that final, post-transform pixel space, not
@@ -3982,7 +3982,7 @@ class ImageProcessor(object):
             self.image,
             float(self.position_av[constants.POSITION_LATITUDE]),
             float(self.position_av[constants.POSITION_LONGITUDE]),
-            i_ref.exp_date_utc.timestamp(),
+            i_ref.exp_date_utc.timestamp() - time_offset,
             i_ref.binning,
             moonmode=is_moonmode,
             is_night=is_night,

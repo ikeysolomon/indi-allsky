@@ -1,7 +1,9 @@
 import ast
+import copy
 import math
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -475,6 +477,90 @@ def test_preview_applies_enhancement_before_colormap_with_exposure_date():
         if node.func.attr == 'add':
             assert isinstance(node.args[4], ast.Name)
             assert node.args[4].id in ('image_date', 'pre_image_date')
+
+
+@pytest.mark.parametrize('key,value,solved', [
+    ('IMAGE_FLIP_H', True, False),
+    ('IMAGE_FLIP_V', True, False),
+    ('IMAGE_ROTATE', 'ROTATE_90_CLOCKWISE', False),
+    ('IMAGE_ROTATE_ANGLE', 15, False),
+    ('LENS_AZIMUTH', 15.0, False),
+    ('IMAGE_CROP_IMAGE_CIRCLE', True, False),
+    ('SATURATION_FACTOR', 1.2, True),
+])
+def test_preview_invalidates_only_its_changed_lens_geometry(key, value, solved):
+    source = Path(__file__).resolve().parents[1] / 'indi_allsky' / 'flask' / 'views.py'
+    tree = ast.parse(source.read_text(encoding='utf-8'))
+    view = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                and node.name == 'JsonImageProcessingView')
+    nodes = list(ast.walk(view))
+    copy_config = next(node for node in nodes if isinstance(node, ast.Assign)
+                       and isinstance(node.targets[0], ast.Name) and node.targets[0].id == 'p_config')
+    edit = next(node for node in nodes if isinstance(node, ast.Assign)
+                and isinstance(node.targets[0], ast.Subscript)
+                and isinstance(node.targets[0].value, ast.Name) and node.targets[0].value.id == 'p_config'
+                and isinstance(node.targets[0].slice, ast.Constant) and node.targets[0].slice.value == key)
+    guard = next(node for node in nodes if isinstance(node, ast.If)
+                 and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                         and call.func.id == 'invalidateLensSolveIfGeometryChanged' for call in ast.walk(node)))
+    constructor = next(node for node in nodes if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name) and node.func.id == 'ImageProcessor')
+    assert edit.lineno < guard.lineno < constructor.lineno
+    config = _config()
+    saved_config = copy.deepcopy(config)
+    namespace = {'copy': copy, '__package__': 'indi_allsky.flask',
+                 'self': SimpleNamespace(indi_allsky_config=config),
+                 'request': SimpleNamespace(json={key: value})}
+    exec(compile(ast.Module(body=[copy_config, edit, guard], type_ignores=[]), str(source), 'exec'), namespace)
+    preview = namespace['p_config']
+    assert preview['LENS_SOLVED'] is solved
+    assert config == saved_config
+    assert preview['IMAGE_STRETCH'] is not config['IMAGE_STRETCH']
+    image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
+    result = IndiAllskyMilkyWayStretch(preview).apply(image, -27.0, 153.0, 1767225600.0)
+    assert bool(numpy.any(result != image)) is solved
+
+
+@pytest.mark.parametrize('time_offset,has_date', [(0, True), (7200, True), (-18000, True), (7200, False)])
+def test_preview_milkyway_uses_effective_time_without_changing_capture_time(time_offset, has_date):
+    from indi_allsky import constants
+
+    root = Path(__file__).resolve().parents[1] / 'indi_allsky'
+    tree = ast.parse((root / 'flask' / 'views.py').read_text(encoding='utf-8'))
+    view = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                and node.name == 'JsonImageProcessingView')
+    call = next(node for node in ast.walk(view) if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute) and node.func.attr == 'milkyway_stretch')
+    offset = next(keyword.value for keyword in call.keywords if keyword.arg == 'time_offset')
+    timestamp = 1767225600.0
+    image_date = datetime.fromtimestamp(timestamp, timezone.utc)
+    preview_offset = eval(compile(ast.Expression(body=offset), str(root / 'flask' / 'views.py'), 'eval'),
+                          {'self': SimpleNamespace(camera_time_offset=time_offset),
+                           'fits_entry': SimpleNamespace(createDate=image_date if has_date else None)})
+    tree = ast.parse((root / 'processing.py').read_text(encoding='utf-8'))
+    processor = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'ImageProcessor')
+    method = next(node for node in processor.body if isinstance(node, ast.FunctionDef) and node.name == 'milkyway_stretch')
+    namespace = {'constants': constants}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(root / 'processing.py'), 'exec'), namespace)
+    image = numpy.full((720, 1280, 3), 40, dtype=numpy.uint8)
+    config = _config()
+    worker = SimpleNamespace(
+        focus_mode=False, image=image,
+        position_av={constants.POSITION_LATITUDE: -27.0, constants.POSITION_LONGITUDE: 153.0},
+        night_av={constants.NIGHT_NIGHT: True, constants.NIGHT_MOONMODE: False},
+        getLatestImage=lambda: SimpleNamespace(exp_date_utc=image_date, binning=1),
+        _milkyway_stretch=IndiAllskyMilkyWayStretch(config),
+    )
+    namespace['milkyway_stretch'](worker)
+    assert numpy.array_equal(worker.image, IndiAllskyMilkyWayStretch(config).apply(image, -27.0, 153.0, timestamp))
+    worker.image = image
+    namespace['milkyway_stretch'](worker, time_offset=preview_offset)
+    expected_time = timestamp - time_offset if has_date else timestamp
+    expected = IndiAllskyMilkyWayStretch(config).apply(image, -27.0, 153.0, expected_time)
+    assert numpy.any(expected != image)
+    assert numpy.array_equal(worker.image, expected)
+    if time_offset and has_date:
+        assert not numpy.array_equal(worker.image, IndiAllskyMilkyWayStretch(config).apply(image, -27.0, 153.0, timestamp))
 
 
 @pytest.mark.parametrize('shape,scale,border', [

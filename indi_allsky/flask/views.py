@@ -9735,6 +9735,12 @@ class JsonImageProcessingView(JsonView):
 
         hdulist.close()
 
+        if p_config.get('LENS_SOLVED', False) and p_config['IMAGE_STRETCH']['MILKYWAY_ENABLE']:
+            from ..lens_solver import captureLensGeometrySnapshot, invalidateLensSolveIfGeometryChanged
+
+            invalidateLensSolveIfGeometryChanged(
+                p_config, captureLensGeometrySnapshot(self.indi_allsky_config))
+
         image_processor = ImageProcessor(
             p_config,
             position_av,
@@ -9984,7 +9990,9 @@ class JsonImageProcessingView(JsonView):
             image_processor.colorize()
 
 
-            image_processor.milkyway_stretch()
+            image_processor.milkyway_stretch(
+                time_offset=self.camera_time_offset if fits_entry.createDate else 0.0,
+            )
 
 
             image_processor.colormap()

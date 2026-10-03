@@ -904,7 +904,14 @@ checkbox_field_names.forEach(item => {
     };
 });
 
+function updateMilkyWaySettingsVisibility() {
+    const enabled = $('#IMAGE_STRETCH__MILKYWAY_ENABLE').prop('checked');
+    $('#milkyway-enhancement-settings').toggle(enabled);
+    $('#IMAGE_STRETCH__MILKYWAY_ENABLE').attr('aria-expanded', String(enabled));
+}
 
+$('#IMAGE_STRETCH__MILKYWAY_ENABLE').on('change', updateMilkyWaySettingsVisibility);
+updateMilkyWaySettingsVisibility();
 
 
 $('#form_config').on('submit', function() {

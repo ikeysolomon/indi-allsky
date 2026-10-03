@@ -10,14 +10,6 @@ import numpy
 logger = logging.getLogger('indi_allsky')
 
 
-def base_stretch_allowed(stretch_config, is_night, is_moonmode, has_base_stretch=True):
-    """Decide whether the configured base histogram stretch should run."""
-    if is_night:
-        return has_base_stretch and (not is_moonmode or bool(stretch_config.get('MOONMODE')))
-
-    return has_base_stretch and bool(stretch_config.get('DAYTIME'))
-
-
 # IAU 1958 equatorial(J2000)-to-galactic rotation matrix (standard "A_G").
 # The Galactic plane is sampled once per degree; that is dense enough for a
 # smooth rasterized band. Since A_G is orthogonal, applying it (without

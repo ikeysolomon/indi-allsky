@@ -3937,25 +3937,27 @@ class ImageProcessor(object):
             return
 
 
-        stretch_config = self.config.get('IMAGE_STRETCH', {})
-        is_night = bool(self.night_av[constants.NIGHT_NIGHT])
-        is_moonmode = bool(self.night_av[constants.NIGHT_MOONMODE])
-        has_base_stretch = not isinstance(self._stretch_o, type(None))
-        # The Milky Way enhancement runs later, in milkyway_stretch(), after rotate/flip/
-        # crop have put the image into the same pixel space the lens was
-        # solved against; applying it here would blend it pre-transform and
-        # the enhancement would land in the wrong place once transformed.
-        run_base_stretch = milkyway.base_stretch_allowed(
-            stretch_config, is_night, is_moonmode, has_base_stretch)
-
-        if not run_base_stretch:
+        if isinstance(self._stretch_o, type(None)):
             return
 
 
+        if self.night_av[constants.NIGHT_NIGHT]:
+            # night
+            if self.night_av[constants.NIGHT_MOONMODE] and not self.config.get('IMAGE_STRETCH', {}).get('MOONMODE'):
+                return
+        else:
+            # daytime
+            if not self.config.get('IMAGE_STRETCH', {}).get('DAYTIME'):
+                return
+
+
         i_ref = self.getLatestImage()
+
+
         stretched_image = self._stretch(i_ref)
 
-        if stretch_config.get('SPLIT'):
+
+        if self.config.get('IMAGE_STRETCH', {}).get('SPLIT'):
             self.image = self.splitscreen(self.image, stretched_image)
             return
 

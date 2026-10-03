@@ -15,14 +15,13 @@ from indi_allsky.lens_solver.projection import projectToPixels
 from indi_allsky.lens_solver.calibration import displacement, pipelineSignature, validateCalibration
 from indi_allsky.milkyway import IndiAllskyMilkyWayStretch
 from indi_allsky.milkyway import _GALACTIC_PLANE_CATALOG
-from indi_allsky.milkyway import base_stretch_allowed
 
 
 def test_milkyway_import_and_skipped_frames_do_not_load_lens_dependencies():
     script = '''
 import sys
 import numpy
-from indi_allsky.milkyway import IndiAllskyMilkyWayStretch, base_stretch_allowed
+from indi_allsky.milkyway import IndiAllskyMilkyWayStretch
 
 def assert_dependencies_unloaded():
     assert not any(name == 'astropy' or name.startswith('astropy.')
@@ -30,7 +29,6 @@ def assert_dependencies_unloaded():
                    or name.startswith('indi_allsky.lens_solver') for name in sys.modules)
 
 assert_dependencies_unloaded()
-assert base_stretch_allowed({}, True, False)
 image = numpy.full((32, 32, 3), 40, dtype=numpy.uint8)
 for enabled, solved, is_night, moonmode, gamma, diameter in (
     (False, True, True, False, 2.2, 30),
@@ -60,6 +58,60 @@ def test_views_do_not_import_lens_solver_at_module_scope():
     tree = ast.parse(source.read_text(encoding='utf-8'))
     assert not any(isinstance(node, ast.ImportFrom)
                    and (node.module or '').startswith('lens_solver') for node in tree.body)
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+@pytest.mark.parametrize('template,form_name,script_template,end_marker', [
+    ('config/image.html', 'form_config', 'config.html', '<!-- SCNR, Noise Reduction'),
+    ('imageprocessing.html', 'form_image_processing', 'imageprocessing.html', '<div class="tw:divider'),
+])
+def test_milkyway_settings_visibility_preserves_values(enabled, template, form_name, script_template, end_marker):
+    from jinja2 import Environment
+    from wtforms import BooleanField, FloatField, Form
+
+    templates = Path(__file__).resolve().parents[1] / 'indi_allsky' / 'flask' / 'templates'
+    source = (templates / template).read_text(encoding='utf-8')
+    start = source.index('<div id="milkyway-enhancement-panel"')
+    card = source[start:source.index(end_marker, start)]
+
+    class MilkyWayForm(Form):
+        IMAGE_STRETCH__MILKYWAY_ENABLE = BooleanField('Milky Way enhancement')
+        IMAGE_STRETCH__MILKYWAY_MOONMODE = BooleanField('Moon Mode override')
+        IMAGE_STRETCH__MILKYWAY_GAMMA = FloatField('Gamma')
+        IMAGE_STRETCH__MILKYWAY_BAND_WIDTH = FloatField('Band width')
+        IMAGE_STRETCH__MILKYWAY_FEATHER = FloatField('Feather')
+
+    values = {
+        'IMAGE_STRETCH__MILKYWAY_ENABLE': enabled,
+        'IMAGE_STRETCH__MILKYWAY_MOONMODE': True,
+        'IMAGE_STRETCH__MILKYWAY_GAMMA': 2.4,
+        'IMAGE_STRETCH__MILKYWAY_BAND_WIDTH': 12.0,
+        'IMAGE_STRETCH__MILKYWAY_FEATHER': 80.0,
+    }
+    rendered = Environment(autoescape=True).from_string(card).render(**{form_name: MilkyWayForm(data=values)})
+    before, settings = rendered.split('id="milkyway-enhancement-settings"', 1)
+    assert 'id="IMAGE_STRETCH__MILKYWAY_ENABLE"' in before
+    assert 'completed VirtualSky lens solve' in before
+    assert 'aria-controls="milkyway-enhancement-settings"' in before
+    assert 'aria-expanded="{0}"'.format(str(enabled).lower()) in before
+    assert 'tw:sm:grid-cols-2' in settings.split('>', 1)[0]
+    assert ('style="display: none;"' in settings.split('>', 1)[0]) is not enabled
+    for name in values:
+        if name == 'IMAGE_STRETCH__MILKYWAY_ENABLE':
+            continue
+        assert 'id="' + name + '"' not in before
+        field = settings.split('id="' + name + '"', 1)[1].split('>', 1)[0]
+        assert 'disabled' not in field
+        if name == 'IMAGE_STRETCH__MILKYWAY_MOONMODE':
+            assert 'checked' in settings.split('id="' + name + '"', 1)[0].rsplit('<input', 1)[1]
+        else:
+            assert 'value="{0}"'.format(values[name]) in field
+
+    script = (templates / script_template).read_text(encoding='utf-8')
+    assert ".on('change', updateMilkyWaySettingsVisibility)" in script
+    assert 'updateMilkyWaySettingsVisibility();' in script
+    assert "$('#milkyway-enhancement-settings').toggle(enabled);" in script
+    assert "$('#IMAGE_STRETCH__MILKYWAY_ENABLE').attr('aria-expanded', String(enabled));" in script
 
 
 def test_missing_lens_dependencies_leave_image_unchanged(monkeypatch, caplog):
@@ -158,7 +210,6 @@ def _config(enabled=True):
             'MILKYWAY_GAMMA': 2.2,
             'MILKYWAY_BAND_WIDTH': 10.0,
             'MILKYWAY_FEATHER': 60.0,
-            'MILKYWAY_SATURATION': 1.4,
         },
     }
 
@@ -239,7 +290,6 @@ def test_enhancement_never_leaks_past_full_resolution_circle_boundary():
         'MILKYWAY_GAMMA': 4.0,
         'MILKYWAY_BAND_WIDTH': 45.0,
         'MILKYWAY_FEATHER': 500.0,
-        'MILKYWAY_SATURATION': 1.0,
     })
     image = numpy.full((1080, 1920, 3), 40, dtype=numpy.uint8)
 
@@ -252,8 +302,6 @@ def test_enhancement_never_leaks_past_full_resolution_circle_boundary():
 
 
 def test_milkyway_stretch_never_raises_on_mono_image():
-    # the color-only HSV saturation step must be skipped for 2D grayscale
-    # frames, not raise
     image = numpy.full((1080, 1920), 40, dtype=numpy.uint8)
     result = IndiAllskyMilkyWayStretch(_config()).apply(image, -27.0, 153.0, 1767225600.0)
     assert numpy.any(result != image)
@@ -354,24 +402,34 @@ def test_milkyway_stretch_never_raises_on_bad_config():
     assert enhancer.apply(image, 45.0, -93.0, 1767225600.0) is image
 
 
-def test_base_stretch_is_disabled_during_moonmode_without_its_own_toggle():
-    assert base_stretch_allowed(
-        {'MOONMODE': False}, is_night=True, is_moonmode=True) is False
+@pytest.mark.parametrize('settings,is_night,is_moonmode,has_base_stretch,expected', [
+    ({'MOONMODE': False}, True, True, True, False),
+    ({'MOONMODE': True}, True, True, True, True),
+    ({'DAYTIME': True}, False, False, True, True),
+    ({}, True, False, False, False),
+    ({}, True, False, True, True),
+    ({}, False, False, True, False),
+])
+def test_base_stretch_gating_uses_processing_method(settings, is_night, is_moonmode, has_base_stretch, expected):
+    from indi_allsky import constants
 
-
-def test_base_stretch_is_enabled_during_moonmode_with_its_own_toggle():
-    assert base_stretch_allowed(
-        {'MOONMODE': True}, is_night=True, is_moonmode=True) is True
-
-
-def test_base_stretch_can_run_during_daytime():
-    assert base_stretch_allowed(
-        {'DAYTIME': True}, is_night=False, is_moonmode=False) is True
-
-
-def test_base_stretch_is_disabled_when_not_configured():
-    assert base_stretch_allowed(
-        {}, is_night=True, is_moonmode=False, has_base_stretch=False) is False
+    source = Path(__file__).resolve().parents[1] / 'indi_allsky' / 'processing.py'
+    tree = ast.parse(source.read_text(encoding='utf-8'))
+    processor = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'ImageProcessor')
+    method = next(node for node in processor.body if isinstance(node, ast.FunctionDef) and node.name == 'stretch')
+    namespace = {'constants': constants}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), 'exec'), namespace)
+    calls = []
+    worker = SimpleNamespace(
+        focus_mode=False, config={'IMAGE_STRETCH': settings},
+        night_av={constants.NIGHT_NIGHT: is_night, constants.NIGHT_MOONMODE: is_moonmode},
+        _stretch_o=object() if has_base_stretch else None, image='original',
+        getLatestImage=lambda: object(),
+        _stretch=lambda image_ref: calls.append(image_ref) or 'stretched',
+    )
+    namespace['stretch'](worker)
+    assert bool(calls) is expected
+    assert worker.image == ('stretched' if expected else 'original')
 
 
 @pytest.mark.parametrize('altitude,heading,radial,precession', [

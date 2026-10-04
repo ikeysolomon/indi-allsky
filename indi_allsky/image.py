@@ -1305,6 +1305,9 @@ class ImageWorker(Process):
             metadata['sensor_user_{0}'.format(index)] = self.sensors_user_av[index]
         if i_ref.cloudiness_index is not None:
             metadata['cloudiness_index'] = i_ref.cloudiness_index
+        bounds = getattr(self.image_processor, 'chart_label_bounds', ())
+        if bounds:
+            metadata['chart_label_bounds'] = [list(bound) for bound in bounds]
         return metadata
 
 

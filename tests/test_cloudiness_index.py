@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from indi_allsky import constants, sensors_mapping
+from indi_allsky import constants, sensor_slots, sensors_mapping
 from indi_allsky.sensor import SensorWorker
 from indi_allsky.devices.exceptions import SensorReadException
 
@@ -102,7 +102,7 @@ def _validate_cloudiness_form(form):
 
 
 def _cloudiness_ground_form(config, ground_slot, enabled):
-    from wtforms import BooleanField, Form, SelectField
+    from wtforms import BooleanField, Form, SelectField, StringField
     from wtforms.validators import ValidationError
 
     form_class = _source_member('flask/forms.py', 'IndiAllskyConfigForm')
@@ -115,14 +115,13 @@ def _cloudiness_ground_form(config, ground_slot, enabled):
     form_type = type('CloudinessGroundForm', (Form,), {
         'TEMP_SENSOR__CLOUDINESS_INDEX_ENABLE': BooleanField(),
         'TEMP_SENSOR__CLOUDINESS_INDEX_GROUND_SENSOR': namespace['TEMP_SENSOR__CLOUDINESS_INDEX_GROUND_SENSOR'],
+        **{'TEMP_SENSOR__' + letter + '_CLASSNAME': StringField() for letter in sensor_slots.SENSOR_LETTERS},
     })
     form = form_type(TEMP_SENSOR__CLOUDINESS_INDEX_ENABLE=enabled,
                      TEMP_SENSOR__CLOUDINESS_INDEX_GROUND_SENSOR=ground_slot)
     form.SENSOR_SLOT_choices = {'User Sensors': [(str(index), str(index)) for index in range(110)]}
     namespace['self'] = form
-    for letter in ('A', 'B', 'C', 'D', 'E', 'F'):
-        namespace['temp_sensor__' + letter.lower() + '_classname'] = config['TEMP_SENSOR'].get(letter + '_CLASSNAME', '')
-        namespace['temp_sensor__' + letter.lower() + '_user_var_slot'] = config['TEMP_SENSOR'].get(letter + '_USER_VAR_SLOT', '')
+    namespace.update(SENSOR_LETTERS=sensor_slots.SENSOR_LETTERS, data=sensor_slots.sensor_form_data(config))
     initialize = _source_member('flask/forms.py', 'IndiAllskyConfigForm', '__init__')
     temp_sensors = _source_assignment(initialize.body, 'temp_sensors')
     start = initialize.body.index(_source_assignment(initialize.body, 'ground_sensor_choices'))
@@ -137,6 +136,8 @@ def _cloudiness_ground_form(config, ground_slot, enabled):
     'TEMP_SENSOR__CLOUDINESS_INDEX_USE_GROUND_SENSOR',
 ])
 def test_cloudiness_toggles_use_checkbox_save_path(field_name):
+    from jinja2 import Environment
+
     source = _SOURCE_ROOT / 'flask' / 'templates' / 'config.html'
     template = source.read_text(encoding='utf-8')
     save_lists = {}
@@ -144,7 +145,9 @@ def test_cloudiness_toggles_use_checkbox_save_path(field_name):
         array_source = template.split('const ' + list_name + ' = ', 1)[1].split(';', 1)[0]
         array_source = '\n'.join(line for line in array_source.splitlines()
                                  if not line.lstrip().startswith('//'))
-        save_lists[list_name] = ast.literal_eval(array_source)
+        rendered = Environment().from_string(array_source).render(
+            form_config=SimpleNamespace(sensor_letters=sensor_slots.SENSOR_LETTERS))
+        save_lists[list_name] = ast.literal_eval(rendered)
 
     assert field_name not in save_lists['field_names']
     assert save_lists['checkbox_field_names'].count(field_name) == 1

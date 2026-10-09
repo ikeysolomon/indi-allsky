@@ -8,6 +8,7 @@ import time
 from typing import Dict, Any, List
 from datetime import datetime
 from . import constants
+from .sensor_slots import SENSOR_DEFAULTS
 
 logger = logging.getLogger('indi_allsky')
 
@@ -142,7 +143,7 @@ def validate_cloudiness_calibration(clear_sky_temp, cloudy_sky_temp,
 
 def calculate_cloudiness_index(config: Dict[str, Any], get_sensor_value) -> Any:
     """
-    Scans configured TEMP_SENSOR slots (A-F) for an MLX90614/90615/90640
+    Scans configured TEMP_SENSOR slots (A-Z) for an MLX90614/90615/90640
     family sensor and derives a 0-100 local cloudiness index from the
     difference between the ground and sky temperatures.
 
@@ -192,7 +193,7 @@ def calculate_cloudiness_index(config: Dict[str, Any], get_sensor_value) -> Any:
 
     candidates = list()
 
-    for letter in ('A', 'B', 'C', 'D', 'E', 'F'):
+    for letter in SENSOR_DEFAULTS:
         classname = temp_sensor_cfg.get('{0:s}_CLASSNAME'.format(letter))
         if classname not in constants.CLOUD_SENSOR_CLASSNAMES:
             continue
@@ -255,7 +256,7 @@ def calculate_cloudiness_index(config: Dict[str, Any], get_sensor_value) -> Any:
 
     if use_ground_sensor or candidate['ambient_index'] is None:
         ground_indices = set()
-        for letter in ('A', 'B', 'C', 'D', 'E', 'F'):
+        for letter in SENSOR_DEFAULTS:
             base_index = constants.SENSOR_INDEX_MAP.get(str(temp_sensor_cfg.get('{0:s}_USER_VAR_SLOT'.format(letter))))
             if base_index is None:
                 continue
@@ -338,17 +339,16 @@ def build_slot_label_map(config: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
 
     from .devices import sensors as indi_allsky_sensors
 
-    sensor_letters = ['A', 'B', 'C', 'D', 'E', 'F']
     temp_sensor_cfg = config.get('TEMP_SENSOR', {})
 
-    for letter in sensor_letters:
+    for letter, defaults in SENSOR_DEFAULTS.items():
         classname = temp_sensor_cfg.get(f'{letter}_CLASSNAME')
         if not classname:
             continue
 
-        label = temp_sensor_cfg.get(f'{letter}_LABEL', f'Sensor {letter}')
-        user_var_slot = temp_sensor_cfg.get(f'{letter}_USER_VAR_SLOT', f'sensor_user_{10 if letter=="A" else 20}')
-        title_template = temp_sensor_cfg.get(f'{letter}_TITLE_TEMPLATE', '{label:s} ({probe:s})')
+        label = temp_sensor_cfg.get(f'{letter}_LABEL', defaults['LABEL'])
+        user_var_slot = temp_sensor_cfg.get(f'{letter}_USER_VAR_SLOT', defaults['USER_VAR_SLOT'])
+        title_template = temp_sensor_cfg.get(f'{letter}_TITLE_TEMPLATE', defaults['TITLE_TEMPLATE'])
         pin_1_name = temp_sensor_cfg.get(f'{letter}_PIN_1', '')
 
         try:

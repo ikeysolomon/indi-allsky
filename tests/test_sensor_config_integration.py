@@ -71,6 +71,9 @@ def config_endpoint(monkeypatch, tmp_path):
         socket=socket, ipaddress=ipaddress, json=json,
         _visible_asi676mc_cameras=lambda: [],
     )
+    execute([node for node in tree('indi_allsky/flask/views.py').body
+             if isinstance(node, ast.ImportFrom) and node.level == 2 and node.module == 'charts'],
+            namespace)
     execute([owner('indi_allsky/flask/views.py', name)
              for name in ('ConfigView', 'AjaxConfigView')], namespace)
     monkeypatch.setattr(psutil, 'sensors_temperatures', lambda: {}, raising=False)

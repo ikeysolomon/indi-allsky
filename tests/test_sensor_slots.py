@@ -4,6 +4,7 @@ import itertools
 import logging
 import re
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -155,7 +156,7 @@ def test_worker_initializes_reads_and_falls_back_for_new_devices(monkeypatch):
             return {'data': (12.5,)}
 
     monkeypatch.setattr(sensors, 'kernel_temp_sensor_ds18x20_w1', Probe)
-    namespace = {'__package__': 'indi_allsky', 'constants': constants,
+    namespace = {'__package__': 'indi_allsky', 'constants': constants, 'time': time,
                  'logger': logging.getLogger('sensor-test')}
     execute([method('indi_allsky/sensor.py', 'init_sensors', 'SensorWorker'),
              method('indi_allsky/sensor.py', 'update_sensors', 'SensorWorker')], namespace)
@@ -163,7 +164,8 @@ def test_worker_initializes_reads_and_falls_back_for_new_devices(monkeypatch):
     worker = SimpleNamespace(config={'TEMP_SENSOR': {'G_CLASSNAME': 'kernel_temp_sensor_ds18x20_w1',
         'G_LABEL': 'G probe', 'G_PIN_1': 'D12', 'G_I2C_ADDRESS': '0x60', 'G_USER_VAR_SLOT': 'sensor_user_35',
         'Z_CLASSNAME': 'kernel_temp_sensor_ds18x20_w1', 'Z_USER_VAR_SLOT': 'sensor_user_59'}},
-        night_av=[], astro_av=[], sensors_user_av=Array('d', [0] * 150))
+        night_av=[], astro_av=[], sensors_user_av=Array('d', [0] * 150),
+        sensors_user_read_time_av=Array('d', [0] * 150))
     namespace['init_sensors'](worker)
     assert len(worker.sensors) == 8
     assert [sensor.slot for sensor in worker.sensors] == [10, 20, 30, 40, 50, 55, 35, 59]
@@ -171,6 +173,8 @@ def test_worker_initializes_reads_and_falls_back_for_new_devices(monkeypatch):
     assert worker.sensors[6].kwargs['i2c_address'] == '0x60'
     namespace['update_sensors'](worker)
     assert worker.sensors_user_av[35] == worker.sensors_user_av[59] == 12.5
+    assert worker.sensors_user_read_time_av[35] > 0
+    assert worker.sensors_user_read_time_av[59] > 0
     worker.config = {'TEMP_SENSOR': {
         letter + '_' + field: value
         for index, letter in enumerate(sensor_slots.SENSOR_LETTERS)

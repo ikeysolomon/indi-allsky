@@ -150,6 +150,39 @@ def test_all_letters_survive_production_save_reload_and_remove(config_endpoint, 
     assert client.get('/config').get_json()['TEMP_SENSOR__G_CLASSNAME'] == ''
 
 
+@pytest.mark.parametrize('letter', ['G', 'Z'])
+@pytest.mark.parametrize('classname', ['blinka_wind_speed_sensor_wh_sp_ws01', 'blinka_rain_sensor_fc37'])
+def test_non_i2c_driver_in_new_slot_survives_save_reload(config_endpoint, monkeypatch, letter, classname):
+    monkeypatch.setitem(sys.modules, 'board', SimpleNamespace(D24=24))
+    client, Config, _, _ = config_endpoint
+    payload = client.get('/config').get_json()
+    payload.update({
+        'TEMP_SENSOR__' + letter + '_CLASSNAME': classname,
+        'TEMP_SENSOR__' + letter + '_PIN_1': 'D24',
+        'TEMP_SENSOR__' + letter + '_I2C_ADDRESS': '',
+    })
+    response = client.post('/config', json=payload)
+    assert response.status_code == 200, response.get_json()
+    assert Config().config['TEMP_SENSOR'][letter + '_CLASSNAME'] == classname
+    assert client.get('/config').get_json()['TEMP_SENSOR__' + letter + '_I2C_ADDRESS'] == ''
+
+
+@pytest.mark.parametrize('letter', ['G', 'Z'])
+def test_new_mlx_slot_is_available_in_cloudiness_form(config_endpoint, monkeypatch, letter):
+    monkeypatch.setitem(sys.modules, 'board', SimpleNamespace(D24=24))
+    client, Config, _, context = config_endpoint
+    payload = client.get('/config').get_json()
+    payload['TEMP_SENSOR__' + letter + '_CLASSNAME'] = 'blinka_temp_sensor_mlx90614_i2c'
+    payload['TEMP_SENSOR__' + letter + '_PIN_1'] = 'D24'
+    response = client.post('/config', json=payload)
+    assert response.status_code == 200, response.get_json()
+    with client.application.test_request_context('/config'):
+        form = context()['form_config']
+    assert Config().config['TEMP_SENSOR'][letter + '_CLASSNAME'] == 'blinka_temp_sensor_mlx90614_i2c'
+    assert 'sensor_user_10' in dict(form.TEMP_SENSOR__CLOUDINESS_INDEX_SENSOR.choices['MLX Cloudiness Sensors'])
+    assert 'sensor_user_10' in dict(form.TEMP_SENSOR__CLOUDINESS_INDEX_GROUND_SENSOR.choices['Temperature Sensors'])
+
+
 def test_omitted_configured_sensor_is_still_validated(config_endpoint):
     client, Config, _, _ = config_endpoint
     payload = client.get('/config').get_json()

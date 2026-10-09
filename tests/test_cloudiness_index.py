@@ -567,12 +567,17 @@ def test_mlx_without_paired_ambient_requires_a_selected_ground_sensor():
     assert sensors_mapping.calculate_cloudiness_index(config, _values({10: -5.0})) is None
 
 
-def test_selected_ground_sensor_overrides_paired_mlx_ambient():
+@pytest.mark.parametrize('cloud_letter,ground_letter', [('A', 'B'), ('G', 'Z'), ('Z', 'G')])
+def test_selected_ground_sensor_overrides_paired_mlx_ambient(cloud_letter, ground_letter):
+    config = _config(
+        CLOUDINESS_INDEX_USE_GROUND_SENSOR=True,
+        CLOUDINESS_INDEX_GROUND_SENSOR='sensor_user_12',
+    )
+    for source, destination in zip('AB', (cloud_letter, ground_letter)):
+        for field in ('CLASSNAME', 'USER_VAR_SLOT'):
+            config['TEMP_SENSOR'][destination + '_' + field] = config['TEMP_SENSOR'].pop(source + '_' + field)
     cloudiness_index = sensors_mapping.calculate_cloudiness_index(
-        _config(
-            CLOUDINESS_INDEX_USE_GROUND_SENSOR=True,
-            CLOUDINESS_INDEX_GROUND_SENSOR='sensor_user_12',
-        ),
+        config,
         _values({10: 40.0, 11: -5.0, 12: 10.0}),
     )
 
@@ -617,16 +622,21 @@ def test_cloudiness_ambient_outputs_are_hardware_temperature_channels(classname,
 
 
 @pytest.mark.parametrize('enabled', [True, False])
+@pytest.mark.parametrize('cloud_letter,ground_letter', [('A', 'B'), ('G', 'Z'), ('Z', 'G')])
 @pytest.mark.parametrize('ground_slot,supported', [
     ('', True), ('sensor_user_10', True), ('sensor_user_11', False),
     ('sensor_user_12', True), ('sensor_user_13', False),
     ('sensor_user_14', False), ('sensor_user_20', False),
 ])
-def test_cloudiness_form_filters_and_validates_ambient_sources(enabled, ground_slot, supported):
+def test_cloudiness_form_filters_and_validates_ambient_sources(enabled, ground_slot, supported, cloud_letter, ground_letter):
     config = _config(C_CLASSNAME='temp_api_ecowitt', C_USER_VAR_SLOT='sensor_user_20')
+    for source, destination in zip('AB', (cloud_letter, ground_letter)):
+        for field in ('CLASSNAME', 'USER_VAR_SLOT'):
+            config['TEMP_SENSOR'][destination + '_' + field] = config['TEMP_SENSOR'].pop(source + '_' + field)
     form = _cloudiness_ground_form(config, ground_slot, enabled)
     field = form.TEMP_SENSOR__CLOUDINESS_INDEX_GROUND_SENSOR
-    assert [slot for slot, label in field.choices['Temperature Sensors']] == ['sensor_user_10', 'sensor_user_12']
+    expected_slots = ['sensor_user_10', 'sensor_user_12'] if cloud_letter < ground_letter else ['sensor_user_12', 'sensor_user_10']
+    assert [slot for slot, label in field.choices['Temperature Sensors']] == expected_slots
     assert form.validate() is (supported or not enabled)
     if enabled and not supported:
         assert 'configured hardware ambient temperature sensor' in field.errors[0]

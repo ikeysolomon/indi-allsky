@@ -464,6 +464,12 @@ class SensorWorker(Process):
 
                     if not isinstance(sensor_data.get('wind_speed'), type(None)):
                         self.sensors_user_av[constants.SENSOR_USER_WIND_SPEED] = float(sensor_data['wind_speed'])
+                    if not isinstance(sensor_data.get('rain_rate'), type(None)):
+                        self.sensors_user_av[constants.SENSOR_USER_RAIN_RATE] = float(sensor_data['rain_rate'])
+
+                    if not isinstance(sensor_data.get('rain_24h'), type(None)):
+                        self.sensors_user_av[constants.SENSOR_USER_RAIN_24H] = float(sensor_data['rain_24h'])
+
 
 
                     updated_count = 0

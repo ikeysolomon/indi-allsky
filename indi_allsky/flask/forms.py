@@ -993,6 +993,8 @@ def IMAGE_LABEL_TEMPLATE_validator(form, field):
         'wind_speed' : 0.0,
         'rain_status' : '',
         'cloudiness_index' : '',
+        'rain_rate' : 0.0,
+        'rain_24h' : 0.0,
         'custom_1' : '',
         'custom_2' : '',
         'custom_3' : '',
@@ -1101,6 +1103,8 @@ def WEB_STATUS_TEMPLATE_validator(form, field):
         'wind_dir'          : '',
         'rain_status'       : '',
         'cloudiness_index'  : '',
+        'rain_rate'         : 0.0,
+        'rain_24h'          : 0.0,
     }
 
 
@@ -3361,10 +3365,11 @@ def TEMP_SENSOR__I2C_ADDRESS_validator(form, field):
     if sensor_class in (
         'blinka_wind_speed_sensor_wh_sp_ws01',
         'blinka_rain_sensor_fc37',
+        'blinka_rain_sensor_wh_sp_rg',
     ):
         return
 
-    if not field.data:
+    if not field.data or not field.data.strip():
         raise ValidationError('This field is required.')
 
     I2C_ADDRESS_validator(form, field)
@@ -4308,6 +4313,7 @@ class IndiAllskyConfigForm(FlaskForm):
         ),
         'Rain Sensors' : (
             ('blinka_rain_sensor_fc37', 'FC-37 Rain Sensor - digital (1 slot)'),
+            ('blinka_rain_sensor_wh_sp_rg', 'MISOL WH-SP-RG Tipping Bucket - pulse output (2 slots)'),
         ),
         'Wind Sensors' : (
             ('blinka_wind_speed_sensor_wh_sp_ws01', 'WH-SP-WS01 Cup Anemometer - pulse output (1 slot)'),
@@ -6324,7 +6330,7 @@ class IndiAllskyConfigForm(FlaskForm):
                     is_pin_required = (
                         sensor_classname.data.endswith('_spi')
                         or sensor_classname.data.startswith('blinka_temp_sensor_dht')
-                        or sensor_classname.data == 'blinka_rain_sensor_fc37'
+                        or sensor_classname.data in ('blinka_rain_sensor_fc37', 'blinka_rain_sensor_wh_sp_rg')
                     )
                     try:
                         if is_pin_required or sensor_pin_1.data or sensor_pin_2.data:

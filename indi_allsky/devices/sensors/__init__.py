@@ -81,6 +81,7 @@ from .lightningSensorAs3935 import LightningSensorAs3935_SparkFun_SPI as blinka_
 from .lightningSensorAs3935 import LightningSensorAs3935_SparkFun_I2C as blinka_sparkfun_lightning_sensor_as3935_i2c
 from .rainSensorFc37 import RainSensorFc37 as blinka_rain_sensor_fc37
 from .windSpeedSensorWhSpWs01 import WindSpeedSensorWhSpWs01 as blinka_wind_speed_sensor_wh_sp_ws01
+from .rainSensorWhSpRg import RainSensorWhSpRg as blinka_rain_sensor_wh_sp_rg
 
 from .mqttBrokerSensor import MqttBrokerSensor as mqtt_broker_sensor
 
@@ -137,6 +138,7 @@ __all__ = (
     'blinka_sparkfun_lightning_sensor_as3935_i2c',
     'blinka_rain_sensor_fc37',
     'blinka_wind_speed_sensor_wh_sp_ws01',
+    'blinka_rain_sensor_wh_sp_rg',
     'mqtt_broker_sensor',
     'temp_api_openweathermap',
     'temp_api_weatherunderground',

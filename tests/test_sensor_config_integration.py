@@ -151,7 +151,9 @@ def test_all_letters_survive_production_save_reload_and_remove(config_endpoint, 
 
 
 @pytest.mark.parametrize('letter', ['G', 'Z'])
-@pytest.mark.parametrize('classname', ['blinka_wind_speed_sensor_wh_sp_ws01', 'blinka_rain_sensor_fc37'])
+@pytest.mark.parametrize('classname', [
+    'blinka_wind_speed_sensor_wh_sp_ws01', 'blinka_rain_sensor_fc37', 'blinka_rain_sensor_wh_sp_rg',
+])
 def test_non_i2c_driver_in_new_slot_survives_save_reload(config_endpoint, monkeypatch, letter, classname):
     monkeypatch.setitem(sys.modules, 'board', SimpleNamespace(D24=24))
     client, Config, _, _ = config_endpoint

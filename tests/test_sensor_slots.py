@@ -159,7 +159,7 @@ def test_i2c_pins_are_optional_without_gpio_modules(sensor_form, monkeypatch, le
 @pytest.mark.parametrize('letter', ['A', 'G', 'Z'])
 @pytest.mark.parametrize('driver', [
     'blinka_temp_sensor_bme280_spi', 'blinka_temp_sensor_dht22',
-    'blinka_rain_sensor_fc37',
+    'blinka_rain_sensor_fc37', 'blinka_rain_sensor_wh_sp_rg',
 ])
 def test_pin_driven_sensors_still_require_primary_pin(sensor_form, monkeypatch, letter, driver):
     monkeypatch.setitem(sys.modules, 'board', SimpleNamespace(D5=5))

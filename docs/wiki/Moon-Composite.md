@@ -54,17 +54,34 @@ frame is discarded and the long image is processed normally.
 ## Safety and output
 
 No extra image job is queued: the short frame travels with its corresponding
-long frame. The camera accepts one BLOB per requested exposure. Duplicate
+long frame. One locked capture record owns the bracket's local ID, requested
+long exposure/gain/binning, short frame, phase and completion status. The capture
+loop asks that operation to advance; it no longer coordinates separate pending
+settings and short-frame flags. Only one operation may be outstanding.
+The camera accepts one BLOB per requested exposure. Duplicate
 callbacks are ignored, and a reported FITS `EXPTIME` that differs from the request
 is rejected rather than relabelled as the other half of a bracket. The tolerance
 is 1% or one microsecond, whichever is larger, to allow driver rounding.
+Local operation state, callback ownership and camera readiness coordinate the
+pair; metadata is a defensive cross-check, not a camera-generated frame ID.
 When `DATE-OBS` is supplied, it must be parseable and not predate the request by
 more than one second (allowing whole-second timestamp precision). Offset-free
 FITS timestamps are interpreted as UTC. Keep camera and host clocks synchronized.
-Rejected BLOBs leave the request waiting for a valid BLOB or the existing timeout;
-timeouts disconnect/restart capture rather than reuse an incomplete bracket.
-If either frame omits `EXPTIME`, capture continues with the original long image
-and logs the driver metadata limitation instead of attempting an unverified blend.
+Rejected BLOBs leave the request waiting for a valid BLOB or the existing timeout.
+A timed-out bracket, or missing `EXPTIME` needed to verify the pair, suspends
+compositing until configuration reload/restart, without changing the saved
+enable setting. The incomplete pair is discarded, the capture connection is
+reset, and the camera must report ready before an ordinary long exposure is
+requested. The worker continues normal sky captures, even if that driver's
+ordinary images omit or round `EXPTIME`; it does not repeatedly retry a failing
+bracket. If reconnection/idle verification fails, the normal worker error path
+reports the failure instead of pretending that a fallback image was captured.
+Check the requested/reported values in the `EXPTIME` warning and the driver's
+exposure limits/step size for **both** short and long captures before re-enabling.
+The strict pairing tolerance is not automatically relaxed, and an unverified
+frame is never substituted as a successful bracket.
+Malformed FITS headers and truncated data are rejected with a diagnostic while
+waiting for a replacement frame or timeout; partial temporary files are removed.
 
 The compositor rejects small targets, multiple significant bright
 objects, targets touching the region edge, clipped short exposures, or mismatched
@@ -86,7 +103,8 @@ cadence is retained when the pair fits within the exposure period; otherwise
 capture slows. This mode cannot promise zero capture overhead.
 
 Image processing reads/debayers only the short-frame ROI and blends that ROI,
-not a second full image pipeline. Timing is logged as `Moon composite applied=...`.
+not a second full image pipeline. Timing is logged as
+`Moon composite bracket=<id> applied=... in ...s`.
 Disabled mode performs no extra capture, FITS read, or pixel processing.
 
 A local Windows benchmark with a 3008x3008, 16-bit Bayer FITS input measured
@@ -121,7 +139,14 @@ constructors and the capture worker's main loop, deliver BLOBs through both
 legacy and newer INDI callback entry points, transfer jobs through a real
 multiprocessing queue, and decode/composite real FITS files containing synthetic
 pixels. They cover delayed/duplicate callbacks, timeout/shutdown cleanup,
-missing/malformed exposure metadata, readout geometry and clipped short frames.
+locked bracket transitions, missing/malformed exposure metadata, structurally
+invalid FITS headers/truncated pixels, readout geometry and clipped short frames.
+Injected persistent short- and long-exposure metadata mismatches exercise
+timeout/disconnect/cleanup, a freshly constructed camera client, an idle-control
+check and continued ordinary captures within the same worker. Tests also check
+that a permanently busy camera surfaces a recovery error, and that a new worker
+can resume pairing with corrected metadata or run with the feature disabled.
+These simulate recovery; they do not certify any real driver's exposure reporting.
 The INDI transport, clock, database and operating-system signal registration are
 explicit test doubles. These tests do **not** start an INDI server, launch the
 worker supervisor, use a real camera, or exercise the entire Flask/database
@@ -164,7 +189,12 @@ starting run, not a universal guarantee:
    acquire moon brackets. Check Moon Mode ending with a bracket in flight,
    orderly shutdown, and a deliberately interrupted capture in a controlled
    session. Confirm incomplete temporary frames are removed and normal
-   acquisition resumes after restart without reusing stale frames.
+   acquisition resumes after the connection reset, without reusing stale frames
+   or retrying brackets until reload/restart. Check actual driver `EXPTIME`
+   rounding/omission for both exposures, abort support and busy-to-idle timing.
+   If recovery cannot reach idle, verify that the error is reported rather than
+   accepting an uncertain frame. Reload after correcting the cause and confirm
+   that verified pairing resumes.
 
 Repeat with a second camera/driver before making cross-driver reliability
 claims. Keep the feature experimental until the evidence above is reviewed.

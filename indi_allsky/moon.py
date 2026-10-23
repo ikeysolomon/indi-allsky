@@ -2,12 +2,24 @@
 
 import logging
 import math
+from dataclasses import dataclass
+from typing import Optional, Tuple
 
 import cv2
 import numpy
 
 
 logger = logging.getLogger('indi_allsky')
+
+
+@dataclass
+class MoonCapture:
+    id: int
+    long_request: Optional[Tuple[float, float, int]] = None
+    phase: str = 'normal'
+    status: str = 'prepared'
+    short_frame: Optional[dict] = None
+    failure: Optional[str] = None
 
 
 def validate_config(config):

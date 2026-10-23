@@ -228,7 +228,7 @@ class CaptureWorker(Process):
         self.config = config
         from .moon import validate_config
         validate_config(config)
-        self.moon_composite_pending = None
+        self.moon_composite_suspended = False
         self.error_q = error_q
         self.capture_q = capture_q
         self.image_q = image_q
@@ -369,7 +369,6 @@ class CaptureWorker(Process):
         frame_start_time = time.time()
         waiting_for_frame = False
         waiting_for_sqm_frame = False
-        self.moon_composite_pending = None
         if self.config.get('CAMERA_INTERFACE') == 'indi':
             self.indiclient.clearMoonComposite()
 
@@ -595,18 +594,15 @@ class CaptureWorker(Process):
                             expire=timedelta(minutes=60),
                         )
 
-                        self.indiclient.abortCcdExposure()
-                        if self.moon_composite_pending or (
+                        if (
                             self.config.get('CAMERA_INTERFACE') == 'indi'
-                            and (
-                                self.indiclient.moon_composite_frame is not None
-                                or self.indiclient.moon_composite_waiting_blob
-                            )
+                            and self.indiclient.moonCompositeInProgress()
                         ):
-                            # INDI BLOBs have no bracket ID; do not reuse a timed-out pair.
-                            logger.error('Moon bracket timed out; restarting capture worker')
-                            self.indiclient.disconnectServer()
-                            return
+                            self._recoverMoonComposite('bracket timed out')
+                            camera_ready_time = time.time()
+                            next_frame_time = camera_ready_time
+                        else:
+                            self.indiclient.abortCcdExposure()
                         exposure_aborted = True
 
 
@@ -632,10 +628,17 @@ class CaptureWorker(Process):
                         exposure_state = 'Aborted'
                         waiting_for_frame = False
                         waiting_for_sqm_frame = False
-                        self.moon_composite_pending = None
                         if self.config.get('CAMERA_INTERFACE') == 'indi':
                             self.indiclient.clearMoonComposite()
 
+                    if self.config.get('CAMERA_INTERFACE') == 'indi':
+                        failure = self.indiclient.moonCompositeFailure()
+                        if failure:
+                            self._recoverMoonComposite(failure)
+                            now_time = time.time()
+                            camera_ready_time = next_frame_time = now_time
+                            camera_ready = True
+                            waiting_for_frame = waiting_for_sqm_frame = False
 
                     if not camera_ready:
                         continue
@@ -648,11 +651,10 @@ class CaptureWorker(Process):
 
 
                     if waiting_for_frame:
-                        if self.moon_composite_pending and not self._shutdown:
-                            exposure, gain, binning = self.moon_composite_pending
-                            self.moon_composite_pending = None
-                            self.indiclient.moon_composite_short = False
-                            self.indiclient.setCcdExposure(exposure, gain, binning, sync=False)
+                        if (
+                            not self._shutdown and self.config.get('CAMERA_INTERFACE') == 'indi'
+                            and self.indiclient.continueMoonComposite()
+                        ):
                             frame_start_time = now_time
                             camera_ready = False
                             continue
@@ -2316,19 +2318,39 @@ class CaptureWorker(Process):
         self.video_q.put({'task_id' : task.id})
 
 
+    def _recoverMoonComposite(self, reason):
+        logger.error(
+            'Moon composite suspended until configuration reload/restart: %s. '
+            'Resetting capture connection before resuming ordinary long exposures.',
+            reason,
+        )
+        self.moon_composite_suspended = True
+        long_request = self.indiclient.clearMoonComposite()
+        self.indiclient.abortCcdExposure()
+        self.indiclient.disconnectServer()
+        with app.app_context():
+            self._initialize()
+            self.indiclient.waitForCcdExposureReady(self.exposure_timeout)
+            self._pre_run_tasks()
+        if long_request is not None:
+            exposure, gain, binning = long_request
+            self._expUtils.EXPOSURE_NEXT = exposure
+            self._expUtils.GAIN_NEXT = gain
+            self._expUtils.BINNING_NEXT = binning
+        self.reconfigure_camera = True
+
+
     def shoot(self, exposure, gain, binning, sync=True, timeout=None, sqm_exposure=False):
         # sqm used for an image taking at a specific exposure/gain for a controlled SQM measurement
         logger.info('Taking %0.6fs exposure (gain %0.3f / bin %d)', exposure, gain, binning)
 
         moon = self.config.get('MOON_COMPOSITE', {})
         if (
-            moon.get('ENABLE') and self.night and self.moonmode
+            moon.get('ENABLE') and not self.moon_composite_suspended and self.night and self.moonmode
             and not self.focus_mode and not sqm_exposure and not sync
             and exposure > moon.get('EXPOSURE', 0.001)
         ):
-            self.indiclient.clearMoonComposite()
-            self.moon_composite_pending = (exposure, gain, binning)
-            self.indiclient.moon_composite_short = True
+            self.indiclient.beginMoonComposite(exposure, gain, binning)
             exposure = moon.get('EXPOSURE', 0.001)
 
         self.indiclient.setCcdExposure(exposure, gain, binning, sync=sync, timeout=timeout, sqm_exposure=sqm_exposure)

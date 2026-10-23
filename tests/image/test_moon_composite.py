@@ -106,20 +106,19 @@ def capture_worker():
         'logger': logging.getLogger('indi_allsky'),
     })
     worker = cls()
-    worker.config = {'MOON_COMPOSITE': {'ENABLE': True, 'EXPOSURE': 0.001}}
+    worker.config = {'CAMERA_INTERFACE': 'indi', 'MOON_COMPOSITE': {'ENABLE': True, 'EXPOSURE': 0.001}}
     worker.indiclient = mock.Mock()
     worker.night = True
     worker.moonmode = True
     worker.focus_mode = False
-    worker.moon_composite_pending = None
+    worker.moon_composite_suspended = False
     return worker
 
 
 def test_capture_requests_short_frame_at_same_gain_and_binning():
     worker = capture_worker()
     worker.shoot(15.0, 75, 1, sync=False)
-    assert worker.moon_composite_pending == (15.0, 75, 1)
-    assert worker.indiclient.moon_composite_short is True
+    worker.indiclient.beginMoonComposite.assert_called_once_with(15.0, 75, 1)
     worker.indiclient.setCcdExposure.assert_called_once_with(
         0.001, 75, 1, sync=False, timeout=None, sqm_exposure=False,
     )
@@ -132,19 +131,21 @@ def test_capture_requests_short_frame_at_same_gain_and_binning():
     )
     # Execute the actual loop continuation, including its continue statement.
     continuation = ast.Module(body=[
-        ast.While(test=ast.Constant(True), body=[waiting.body[0], ast.Break()], orelse=[]),
+        ast.For(
+            target=ast.Name(id='_', ctx=ast.Store()),
+            iter=ast.Tuple(elts=[ast.Constant(True)], ctx=ast.Load()),
+            body=[waiting.body[0]], orelse=[],
+        ),
     ], type_ignores=[])
     worker._shutdown = False
     scope = {'self': worker, 'now_time': 123.0}
     exec(compile(ast.fix_missing_locations(continuation), 'capture.py', 'exec'), scope)
-    assert worker.moon_composite_pending is None
-    assert worker.indiclient.moon_composite_short is False
-    worker.indiclient.setCcdExposure.assert_called_with(15.0, 75, 1, sync=False)
+    worker.indiclient.continueMoonComposite.assert_called_once_with()
     assert scope['frame_start_time'] == 123.0
     assert scope['camera_ready'] is False
 
 
-@pytest.mark.parametrize('gate', ['day', 'moon_below', 'focus', 'sqm', 'sync', 'disabled'])
+@pytest.mark.parametrize('gate', ['day', 'moon_below', 'focus', 'sqm', 'sync', 'disabled', 'suspended'])
 def test_capture_gates_preserve_normal_exposure(gate):
     worker = capture_worker()
     if gate == 'day':
@@ -155,8 +156,10 @@ def test_capture_gates_preserve_normal_exposure(gate):
         worker.focus_mode = True
     elif gate == 'disabled':
         worker.config['MOON_COMPOSITE']['ENABLE'] = False
+    elif gate == 'suspended':
+        worker.moon_composite_suspended = True
     worker.shoot(15.0, 75, 1, sync=gate == 'sync', sqm_exposure=gate == 'sqm')
-    assert worker.moon_composite_pending is None
+    worker.indiclient.beginMoonComposite.assert_not_called()
     assert worker.indiclient.setCcdExposure.call_args.args[0] == 15.0
 
 
@@ -168,11 +171,7 @@ def indi_client():
         'datetime': datetime, 'logger': logging.getLogger('indi_allsky'),
     })
     client = cls()
-    client.moon_composite_short = True
-    client.moon_composite_frame = None
-    client.moon_composite_waiting_blob = False
-    client.moon_composite_capture = True
-    client.moon_composite_id = 1
+    client._moon_capture = moon.MoonCapture(1, (15.0, 75, 1), phase='short', status='waiting')
     client._moon_composite_lock = RLock()
     client.config = {'MOON_COMPOSITE': {'ENABLE': True}}
     client.exposureStartTime = time.time()
@@ -191,19 +190,18 @@ def indi_client():
 
 def test_pairing_waits_for_blobs_and_queues_one_job():
     client = indi_client()
-    client.moon_composite_waiting_blob = True
     stream = io.BytesIO()
     fits.PrimaryHDU(lunar_patch(), header=fits.Header({'EXPTIME': 0.001})).writeto(stream)
     blob = SimpleNamespace(getblobdata=stream.getvalue)
     assert client.getCcdExposureStatus()[0] is False
     client.processBlob(blob)
-    short = client.moon_composite_frame
+    short = client._moon_capture.short_frame
     try:
         assert client.image_q.empty()
         assert client.getCcdExposureStatus()[0] is True
-        client.moon_composite_short = False
+        client._moon_capture.phase = 'long'
         client.exposure = 15.0
-        client.moon_composite_waiting_blob = True
+        client._moon_capture.status = 'waiting'
         assert client.getCcdExposureStatus()[0] is False
         stream = io.BytesIO()
         fits.PrimaryHDU(lunar_patch(), header=fits.Header({'EXPTIME': 15.0})).writeto(stream)
@@ -215,7 +213,8 @@ def test_pairing_waits_for_blobs_and_queues_one_job():
             assert job['exposure'] == 15.0
             assert job['moon_composite']['exposure'] == 0.001
             assert client.getCcdExposureStatus()[0] is True
-            assert client.moon_composite_frame is None
+            assert client._moon_capture.short_frame is None
+            assert client._moon_capture.status == 'complete'
         finally:
             Path(job['filename']).unlink()
     finally:
@@ -224,10 +223,9 @@ def test_pairing_waits_for_blobs_and_queues_one_job():
 
 def test_first_bracket_cannot_overtake_a_previous_normal_blob():
     client = indi_client()
-    client.moon_composite_short = False
-    client.moon_composite_waiting_blob = True
+    client._moon_capture = moon.MoonCapture(0, status='waiting')
     assert client.getCcdExposureStatus()[0] is False
-    client.moon_composite_waiting_blob = False
+    client._moon_capture.status = 'complete'
     assert client.getCcdExposureStatus()[0] is True
 
 
@@ -235,11 +233,11 @@ def test_abandoned_pair_deletes_short_frame(tmp_path):
     client = indi_client()
     filename = tmp_path / 'moon.fit'
     filename.write_bytes(b'test')
-    client.moon_composite_frame = {'filename': str(filename)}
+    client._moon_capture.short_frame = {'filename': str(filename)}
     client.clearMoonComposite()
     assert not filename.exists()
-    assert client.moon_composite_short is False
-    assert client.moon_composite_frame is None
+    assert client._moon_capture.status == 'cancelled'
+    assert client._moon_capture.short_frame is None
 
 
 @pytest.mark.parametrize('fail', [False, True])
@@ -349,13 +347,11 @@ def test_inactive_moon_mode_performs_no_short_frame_io(night, moonmode, enabled)
 ])
 def test_extra_blob_waits_only_in_active_moon_mode(night, moonmode, enabled, focus, sqm, sync, waiting):
     cls = isolated_class(Path('camera') / 'indi.py', 'IndiClient', {'setCcdExposure'}, {
-        'time': time, 'constants': constants,
+        'time': time, 'constants': constants, 'MoonCapture': moon.MoonCapture,
     })
     client = cls()
     client._moon_composite_lock = RLock()
-    client.moon_composite_short = False
-    client.moon_composite_frame = None
-    client.moon_composite_id = 0
+    client._moon_capture = None
     client.config = {'MOON_COMPOSITE': {'ENABLE': enabled}, 'FOCUS_MODE': focus}
     client.night_av = {constants.NIGHT_NIGHT: night, constants.NIGHT_MOONMODE: moonmode}
     client.gain, client.binning, client.timeout = 75, 1, 10
@@ -363,4 +359,4 @@ def test_extra_blob_waits_only_in_active_moon_mode(night, moonmode, enabled, foc
     client.set_number = mock.Mock()
     client._expUtils = SimpleNamespace()
     client.setCcdExposure(15, 75, 1, sync=sync, sqm_exposure=sqm)
-    assert client.moon_composite_waiting_blob is waiting
+    assert (client._moon_capture is not None and client._moon_capture.status == 'waiting') is waiting

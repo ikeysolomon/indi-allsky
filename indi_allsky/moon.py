@@ -22,6 +22,15 @@ class MoonCapture:
     failure: Optional[str] = None
 
 
+def clahe_skip_reason(config):
+    if config.get('CONTRAST_ENHANCE_16BIT') and config.get('NIGHT_CONTRAST_ENHANCE'):
+        return (
+            '16-bit night contrast enhancement (CLAHE) is active; '
+            'disable CONTRAST_ENHANCE_16BIT to use Moon replacement'
+        )
+    return None
+
+
 def validate_config(config):
     settings = config.get('MOON_COMPOSITE', {})
     if not settings.get('ENABLE'):

@@ -1866,9 +1866,13 @@ class ImageProcessor(object):
             or not self.night_av[constants.NIGHT_MOONMODE]
         ):
             return
+        from .moon import blend, clahe_skip_reason
+        skip_reason = clahe_skip_reason(self.config)
+        if skip_reason and not self.focus_mode:
+            logger.warning('Moon composite skipped: %s; keeping the normal long image', skip_reason)
+            return
         from astropy.io import fits
         from types import SimpleNamespace
-        from .moon import blend
 
         started = time.monotonic()
         try:
@@ -4040,6 +4044,9 @@ class ImageProcessor(object):
             and self.night_av[constants.NIGHT_NIGHT]
             and self.night_av[constants.NIGHT_MOONMODE]
         )
+        if record_moon_transfer:
+            from .moon import clahe_skip_reason
+            record_moon_transfer = clahe_skip_reason(self.config) is None
         self._stretch_o.record_display_transfer = bool(record_moon_transfer)
         stretched_image = self._stretch(i_ref)
 

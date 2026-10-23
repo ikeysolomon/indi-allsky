@@ -155,6 +155,7 @@ def test_disabled_and_unsupported_configuration():
 def capture_worker():
     cls = isolated_class('capture.py', 'CaptureWorker', {'shoot'}, {
         'logger': logging.getLogger('indi_allsky'),
+        '__name__': 'indi_allsky.capture', '__package__': 'indi_allsky',
     })
     worker = cls()
     worker.config = {'CAMERA_INTERFACE': 'indi', 'MOON_COMPOSITE': {'ENABLE': True, 'EXPOSURE': 0.001}}

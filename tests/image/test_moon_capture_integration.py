@@ -628,7 +628,7 @@ def test_split_display_preserves_linear_side_and_divider(runtime, monkeypatch, f
         Path(job['moon_composite']['filename']).unlink()
 
 
-@pytest.mark.parametrize('gate', ['moonmode', 'focus', 'no-operator', 'disabled', 'not-moon', 'day', 'no-pair'])
+@pytest.mark.parametrize('gate', ['moonmode', 'focus', 'no-operator', 'disabled', 'not-moon', 'day', 'no-pair', 'clahe'])
 def test_skipped_stretch_cannot_reuse_previous_frames_transfer(runtime, gate):
     processor = runtime.processor
     processor.config['IMAGE_STRETCH'] = {'MOONMODE': True}
@@ -649,6 +649,8 @@ def test_skipped_stretch_cannot_reuse_previous_frames_transfer(runtime, gate):
         runtime.shared.night[constants.NIGHT_MOONMODE] = 0
     elif gate == 'day':
         runtime.shared.night[constants.NIGHT_NIGHT] = 0
+    elif gate == 'clahe':
+        processor.config.update(CONTRAST_ENHANCE_16BIT=True, NIGHT_CONTRAST_ENHANCE=True)
     elif gate == 'no-operator':
         processor._stretch_o = None
     processor.stretch(moon_composite=gate != 'no-pair')
@@ -669,6 +671,56 @@ def test_invalid_roi_transfer_range_keeps_sky_and_reports_bit_depth(runtime, mon
         processor.composite_moon(job['moon_composite'], i_ref)
         numpy.testing.assert_array_equal(processor.image, before)
         assert 'short ROI exceeds sky stretch range; check sensor bit depth' in caplog.text
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink(missing_ok=True)
+        Path(job['moon_composite']['filename']).unlink()
+
+
+@pytest.mark.parametrize('sixteen_bit,night_contrast', [(True, True), (True, False), (False, True)])
+def test_contrast_compatibility_only_skips_active_16bit_night_brackets(
+    runtime, monkeypatch, caplog, sixteen_bit, night_contrast,
+):
+    runtime.worker.config.update(
+        CONTRAST_ENHANCE_16BIT=sixteen_bit, NIGHT_CONTRAST_ENHANCE=night_contrast,
+    )
+    requests, _ = run_capture(runtime, monkeypatch)
+    job = runtime.image_q.get(timeout=2)
+    blocked = sixteen_bit and night_contrast
+    try:
+        assert [phase for phase, _ in requests] == (['long'] if blocked else ['short', 'long'])
+        assert ('moon_composite' in job) is not blocked
+        assert runtime.worker.config['MOON_COMPOSITE']['ENABLE']
+        assert not runtime.worker.moon_composite_suspended
+        if blocked:
+            assert '16-bit night contrast enhancement (CLAHE) is active' in caplog.text
+            assert len(list(runtime.directory.glob('*.fit'))) == 1
+    finally:
+        Path(job['filename']).unlink()
+        if job.get('moon_composite'):
+            Path(job['moon_composite']['filename']).unlink()
+
+
+@pytest.mark.parametrize('color', [False, True])
+def test_queued_pair_keeps_clahe_sky_without_reading_short_roi(runtime, monkeypatch, caplog, color):
+    run_capture(runtime, monkeypatch)
+    job = runtime.image_q.get(timeout=2)
+    i_ref = ingest_long(runtime, job)
+    processor = runtime.processor
+    processor.config.update(CONTRAST_ENHANCE_16BIT=True, NIGHT_CONTRAST_ENHANCE=True)
+    processor.image = processor._debayer(i_ref)
+    if color:
+        processor.image = numpy.repeat(processor.image[:, :, None], 3, axis=2)
+    original_fits = i_ref.hdulist[0].data.copy()
+    try:
+        processor.contrast_clahe_16bit()
+        processor.convert_16bit_to_8bit()
+        before = processor.image.copy()
+        with mock.patch.object(fits, 'open', side_effect=AssertionError('incompatible composite must not read ROI')):
+            processor.composite_moon(job['moon_composite'], i_ref)
+        numpy.testing.assert_array_equal(processor.image, before)
+        numpy.testing.assert_array_equal(i_ref.hdulist[0].data, original_fits)
+        assert '16-bit night contrast enhancement (CLAHE) is active' in caplog.text
     finally:
         i_ref.hdulist.close()
         Path(job['filename']).unlink(missing_ok=True)

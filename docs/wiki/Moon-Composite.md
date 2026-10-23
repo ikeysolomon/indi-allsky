@@ -95,6 +95,18 @@ measurements but before rotation/crop. FITS, raw exports, sky exposure control,
 and stacking inputs remain long-exposure originals. Subsequent white balance,
 gamma and contrast adjustments also affect the replacement moon.
 
+**16-bit night contrast compatibility:** when both `CONTRAST_ENHANCE_16BIT`
+and `NIGHT_CONTRAST_ENHANCE` are enabled, Moon replacement is skipped with an
+actionable warning. This local CLAHE step runs before replacement and cannot be
+reproduced by the shared global stretch lookup. No short exposure or Moon
+transfer table is generated; normal long-exposure processing is unchanged.
+Any already-queued pair is also skipped before reading the short ROI, with normal
+temporary-file cleanup. The saved Moon enable setting is retained, not suspended
+as a capture failure. Disable `CONTRAST_ENHANCE_16BIT` to allow replacement;
+ordinary 8-bit contrast enhancement runs after blending and remains supported.
+If night contrast enhancement is off, the 16-bit option alone does not block
+replacement.
+
 When sky stretching is enabled for Moon Mode, the short ROI reuses the **actual
 lookup tables from that long frame**, at native bit depth before conversion to
 8-bit display pixels. This includes Mode 1 gamma/levels, Mode 2 MTF (including
@@ -107,8 +119,9 @@ transfer on each side and preserves the central divider.
 
 Using the same transfer fixes the linear-versus-stretched processing mismatch;
 it does **not** guarantee equal brightness from two different exposures or a
-natural boundary. Local CLAHE, denoising and dark calibration are not replayed on
-the short ROI. Real pairs must still be inspected for residual discontinuities;
+natural boundary. The incompatible pre-blend 16-bit CLAHE combination is skipped,
+not independently fitted to the short ROI. Denoising and dark calibration are not
+replayed on the short ROI. Real pairs must still be inspected for residual discontinuities;
 no independent auto-stretch or automatic brightness matching is assumed.
 
 ## Cost and limitations
@@ -177,6 +190,9 @@ These simulate recovery; they do not certify any real driver's exposure reportin
 Transfer tests cover all four stretch variants, mono/RGB and 8/12/16-bit data,
 verify exact agreement with the sky transfer, preserve the linear mask/clipping
 checks, and ensure skipped stretches cannot reuse a previous frame's transfer.
+Compatibility tests verify that active 16-bit night CLAHE suppresses brackets
+and transfer preparation, and that queued pairs leave the CLAHE-processed mono/RGB
+sky and original FITS unchanged without reading the short frame.
 The INDI transport, clock, database and operating-system signal registration are
 explicit test doubles. These tests do **not** start an INDI server, launch the
 worker supervisor, use a real camera, or exercise the entire Flask/database

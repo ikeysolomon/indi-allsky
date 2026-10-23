@@ -22,7 +22,7 @@ from ..flask import create_app
 #from ..flask.models import TaskQueueState
 #from ..flask.models import IndiAllSkyDbTaskQueueTable
 
-#from .. import constants
+from .. import constants
 from ..utils import IndiAllSkyExposureUtils
 
 from ..exceptions import TimeOutException
@@ -140,6 +140,9 @@ class IndiClient(PyIndi.BaseClient):
         self._gain = -1.0  # individual exposure gain
         self._binning = -1  # individual exposure binning
         self._sqm_exposure = False
+        self.moon_composite_short = False
+        self.moon_composite_frame = None
+        self.moon_composite_waiting_blob = False
 
         self.exposureStartTime = 0
 
@@ -433,6 +436,14 @@ class IndiClient(PyIndi.BaseClient):
 
         self.sqm_exposure = False  # reset
 
+        if self.moon_composite_short:
+            self.moon_composite_frame = jobdata
+            self.moon_composite_waiting_blob = False
+            return
+        if self.moon_composite_frame:
+            jobdata['moon_composite'] = self.moon_composite_frame
+            self.moon_composite_frame = None
+
 
         ### Not using DB task queue to reduce DB I/O
         #with app.app_context():
@@ -449,6 +460,14 @@ class IndiClient(PyIndi.BaseClient):
         ###
 
         self.image_q.put(jobdata)
+        self.moon_composite_waiting_blob = False
+
+    def clearMoonComposite(self):
+        self.moon_composite_short = False
+        self.moon_composite_waiting_blob = False
+        if self.moon_composite_frame:
+            Path(self.moon_composite_frame['filename']).unlink(missing_ok=True)
+            self.moon_composite_frame = None
 
 
     def newMessage(self, d, m):
@@ -1090,6 +1109,13 @@ class IndiClient(PyIndi.BaseClient):
 
 
         self.exposureStartTime = time.time()
+        self.moon_composite_waiting_blob = bool(
+            self.config.get('MOON_COMPOSITE', {}).get('ENABLE')
+            and self.night_av[constants.NIGHT_NIGHT]
+            and self.night_av[constants.NIGHT_MOONMODE]
+            and not self.config.get('FOCUS_MODE')
+            and not sqm_exposure and not sync
+        )
 
         ctl_ccd_exposure = self.set_number(self.ccd_device, 'CCD_EXPOSURE', {'CCD_EXPOSURE_VALUE': float(exposure)}, sync=sync, timeout=timeout)
 
@@ -1102,6 +1128,15 @@ class IndiClient(PyIndi.BaseClient):
 
     def getCcdExposureStatus(self):
         camera_ready, exposure_state = self.ctl_ready(self._ctl_ccd_exposure)
+
+        # A driver may announce OK before delivering its BLOB.
+        if camera_ready:
+            if self.moon_composite_waiting_blob:
+                return False, 'Waiting for image BLOB'
+            if self.moon_composite_short and self.moon_composite_frame is None:
+                return False, 'Waiting for short moon BLOB'
+            if not self.moon_composite_short and self.moon_composite_frame is not None:
+                return False, 'Waiting for long moon BLOB'
 
         return camera_ready, exposure_state
 
@@ -1837,5 +1872,3 @@ class IndiClient(PyIndi.BaseClient):
         control = control if control else self.get_control(device, control_name, control_type)
 
         return [get_dict(c) for c in control]
-
-

@@ -132,6 +132,12 @@ const field_names = [
     'CCD_CONFIG__NIGHT__BINNING',
     'CCD_CONFIG__MOONMODE__GAIN',
     'CCD_CONFIG__MOONMODE__BINNING',
+    'MOON_COMPOSITE__EXPOSURE',
+    'MOON_COMPOSITE__ROI_X1',
+    'MOON_COMPOSITE__ROI_Y1',
+    'MOON_COMPOSITE__ROI_X2',
+    'MOON_COMPOSITE__ROI_Y2',
+    'MOON_COMPOSITE__THRESHOLD',
     'CCD_CONFIG__DAY__GAIN',
     'CCD_CONFIG__DAY__BINNING',
     'CCD_CONFIG__EXPOSURE_CLASSNAME',
@@ -707,6 +713,7 @@ const field_names = [
 ];
 
 const checkbox_field_names = [
+    'MOON_COMPOSITE__ENABLE',
     'ENCRYPT_PASSWORDS',
     'CAMERA_SQM__ENABLE',
     'CAMERA_SQM__ENABLE_DAY',
@@ -1661,6 +1668,27 @@ var group_checkbox_fields_image_circle_mask = [
 ];
 
 group_on_change('IMAGE_CIRCLE_MASK__ENABLE', group_fields_image_circle_mask, group_checkbox_fields_image_circle_mask);
+
+
+function updateMoonCompositeControls() {
+    const gainText = $('#CCD_CONFIG__MOONMODE__GAIN').val().trim();
+    const gain = Number(gainText);
+    const available = $('#CAMERA_INTERFACE').val() === 'indi'
+        && gainText !== '' && Number.isFinite(gain) && gain >= 0;
+    const toggle = $('#MOON_COMPOSITE__ENABLE');
+    if (!available) {
+        toggle.prop('checked', false);
+    }
+    toggle.prop('disabled', !available);
+    $('#moon-composite-offer').toggle(available);
+    const enabled = available && toggle.prop('checked');
+    $('#moon-composite-settings').toggle(enabled);
+    $('#moon-composite-settings input').prop('disabled', !enabled);
+}
+
+$('#CCD_CONFIG__MOONMODE__GAIN').on('input change', updateMoonCompositeControls);
+$('#CAMERA_INTERFACE, #MOON_COMPOSITE__ENABLE').on('change', updateMoonCompositeControls);
+$(document).ready(updateMoonCompositeControls);
 
 
 var group_fields_camera_sqm= [

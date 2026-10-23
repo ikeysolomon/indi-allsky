@@ -95,6 +95,12 @@ class IndiAllSkyConfigBase(object):
             "MAGNITUDE_OFFSET"  : 25.0,
         },
         "FOCUS_MODE"           : False,
+        "MOON_COMPOSITE" : {
+            "ENABLE"    : False,
+            "EXPOSURE"  : 0.001,
+            "ROI"       : [],
+            "THRESHOLD" : 40,
+        },
         "FOCUS_DELAY"          : 4.0,
         "CFA_PATTERN"      : "",  # None, GRBG, RGGB, BGGR, GBRG
         "USE_NIGHT_COLOR"  : True,
@@ -1871,4 +1877,3 @@ class IndiAllSkyConfigUtil(IndiAllSkyConfig):
         db.session.commit()
 
         return system_user
-

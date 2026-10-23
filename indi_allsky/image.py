@@ -269,6 +269,15 @@ class ImageWorker(Process):
 
 
     def processImage(self, i_dict):
+        try:
+            return self._processImage(i_dict)
+        finally:
+            moon_frame = i_dict.get('moon_composite')
+            if moon_frame:
+                Path(moon_frame['filename']).unlink(missing_ok=True)
+
+
+    def _processImage(self, i_dict):
         import piexif
 
         ### Not using DB task queue for image processing to reduce database I/O
@@ -662,6 +671,9 @@ class ImageWorker(Process):
 
 
         # rotation
+        if i_dict.get('moon_composite'):
+            self.image_processor.composite_moon(i_dict['moon_composite'], i_ref)
+
         self.image_processor.rotate_90()
         self.image_processor.rotate_angle()
 
@@ -3126,4 +3138,3 @@ class ImageWorker(Process):
         with self.sensors_user_av.get_lock():
             self.sensors_user_av[constants.SENSOR_USER_CAMERA_SQM_MAG] = float(mag_sqm)
             self.sensors_user_av[constants.SENSOR_USER_CAMERA_SQM_ADU] = float(raw_adu)
-

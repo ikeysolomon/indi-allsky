@@ -1857,6 +1857,55 @@ class ImageProcessor(object):
         return numpy.right_shift(self.image, shift_factor).astype(numpy.uint8)
 
 
+    def composite_moon(self, frame, i_ref):
+        settings = self.config.get('MOON_COMPOSITE', {})
+        if (
+            not settings.get('ENABLE')
+            or not self.night_av[constants.NIGHT_NIGHT]
+            or not self.night_av[constants.NIGHT_MOONMODE]
+        ):
+            return
+        from astropy.io import fits
+        from types import SimpleNamespace
+        from .moon import blend
+
+        started = time.monotonic()
+        try:
+            if frame['gain'] != i_ref.gain or frame['binning'] != i_ref.binning:
+                raise ValueError('short and long gain/binning differ')
+            if frame['camera_id'] != i_ref.camera_id:
+                raise ValueError('short and long cameras differ')
+            if not 0 < frame['exposure'] < i_ref.exposure:
+                raise ValueError('moon exposure is not shorter than sky exposure')
+            x1, y1, x2, y2 = settings['ROI']
+            if x2 > self.image.shape[1] or y2 > self.image.shape[0]:
+                raise ValueError('moon ROI is outside the binned sensor image')
+            with fits.open(frame['filename'], memmap=False) as hdulist:
+                hdu = hdulist[0]
+                if hdu.shape != i_ref.hdulist[0].data.shape:
+                    raise ValueError('short and long sensor geometry differ')
+                if hdu.header.get('BAYERPAT') != i_ref.hdulist[0].header.get('BAYERPAT'):
+                    raise ValueError('short and long Bayer patterns differ')
+                if len(hdu.shape) == 2:
+                    data = hdu.section[y1:y2, x1:x2]
+                else:
+                    data = hdu.section[:, y1:y2, x1:x2]
+                # Even ROI origins preserve CFA phase; reuse the normal decoder.
+                patch_ref = SimpleNamespace(
+                    hdulist=[SimpleNamespace(data=numpy.ascontiguousarray(data))],
+                    image_bitpix=int(hdu.header['BITPIX']),
+                    image_bayerpat=i_ref.image_bayerpat,
+                )
+                patch = self._debayer(patch_ref)
+            if patch_ref.image_bitpix != 8:
+                patch = numpy.right_shift(patch, self.max_bit_depth - 8).astype(numpy.uint8)
+            applied = blend(self.image, patch, settings['ROI'], settings.get('THRESHOLD', 40))
+        except (OSError, ValueError) as e:
+            logger.warning('Moon composite skipped: %s', e)
+            return
+        logger.info('Moon composite applied=%s in %0.4fs', applied, time.monotonic() - started)
+
+
     def rotate_90(self):
         if not self.config.get('IMAGE_ROTATE'):
             return
@@ -4897,4 +4946,3 @@ class ImageData(object):
 
 
         self.detected_bit_depth = detected_bit_depth
-

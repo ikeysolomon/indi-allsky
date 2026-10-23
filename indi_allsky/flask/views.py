@@ -2562,6 +2562,9 @@ class ConfigView(FormView):
             'CCD_CONFIG__NIGHT__BINNING'     : self.indi_allsky_config.get('CCD_CONFIG', {}).get('NIGHT', {}).get('BINNING', 1),
             'CCD_CONFIG__MOONMODE__GAIN'     : round(self.indi_allsky_config.get('CCD_CONFIG', {}).get('MOONMODE', {}).get('GAIN', 75.0), 3),  # limit to 3 decimals
             'CCD_CONFIG__MOONMODE__BINNING'  : self.indi_allsky_config.get('CCD_CONFIG', {}).get('MOONMODE', {}).get('BINNING', 1),
+            'MOON_COMPOSITE__ENABLE'        : self.indi_allsky_config.get('MOON_COMPOSITE', {}).get('ENABLE', False),
+            'MOON_COMPOSITE__EXPOSURE'      : self.indi_allsky_config.get('MOON_COMPOSITE', {}).get('EXPOSURE', 0.001),
+            'MOON_COMPOSITE__THRESHOLD'     : self.indi_allsky_config.get('MOON_COMPOSITE', {}).get('THRESHOLD', 40),
             'CCD_CONFIG__DAY__GAIN'          : round(self.indi_allsky_config.get('CCD_CONFIG', {}).get('DAY', {}).get('GAIN', 0.0), 3),  # limit to 3 decimals
             'CCD_CONFIG__DAY__BINNING'       : self.indi_allsky_config.get('CCD_CONFIG', {}).get('DAY', {}).get('BINNING', 1),
             'CCD_CONFIG__EXPOSURE_CLASSNAME' : self.indi_allsky_config.get('CCD_CONFIG', {}).get('EXPOSURE_CLASSNAME', 'exposure_basic'),
@@ -3505,6 +3508,10 @@ class ConfigView(FormView):
         admin_network_text = '\n'.join(network_list)
         form_data['ADMIN_NETWORKS_FLASK'] = admin_network_text
 
+        moon_roi = self.indi_allsky_config.get('MOON_COMPOSITE', {}).get('ROI', [])
+        for index, coordinate in enumerate(('X1', 'Y1', 'X2', 'Y2')):
+            form_data['MOON_COMPOSITE__ROI_' + coordinate] = moon_roi[index] if len(moon_roi) > index else 0
+
         context['form_config'] = IndiAllskyConfigForm(data=form_data)
 
         return context
@@ -3633,6 +3640,16 @@ class AjaxConfigView(BaseView):
         self.indi_allsky_config['CCD_CONFIG']['NIGHT']['BINNING']       = int(request.json['CCD_CONFIG__NIGHT__BINNING'])
         self.indi_allsky_config['CCD_CONFIG']['MOONMODE']['GAIN']       = float(round(float(request.json['CCD_CONFIG__MOONMODE__GAIN']), 3))  # limit to 3 decimals
         self.indi_allsky_config['CCD_CONFIG']['MOONMODE']['BINNING']    = int(request.json['CCD_CONFIG__MOONMODE__BINNING'])
+        if 'MOON_COMPOSITE__ENABLE' in request.json:
+            self.indi_allsky_config['MOON_COMPOSITE'] = {
+                'ENABLE': form_config.MOON_COMPOSITE__ENABLE.data,
+                'EXPOSURE': form_config.MOON_COMPOSITE__EXPOSURE.data,
+                'ROI': [
+                    form_config.MOON_COMPOSITE__ROI_X1.data, form_config.MOON_COMPOSITE__ROI_Y1.data,
+                    form_config.MOON_COMPOSITE__ROI_X2.data, form_config.MOON_COMPOSITE__ROI_Y2.data,
+                ],
+                'THRESHOLD': form_config.MOON_COMPOSITE__THRESHOLD.data,
+            }
         self.indi_allsky_config['CCD_CONFIG']['DAY']['GAIN']            = float(round(float(request.json['CCD_CONFIG__DAY__GAIN']), 3))  # limit to 3 decimals
         self.indi_allsky_config['CCD_CONFIG']['DAY']['BINNING']         = int(request.json['CCD_CONFIG__DAY__BINNING'])
         self.indi_allsky_config['CCD_CONFIG']['EXPOSURE_CLASSNAME']     = str(request.json['CCD_CONFIG__EXPOSURE_CLASSNAME'])
@@ -15012,4 +15029,3 @@ def manifest():
     response = jsonify(manifest_data)
     response.headers['Content-Type'] = 'application/manifest+json'
     return response
-

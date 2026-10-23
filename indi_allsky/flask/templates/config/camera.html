@@ -153,6 +153,29 @@
                         <span class="tw:text-[0.625rem] tw:font-bold tw:uppercase tw:text-base-content/50 tw:mt-1">Moon Mode Binning</span>
                         {{ form_config.CCD_CONFIG__MOONMODE__BINNING(class='tw:input tw:input-bordered tw:input-sm tw:h-11 tw:bg-base-200 tw:text-base-content tw:w-full') }}
                         <div id="CCD_CONFIG__MOONMODE__BINNING-error" class="tw:text-error tw:text-xs" style="display: none;"></div>
+                        <!-- Moon Composite -->
+                        <div id="moon-composite-offer" class="tw:border-t tw:border-base-300 tw:pt-3 tw:mt-2" style="display: none;">
+                            <label class="tw:flex tw:items-start tw:gap-2">
+                                {{ form_config.MOON_COMPOSITE__ENABLE(class='tw:toggle tw:toggle-primary tw:toggle-sm') }}
+                                <span class="tw:text-xs tw:font-bold">{{ form_config.MOON_COMPOSITE__ENABLE.label.text }}</span>
+                            </label>
+                            <div id="MOON_COMPOSITE__ENABLE-error" class="tw:text-error tw:text-xs" style="display: none;"></div>
+                            <p class="tw:text-xs tw:text-base-content/60 tw:mt-2">Only runs while Moon Mode is active. Uses this profile's gain and binning. Adds one short exposure and camera readout per sky frame; no extra image processing outside Moon Mode. Restart capture after saving.</p>
+                            <div id="moon-composite-settings" class="tw:mt-3" style="display: none;">
+                                <p class="tw:text-xs tw:text-base-content/60">Set a small moon search region in binned sensor pixels, before rotation, flip or crop. Use even coordinates and leave at least four pixels around the moon. This prototype does not track the moon automatically.</p>
+                                <div class="tw:grid tw:grid-cols-2 tw:gap-2 tw:mt-2">
+                                    {% for field in [form_config.MOON_COMPOSITE__EXPOSURE, form_config.MOON_COMPOSITE__THRESHOLD, form_config.MOON_COMPOSITE__ROI_X1, form_config.MOON_COMPOSITE__ROI_Y1, form_config.MOON_COMPOSITE__ROI_X2, form_config.MOON_COMPOSITE__ROI_Y2] %}
+                                    <div class="tw:flex tw:flex-col tw:gap-1">
+                                        {{ field.label(class='tw:text-xs tw:text-base-content/70') }}
+                                        {{ field(class='tw:input tw:input-bordered tw:input-sm tw:h-11 tw:bg-base-200 tw:text-base-content tw:w-full') }}
+                                        <div id="{{ field.id }}-error" class="tw:text-error tw:text-xs" style="display: none;"></div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                <p class="tw:text-xs tw:text-base-content/60 tw:mt-2">Start at 0.001 s; reduce it if the moon is clipped. The long-exposure sky and raw/FITS files are not replaced.</p>
+                            </div>
+                        </div>
+                        <!-- /Moon Composite -->
                     </div>
 
                     <!-- Day -->

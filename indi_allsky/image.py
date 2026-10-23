@@ -593,7 +593,7 @@ class ImageWorker(Process):
 
         self.image_processor.denoise()
 
-        self.image_processor.stretch()
+        self.image_processor.stretch(moon_composite=bool(i_dict.get('moon_composite')))
 
 
         if self.config.get('CONTRAST_ENHANCE_16BIT'):

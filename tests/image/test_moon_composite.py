@@ -18,6 +18,7 @@ import pytest
 
 from indi_allsky import moon
 from indi_allsky import constants
+from indi_allsky import stretch as stretch_classes
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -59,6 +60,56 @@ def test_surface_detail_and_untouched_sky(color):
     assert numpy.array_equal(image[:60], before[:60])
     assert numpy.array_equal(image[:, :60], before[:, :60])
     assert numpy.array_equal(image[60:80], before[60:80])
+
+
+def test_display_transfer_does_not_change_linear_mask_or_clipping_checks():
+    patch = lunar_patch()
+    display = (100 + patch // 2).astype(numpy.uint8)
+    image = numpy.full((80, 80), 25, numpy.uint8)
+    assert moon.blend(image, patch, [0, 0, 80, 80], display_patch=display)
+    assert image[40, 40] == display[40, 40]
+    assert image[10, 10] == 25
+    assert moon.blend(image, patch, [0, 0, 80, 80], display_patch=numpy.full_like(patch, 255))
+    clipped = patch.copy()
+    clipped[patch >= 40] = 255
+    before = image.copy()
+    assert not moon.blend(image, clipped, [0, 0, 80, 80], display_patch=display)
+    numpy.testing.assert_array_equal(image, before)
+
+
+@pytest.mark.parametrize('display', [
+    numpy.zeros((2, 2), numpy.uint8),
+    numpy.zeros((80, 80), numpy.uint16),
+])
+def test_invalid_display_patch_is_explicit(display):
+    with pytest.raises(ValueError, match='display patch'):
+        moon.blend(numpy.zeros((80, 80), numpy.uint8), lunar_patch(), [0, 0, 80, 80], display_patch=display)
+
+
+@pytest.mark.parametrize('mode', stretch_classes.__all__)
+@pytest.mark.parametrize('bits', [8, 12, 16])
+@pytest.mark.parametrize('color', [False, True])
+@pytest.mark.parametrize('gamma', [0, 3])
+def test_replayed_transfer_matches_sky_stretch_without_refitting(mode, bits, color, gamma):
+    operator = getattr(stretch_classes, mode)(
+        {'IMAGE_STRETCH': {'MODE1_GAMMA': gamma}}, mask={1: None},
+    )
+    shape = (80, 120, 3) if color else (80, 120)
+    dtype = numpy.uint8 if bits == 8 else numpy.uint16
+    data = numpy.random.default_rng(10).integers(0, 2 ** bits, size=shape, dtype=dtype)
+    original = data.copy()
+    operator.record_display_transfer = True
+    stretched = operator.stretch(data, bits, 1)
+    tables = operator._display_luts
+    actual = operator.apply_last_stretch(data[20:60, 30:90])
+    numpy.testing.assert_array_equal(actual, stretched[20:60, 30:90])
+    numpy.testing.assert_array_equal(data, original)
+    assert operator._display_luts is tables
+    operator.record_display_transfer = False
+    numpy.testing.assert_array_equal(operator.stretch(data, bits, 1), stretched)
+    assert not operator._display_luts
+    with pytest.raises(ValueError, match='No completed display stretch'):
+        operator.apply_last_stretch(data[:2, :2])
 
 
 @pytest.mark.parametrize('failure', ['empty', 'star', 'clipped', 'ambiguous', 'edge'])
@@ -272,6 +323,7 @@ def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits):
     processor.config['NIGHT_GRAYSCALE'] = mode == 'bayer_gray'
     processor.night_av = {constants.NIGHT_NIGHT: True, constants.NIGHT_MOONMODE: True}
     processor.max_bit_depth = bits
+    processor._moon_display_lut = None
     dtype = numpy.uint8 if bits == 8 else numpy.uint16
     short = numpy.zeros((120, 120), dtype=dtype)
     short[20:100, 20:100] = lunar_patch().astype(dtype) * (2 ** (bits - 8))

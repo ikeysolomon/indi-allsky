@@ -66,6 +66,7 @@ class IndiAllSky_Mode2_MTF_Stretch(IndiAllSky_Stretch_Base):
             self._mtf_lut = lut
 
 
+        self._display_luts = (self._mtf_lut,) * self.operation_count if self.record_display_transfer else ()
         stretched_image = data
         for x in range(self.operation_count):
             stretched_image = self._mtf_lut.take(stretched_image, mode='raise')

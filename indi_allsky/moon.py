@@ -45,8 +45,8 @@ def validate_config(config):
         raise ValueError('MOON_COMPOSITE THRESHOLD must be an integer from 1 to 249')
 
 
-def blend(image, patch, roi, threshold=40):
-    """Replace only the largest isolated lunar silhouette; leave sky untouched."""
+def blend(image, patch, roi, threshold=40, display_patch=None):
+    """Mask the linear lunar ROI and blend its display pixels; leave sky untouched."""
     x1, y1, x2, y2 = roi
     if image.dtype != numpy.uint8 or patch.dtype != numpy.uint8:
         raise ValueError('Moon composite requires 8-bit display data')
@@ -55,6 +55,10 @@ def blend(image, patch, roi, threshold=40):
         or patch.shape != image[y1:y2, x1:x2].shape
     ):
         raise ValueError('Moon composite ROI does not match image geometry')
+    if display_patch is None:
+        display_patch = patch
+    if display_patch.shape != patch.shape or display_patch.dtype != numpy.uint8:
+        raise ValueError('Moon display patch must match the linear ROI geometry and 8-bit format')
 
     gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY) if patch.ndim == 3 else patch
     mask = (gray >= threshold).astype(numpy.uint8)
@@ -86,5 +90,5 @@ def blend(image, patch, roi, threshold=40):
     if patch.ndim == 3:
         alpha = alpha[:, :, None]
     target = image[y1:y2, x1:x2]
-    target[:] = numpy.rint(target * (1.0 - alpha) + patch * alpha).astype(numpy.uint8)
+    target[:] = numpy.rint(target * (1.0 - alpha) + display_patch * alpha).astype(numpy.uint8)
     return True

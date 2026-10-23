@@ -27,6 +27,7 @@ import numpy
 import pytest
 
 from indi_allsky import constants
+from indi_allsky import stretch as stretch_classes
 
 
 ROOT = Path(__file__).resolve().parents[2] / 'indi_allsky'
@@ -547,8 +548,131 @@ def ingest_long(runtime, job):
         job['filename'], job['exposure'], job['gain'], job['binning'],
         datetime.fromtimestamp(job['exp_time']), job['exp_elapsed'], camera,
     )
+    processor.image_list = [i_ref]
     processor.image = numpy.right_shift(processor._debayer(i_ref), 8).astype(numpy.uint8)
     return i_ref
+
+
+@pytest.mark.parametrize('mode', stretch_classes.__all__)
+@pytest.mark.parametrize('bits', [8, 12, 16])
+@pytest.mark.parametrize('color', [False, True])
+def test_moon_roi_reuses_current_sky_transfer_before_8bit_conversion(runtime, monkeypatch, mode, bits, color):
+    run_capture(runtime, monkeypatch, short_dtype=numpy.uint8 if bits == 8 else numpy.uint16)
+    job = runtime.image_q.get(timeout=2)
+    short_filename = Path(job['moon_composite']['filename'])
+    dtype = numpy.uint8 if bits == 8 else numpy.uint16
+    scale = 2 ** (bits - 8)
+    short_data = numpy.zeros((80, 80), dtype)
+    yy, xx = numpy.ogrid[:80, :80]
+    disk = (xx - 40) ** 2 + (yy - 40) ** 2 <= 12 ** 2
+    short_data[disk] = 180 * scale
+    long_data = numpy.broadcast_to((15 + numpy.arange(80) // 4) * scale, (80, 80)).astype(dtype).copy()
+    long_data[disk] = 255 * scale
+    if color:
+        short_data = numpy.stack([short_data] * 3)
+        long_data = numpy.stack([long_data] * 3)
+    fits.PrimaryHDU(short_data, header=fits.Header({'EXPTIME': 0.001})).writeto(short_filename, overwrite=True)
+    fits.PrimaryHDU(long_data, header=fits.Header({'EXPTIME': 0.1})).writeto(job['filename'], overwrite=True)
+    short_bytes = short_filename.read_bytes()
+    with fits.conf.set_temp('use_memmap', False):
+        i_ref = ingest_long(runtime, job)
+    processor = runtime.processor
+    processor.max_bit_depth = bits
+    processor.config['IMAGE_STRETCH'] = {'MOONMODE': True}
+    operator = getattr(stretch_classes, mode)(processor.config, mask={1: None})
+    processor._stretch_o = operator
+    processor.image = processor._debayer(i_ref)
+    original_fits = i_ref.hdulist[0].data.copy()
+    try:
+        processor.stretch(moon_composite=True)
+        expected = operator.apply_last_stretch(numpy.moveaxis(short_data, 0, -1) if color else short_data)
+        if bits != 8:
+            expected = numpy.right_shift(expected, bits - 8).astype(numpy.uint8)
+        processor.convert_16bit_to_8bit()
+        before = processor.image.copy()
+        monkeypatch.setattr(operator, 'stretch', mock.Mock(side_effect=AssertionError('ROI must not refit stretch')))
+        processor.composite_moon(job['moon_composite'], i_ref)
+        numpy.testing.assert_array_equal(processor.image[40, 40], expected[40, 40])
+        assert numpy.any(expected[40, 40] != 180)
+        numpy.testing.assert_array_equal(processor.image[:20], before[:20])
+        numpy.testing.assert_array_equal(i_ref.hdulist[0].data, original_fits)
+        assert short_filename.read_bytes() == short_bytes
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink(missing_ok=True)
+        short_filename.unlink()
+
+
+@pytest.mark.parametrize('flip', [False, True])
+def test_split_display_preserves_linear_side_and_divider(runtime, monkeypatch, flip):
+    run_capture(runtime, monkeypatch)
+    job = runtime.image_q.get(timeout=2)
+    i_ref = ingest_long(runtime, job)
+    processor = runtime.processor
+    processor.config['IMAGE_STRETCH'] = {'MOONMODE': True, 'SPLIT': True}
+    processor.config['IMAGE_FLIP_H'] = flip
+    operator = stretch_classes.mode2_mtf(processor.config)
+    processor._stretch_o = operator
+    processor.image = processor._debayer(i_ref)
+    try:
+        processor.stretch(moon_composite=True)
+        expected = int(operator.apply_last_stretch(numpy.array([180 * 256], numpy.uint16))[0]) >> 8
+        processor.convert_16bit_to_8bit()
+        processor.composite_moon(job['moon_composite'], i_ref)
+        assert processor.image[40, 40] == 0
+        assert processor.image[40, 39] == (expected if flip else 180)
+        assert processor.image[40, 41] == (180 if flip else expected)
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink(missing_ok=True)
+        Path(job['moon_composite']['filename']).unlink()
+
+
+@pytest.mark.parametrize('gate', ['moonmode', 'focus', 'no-operator', 'disabled', 'not-moon', 'day', 'no-pair'])
+def test_skipped_stretch_cannot_reuse_previous_frames_transfer(runtime, gate):
+    processor = runtime.processor
+    processor.config['IMAGE_STRETCH'] = {'MOONMODE': True}
+    processor._stretch_o = stretch_classes.mode2_mtf(processor.config)
+    processor.image = numpy.full((80, 80), 100, numpy.uint8)
+    processor.max_bit_depth = 8
+    processor.getLatestImage = lambda: SimpleNamespace(binning=1, image_bitpix=8)
+    processor.stretch(moon_composite=True)
+    assert processor._moon_display_lut is not None
+    previous = processor._stretch_o
+    if gate == 'moonmode':
+        processor.config['IMAGE_STRETCH']['MOONMODE'] = False
+    elif gate == 'focus':
+        processor.focus_mode = True
+    elif gate == 'disabled':
+        processor.config['MOON_COMPOSITE']['ENABLE'] = False
+    elif gate == 'not-moon':
+        runtime.shared.night[constants.NIGHT_MOONMODE] = 0
+    elif gate == 'day':
+        runtime.shared.night[constants.NIGHT_NIGHT] = 0
+    elif gate == 'no-operator':
+        processor._stretch_o = None
+    processor.stretch(moon_composite=gate != 'no-pair')
+    assert processor._moon_display_lut is None
+    if gate != 'no-operator':
+        assert not previous._display_luts
+        assert not previous.record_display_transfer
+
+
+def test_invalid_roi_transfer_range_keeps_sky_and_reports_bit_depth(runtime, monkeypatch, caplog):
+    run_capture(runtime, monkeypatch)
+    job = runtime.image_q.get(timeout=2)
+    i_ref = ingest_long(runtime, job)
+    processor = runtime.processor
+    processor._moon_display_lut = numpy.arange(256, dtype=numpy.uint8)
+    before = processor.image.copy()
+    try:
+        processor.composite_moon(job['moon_composite'], i_ref)
+        numpy.testing.assert_array_equal(processor.image, before)
+        assert 'short ROI exceeds sky stretch range; check sensor bit depth' in caplog.text
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink(missing_ok=True)
+        Path(job['moon_composite']['filename']).unlink()
 
 
 @pytest.mark.parametrize('legacy', [False, True])

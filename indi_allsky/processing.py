@@ -173,6 +173,7 @@ class ImageProcessor(object):
         self._draw = None
         self._stacker = None
         self._stretch_o = None
+        self._moon_display_lut = None
         self._image_overlay_o = IndiAllSkyImageOverlay(self.config)
 
 
@@ -1909,9 +1910,25 @@ class ImageProcessor(object):
                     image_bayerpat=i_ref.image_bayerpat,
                 )
                 patch = self._debayer(patch_ref)
+            display_patch = None
+            if self._moon_display_lut is not None:
+                # Reuse the sky transfer, but keep linear pixels for masking/clipping.
+                try:
+                    display_patch = self._moon_display_lut[patch]
+                except IndexError as e:
+                    raise ValueError('short ROI exceeds sky stretch range; check sensor bit depth') from e
             if patch_ref.image_bitpix != 8:
                 patch = numpy.right_shift(patch, self.max_bit_depth - 8).astype(numpy.uint8)
-            applied = blend(self.image, patch, settings['ROI'], settings.get('THRESHOLD', 40))
+            if display_patch is not None and self.config.get('IMAGE_STRETCH', {}).get('SPLIT'):
+                columns = numpy.arange(x1, x2)
+                midpoint = self.image.shape[1] // 2
+                unstretched = columns > midpoint if self.config.get('IMAGE_FLIP_H') else columns < midpoint
+                display_patch[:, unstretched] = patch[:, unstretched]
+                display_patch[:, columns == midpoint] = 0
+            applied = blend(
+                self.image, patch, settings['ROI'], settings.get('THRESHOLD', 40),
+                display_patch=display_patch,
+            )
         except (OSError, ValueError) as e:
             logger.warning('Moon composite skipped: %s', e)
             return
@@ -3991,7 +4008,10 @@ class ImageProcessor(object):
             self.text_font_height = int(size_data['size'])  # increase spacing
 
 
-    def stretch(self):
+    def stretch(self, moon_composite=False):
+        self._moon_display_lut = None
+        if self._stretch_o is not None:
+            self._stretch_o.reset_display_transfer()
         if self.focus_mode:
             # disable processing in focus mode
             return
@@ -4014,8 +4034,21 @@ class ImageProcessor(object):
         i_ref = self.getLatestImage()
 
 
+        record_moon_transfer = (
+            moon_composite
+            and self.config.get('MOON_COMPOSITE', {}).get('ENABLE')
+            and self.night_av[constants.NIGHT_NIGHT]
+            and self.night_av[constants.NIGHT_MOONMODE]
+        )
+        self._stretch_o.record_display_transfer = bool(record_moon_transfer)
         stretched_image = self._stretch(i_ref)
 
+        if record_moon_transfer:
+            dtype = numpy.uint8 if self.max_bit_depth == 8 else numpy.uint16
+            lut = self._stretch_o.apply_last_stretch(numpy.arange(2 ** self.max_bit_depth, dtype=dtype))
+            if i_ref.image_bitpix != 8:
+                lut = numpy.right_shift(lut, self.max_bit_depth - 8).astype(numpy.uint8)
+            self._moon_display_lut = lut
 
         if self.config.get('IMAGE_STRETCH', {}).get('SPLIT'):
             self.image = self.splitscreen(self.image, stretched_image)

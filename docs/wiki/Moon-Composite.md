@@ -95,6 +95,22 @@ measurements but before rotation/crop. FITS, raw exports, sky exposure control,
 and stacking inputs remain long-exposure originals. Subsequent white balance,
 gamma and contrast adjustments also affect the replacement moon.
 
+When sky stretching is enabled for Moon Mode, the short ROI reuses the **actual
+lookup tables from that long frame**, at native bit depth before conversion to
+8-bit display pixels. This includes Mode 1 gamma/levels, Mode 2 MTF (including
+the two-pass variant) and Mode 3 adaptive MTF. Adaptive parameters are not fitted
+again to the short ROI. Threshold selection, geometry and short-exposure clipping
+checks still use the original linearly scaled ROI, so brightening the display
+does not enlarge the lunar mask or falsely report sensor saturation.
+Stretch-disabled Moon Mode remains linear. Split-screen preview uses the matching
+transfer on each side and preserves the central divider.
+
+Using the same transfer fixes the linear-versus-stretched processing mismatch;
+it does **not** guarantee equal brightness from two different exposures or a
+natural boundary. Local CLAHE, denoising and dark calibration are not replayed on
+the short ROI. Real pairs must still be inspected for residual discontinuities;
+no independent auto-stretch or automatic brightness matching is assumed.
+
 ## Cost and limitations
 
 One camera cannot take a short exposure *inside* its ongoing long exposure.
@@ -106,6 +122,11 @@ Image processing reads/debayers only the short-frame ROI and blends that ROI,
 not a second full image pipeline. Timing is logged as
 `Moon composite bracket=<id> applied=... in ...s`.
 Disabled mode performs no extra capture, FITS read, or pixel processing.
+The sky transfer is combined into one 8-bit display lookup table per frame;
+the ROI needs one lookup, not another full-frame stretch or adaptive-statistics
+calculation. Tables are prepared for replay only when compositing and Moon Mode
+stretching are active **and that image has a paired short frame**, not for ordinary
+fallback captures.
 
 A local Windows benchmark with a 3008x3008, 16-bit Bayer FITS input measured
 15 ms median / 20 ms p95 for a 200x200 ROI, and 52 ms / 65 ms for a 512x512 ROI
@@ -113,11 +134,17 @@ A local Windows benchmark with a 3008x3008, 16-bit Bayer FITS input measured
 debayer, scaling, mask generation and blend, but **exclude camera acquisition
 and transfer**. Raspberry Pi and cold-storage timings remain unverified.
 
+For the added display-transfer step, a separate 100-iteration warm Windows test
+with 16-bit RGB ROIs measured about 0.24 ms median for the 200x200 lookup and
+1.7 ms for 512x512, plus 0.2-0.7 ms to prepare the combined curve per frame.
+Those are lookup/curve costs only, not total compositor or acquisition timings;
+embedded-host performance remains unverified.
+
 This is a deliberately small first implementation, not HDR recovery of the whole
 scene: long-exposure glow/bloom outside the lunar mask remains. There is no
 inter-frame registration or lunar-motion compensation; long exposures, vibration,
 cloud motion, and a low-resolution lunar disk can make the result imperfect.
-The short exposure is not dark-calibrated or separately stretched. It cannot
+The short exposure is not dark-calibrated or independently auto-stretched. It cannot
 invent surface detail that the lens/sensor does not resolve. A cloud or terrestrial
 light in the configured ROI can still resemble the moon: use a tight unobstructed
 ROI and inspect the result before enabling unattended.
@@ -147,10 +174,21 @@ check and continued ordinary captures within the same worker. Tests also check
 that a permanently busy camera surfaces a recovery error, and that a new worker
 can resume pairing with corrected metadata or run with the feature disabled.
 These simulate recovery; they do not certify any real driver's exposure reporting.
+Transfer tests cover all four stretch variants, mono/RGB and 8/12/16-bit data,
+verify exact agreement with the sky transfer, preserve the linear mask/clipping
+checks, and ensure skipped stretches cannot reuse a previous frame's transfer.
 The INDI transport, clock, database and operating-system signal registration are
 explicit test doubles. These tests do **not** start an INDI server, launch the
 worker supervisor, use a real camera, or exercise the entire Flask/database
 application lifecycle.
+
+The Python configuration test invokes the Node.js built-in test runner. Install
+Node.js (20+ recommended) and put `node` on `PATH` before running
+`python -m pytest tests/image tests/flask/test_moon_composite_config.py -q`.
+The test fails explicitly if Node is missing; it does not silently skip UI
+coverage. Existing repository workflows do not run this pytest suite or guarantee
+Node for it, so any added test job must provision Node explicitly. Node is a test
+prerequisite here, not a new application dependency.
 
 Before claiming hardware readiness, record the following for each tested camera
 and driver combination. At least 100 consecutive lunar brackets is a suggested

@@ -60,6 +60,7 @@ class IndiAllSky_Mode3_Adaptive_MTF_Stretch(IndiAllSky_Stretch_Base):
         stretched_lut = self._normalize_to_range(stretched_lut, 0 - shadows_val, data_max + (data_max - highlights_val))
         stretched_lut = numpy.clip(stretched_lut, 0, data_max)
         stretched_lut = stretched_lut.astype(numpy_dtype)
+        self._display_luts = (stretched_lut,) if self.record_display_transfer else ()
 
         stretched_image = stretched_lut.take(data, mode='raise')
 

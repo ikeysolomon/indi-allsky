@@ -58,8 +58,9 @@ long frame. One locked capture record owns the bracket's local ID, requested
 long exposure/gain/binning, short frame, phase and completion status. The capture
 loop asks that operation to advance; it no longer coordinates separate pending
 settings and short-frame flags. Only one operation may be outstanding.
-The camera accepts one BLOB per requested exposure. Duplicate
-callbacks are ignored, and a reported FITS `EXPTIME` that differs from the request
+Each exposure request accepts at most one BLOB. Callbacks received when no image
+is awaited are ignored; that does not identify a duplicate arriving during a
+later request. A reported FITS `EXPTIME` that differs from the request
 is rejected rather than relabelled as the other half of a bracket. The tolerance
 is 1% or one microsecond, whichever is larger, to allow driver rounding.
 Local operation state, callback ownership and camera readiness coordinate the
@@ -67,6 +68,19 @@ pair; metadata is a defensive cross-check, not a camera-generated frame ID.
 When `DATE-OBS` is supplied, it must be parseable and not predate the request by
 more than one second (allowing whole-second timestamp precision). Offset-free
 FITS timestamps are interpreted as UTC. Keep camera and host clocks synchronized.
+
+**Driver limitation: stale-frame rejection is not guaranteed across INDI
+drivers.** `EXPTIME` is an exposure duration, not a unique frame identifier.
+If a driver omits `DATE-OBS`, a delayed short frame from an earlier bracket with
+the same exposure duration can pass the checks while a new short frame is
+awaited. It can receive the new local bracket ID and be paired with the new long
+frame; the ID does not prove when the camera captured it. Coarse, repeated or
+incorrect driver timestamps can also limit detection even when the field exists.
+Locking, readiness checks and connection resets do not establish a universal
+camera-buffer/frame-identity guarantee. Driver-specific capture evidence is
+still required; missing timestamps are currently accepted, not automatically
+treated as a reason to suspend compositing.
+
 Rejected BLOBs leave the request waiting for a valid BLOB or the existing timeout.
 A timed-out bracket, or missing `EXPTIME` needed to verify the pair, suspends
 compositing until configuration reload/restart, without changing the saved
@@ -78,8 +92,8 @@ bracket. If reconnection/idle verification fails, the normal worker error path
 reports the failure instead of pretending that a fallback image was captured.
 Check the requested/reported values in the `EXPTIME` warning and the driver's
 exposure limits/step size for **both** short and long captures before re-enabling.
-The strict pairing tolerance is not automatically relaxed, and an unverified
-frame is never substituted as a successful bracket.
+The strict pairing tolerance is not automatically relaxed. A frame that fails
+these metadata checks is not composited; passing them does not prove its identity.
 Malformed FITS headers and truncated data are rejected with a diagnostic while
 waiting for a replacement frame or timeout; partial temporary files are removed.
 
@@ -193,6 +207,10 @@ checks, and ensure skipped stretches cannot reuse a previous frame's transfer.
 Compatibility tests verify that active 16-bit night CLAHE suppresses brackets
 and transfer preparation, and that queued pairs leave the CLAHE-processed mono/RGB
 sky and original FITS unchanged without reading the short frame.
+A timestamp characterization test replays the same old short BLOB into a later
+bracket: without `DATE-OBS` it is accepted, while an accurately reported old
+timestamp is rejected. This intentionally demonstrates the identification limit,
+not guaranteed stale-frame protection.
 The INDI transport, clock, database and operating-system signal registration are
 explicit test doubles. These tests do **not** start an INDI server, launch the
 worker supervisor, use a real camera, or exercise the entire Flask/database
@@ -226,8 +244,10 @@ starting run, not a universal guarantee:
    has exactly one intended short partner and that rejected/missing frames never
    become another bracket's partner. These bracket IDs are **local bookkeeping,
    not IDs supplied by the camera**. Missing or coarse driver timestamps still
-   limit detection of delayed frames with the same exposure; hardware evidence
-   remains necessary.
+   limit detection of delayed frames with the same exposure; metadata/log IDs
+   alone cannot prove freshness. Record driver-specific evidence, using frame
+   content or driver traces where available, rather than claiming universal
+   stale-frame rejection.
 4. **Image quality:** examine full-resolution side-by-side long, short and
    composite crops. Confirm surface contrast comes from the actual short frame,
    not clipping, interpolation or the mask edge. Inspect alignment, crescent

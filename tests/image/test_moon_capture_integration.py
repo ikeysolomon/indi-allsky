@@ -331,6 +331,52 @@ def test_stale_same_exposure_timestamp_cannot_enter_a_new_bracket(runtime, caplo
     assert 'DATE-OBS' in caplog.text
 
 
+@pytest.mark.parametrize('has_timestamp', [False, True])
+def test_replayed_same_exposure_frame_is_indistinguishable_without_date_obs(
+    runtime, monkeypatch, caplog, has_timestamp,
+):
+    client = runtime.client
+    clock = SimpleNamespace(now=time.time())
+    monkeypatch.setattr(runtime.camera, 'time', SimpleNamespace(time=lambda: clock.now))
+    old_headers = {'DATE-OBS': datetime.fromtimestamp(clock.now, tz=timezone.utc).isoformat()} if has_timestamp else None
+    old_blob = blob(0.001, value=100, headers=old_headers)
+    runtime.worker.shoot(0.1, 75, 1, sync=False)
+    first_operation = client._moon_capture
+    client.newBLOB(old_blob)
+    first_filename = Path(first_operation.short_frame['filename'])
+    client.clearMoonComposite()
+    assert not first_filename.exists()
+
+    clock.now += 60
+    runtime.worker.shoot(0.1, 75, 1, sync=False)
+    second_operation = client._moon_capture
+    assert second_operation.id == first_operation.id + 1
+    client.newBLOB(old_blob)
+    if has_timestamp:
+        assert second_operation.status == 'waiting'
+        assert second_operation.short_frame is None
+        assert 'Ignoring stale Moon bracket' in caplog.text
+    else:
+        assert second_operation.status == 'received'
+        assert second_operation.short_frame['moon_composite_id'] == second_operation.id
+        assert 'Ignoring stale Moon bracket' not in caplog.text
+
+    current_headers = {'DATE-OBS': datetime.fromtimestamp(clock.now, tz=timezone.utc).isoformat()} if has_timestamp else None
+    client.newBLOB(blob(0.001, value=180, headers=current_headers))
+    assert client.continueMoonComposite()
+    client.newBLOB(blob(0.1, headers=current_headers))
+    job = runtime.image_q.get(timeout=2)
+    try:
+        assert job['moon_composite_id'] == job['moon_composite']['moon_composite_id'] == second_operation.id
+        with fits.open(job['moon_composite']['filename']) as hdulist:
+            assert ('DATE-OBS' in hdulist[0].header) is has_timestamp
+            assert hdulist[0].header['EXPTIME'] == 0.001
+            assert hdulist[0].data[40, 40] == (180 if has_timestamp else 100) * 256
+    finally:
+        Path(job['filename']).unlink()
+        Path(job['moon_composite']['filename']).unlink()
+
+
 def test_callback_before_exposure_command_returns_has_complete_metadata(runtime, monkeypatch):
     client = runtime.client
     observed = []

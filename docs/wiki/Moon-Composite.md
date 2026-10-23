@@ -146,7 +146,15 @@ cadence is retained when the pair fits within the exposure period; otherwise
 capture slows. This mode cannot promise zero capture overhead.
 
 Image processing reads/debayers only the short-frame ROI and blends that ROI,
-not a second full image pipeline. Timing is logged as
+not a second full image pipeline. FITS reads use `hdu.section` with
+`memmap=False`: section access reads only the requested pixels, without loading
+the full image. Explicit memory mapping is not used because Astropy rejects it
+for unsigned 16-bit FITS images with `BZERO` scaling. The FITS file stays open
+through section extraction and decoding, and closes before short-frame cleanup.
+Blending reuses two ROI-sized float buffers for weighted pixels, addition and
+rounding, preserving the original float32 arithmetic and round-to-even output.
+Clipping, connected-component ambiguity checks and alpha feathering are unchanged.
+Timing is logged as
 `Moon composite bracket=<id> applied=... in ...s`.
 Disabled mode performs no extra capture, FITS read, or pixel processing.
 The sky transfer is combined into one 8-bit display lookup table per frame;
@@ -166,6 +174,14 @@ with 16-bit RGB ROIs measured about 0.24 ms median for the 200x200 lookup and
 1.7 ms for 512x512, plus 0.2-0.7 ms to prepare the combined curve per frame.
 Those are lookup/curve costs only, not total compositor or acquisition timings;
 embedded-host performance remains unverified.
+
+A separate synthetic Windows comparison of the complete `blend()` call (60
+interleaved iterations, NumPy 2.4.2 / OpenCV 4.13.0) measured 512x512 mono medians
+of 5.44 ms before / 3.89 ms with buffer reuse, and BGR medians of 26.01 / 25.24 ms.
+Peak Python-tracked allocations fell from 5.50 to 4.54 MiB for mono and 12.00 to
+9.07 MiB for BGR; these are not process RSS or native OpenCV allocation totals.
+Outputs matched exactly. These blend-only measurements exclude FITS I/O and
+camera acquisition, and do not establish an embedded-host speedup.
 
 This is a deliberately small first implementation, not HDR recovery of the whole
 scene: long-exposure glow/bloom outside the lunar mask remains. There is no

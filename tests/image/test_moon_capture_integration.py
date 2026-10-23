@@ -627,11 +627,15 @@ def test_moon_roi_reuses_current_sky_transfer_before_8bit_conversion(runtime, mo
     processor.config['IMAGE_STRETCH'] = {'MOONMODE': True}
     operator = getattr(stretch_classes, mode)(processor.config, mask={1: None})
     processor._stretch_o = operator
+    apply_transfer = operator.apply_last_stretch
+    replay_transfer = mock.Mock(wraps=apply_transfer)
+    monkeypatch.setattr(operator, 'apply_last_stretch', replay_transfer)
     processor.image = processor._debayer(i_ref)
     original_fits = i_ref.hdulist[0].data.copy()
     try:
         processor.stretch(moon_composite=True)
-        expected = operator.apply_last_stretch(numpy.moveaxis(short_data, 0, -1) if color else short_data)
+        combined_lut = processor._moon_display_lut
+        expected = apply_transfer(numpy.moveaxis(short_data, 0, -1) if color else short_data)
         if bits != 8:
             expected = numpy.right_shift(expected, bits - 8).astype(numpy.uint8)
         processor.convert_16bit_to_8bit()
@@ -643,6 +647,9 @@ def test_moon_roi_reuses_current_sky_transfer_before_8bit_conversion(runtime, mo
         numpy.testing.assert_array_equal(processor.image[:20], before[:20])
         numpy.testing.assert_array_equal(i_ref.hdulist[0].data, original_fits)
         assert short_filename.read_bytes() == short_bytes
+        replay_transfer.assert_called_once()
+        assert replay_transfer.call_args.args[0].shape == (2 ** bits,)
+        assert processor._moon_display_lut is combined_lut
     finally:
         i_ref.hdulist.close()
         Path(job['filename']).unlink(missing_ok=True)

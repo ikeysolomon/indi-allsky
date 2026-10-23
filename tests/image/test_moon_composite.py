@@ -62,6 +62,46 @@ def test_surface_detail_and_untouched_sky(color):
     assert numpy.array_equal(image[60:80], before[60:80])
 
 
+@pytest.mark.parametrize('color', [False, True])
+@pytest.mark.parametrize('separate_display', [False, True])
+@pytest.mark.parametrize('seed', [0, 1, 2])
+def test_buffered_blend_matches_original_arithmetic(monkeypatch, color, separate_display, seed):
+    rng = numpy.random.default_rng(seed)
+    shape = (120, 140, 3) if color else (120, 140)
+    image = rng.integers(0, 256, size=shape, dtype=numpy.uint8)
+    before = image.copy()
+    patch = lunar_patch(color)
+    display = rng.integers(0, 256, size=patch.shape, dtype=numpy.uint8) if separate_display else patch
+    # Exercise strided display pixels as well as a strided target ROI.
+    backing = numpy.empty((80, 160, 3) if color else (80, 160), numpy.uint8)
+    backing[:, ::2] = display
+    display = backing[:, ::2]
+    original_display = display.copy()
+    original_patch = patch.copy()
+    gaussian_blur = cv2.GaussianBlur
+    weights = []
+
+    def record_alpha(*args, **kwargs):
+        alpha = gaussian_blur(*args, **kwargs)
+        weights.append(alpha.copy())
+        return alpha
+
+    monkeypatch.setattr(cv2, 'GaussianBlur', record_alpha)
+    assert moon.blend(
+        image, patch, [20, 20, 100, 100],
+        display_patch=display if separate_display else None,
+    )
+    alpha = weights[0][:, :, None] if color else weights[0]
+    expected = before.copy()
+    pixels = display if separate_display else patch
+    expected[20:100, 20:100] = numpy.rint(
+        before[20:100, 20:100] * (1.0 - alpha) + pixels * alpha,
+    ).astype(numpy.uint8)
+    numpy.testing.assert_array_equal(image, expected)
+    numpy.testing.assert_array_equal(patch, original_patch)
+    numpy.testing.assert_array_equal(display, original_display)
+
+
 def test_display_transfer_does_not_change_linear_mask_or_clipping_checks():
     patch = lunar_patch()
     display = (100 + patch // 2).astype(numpy.uint8)
@@ -310,7 +350,8 @@ def test_worker_always_cleans_short_file(tmp_path, fail):
 
 @pytest.mark.parametrize('mode', ['mono', 'rgb', 'bayer', 'bayer_gray'])
 @pytest.mark.parametrize('bits', [8, 12, 16])
-def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits):
+@pytest.mark.parametrize('sensor_size', [120, 1024])
+def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits, sensor_size):
     cls = isolated_class('processing.py', 'ImageProcessor', {
         'composite_moon', '_debayer', '__cfa_bgr_map', '__cfa_gray_map',
     }, {
@@ -326,7 +367,7 @@ def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits):
     processor.max_bit_depth = bits
     processor._moon_display_lut = None
     dtype = numpy.uint8 if bits == 8 else numpy.uint16
-    short = numpy.zeros((120, 120), dtype=dtype)
+    short = numpy.zeros((sensor_size, sensor_size), dtype=dtype)
     short[20:100, 20:100] = lunar_patch().astype(dtype) * (2 ** (bits - 8))
     if mode == 'rgb':
         short = numpy.stack([short, short, short])
@@ -343,14 +384,40 @@ def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits):
         image_bayerpat=header.get('BAYERPAT'),
     )
     color = mode in ('rgb', 'bayer')
-    processor.image = numpy.full((120, 120, 3) if color else (120, 120), 255, numpy.uint8)
-    processor.composite_moon({
-        'filename': str(filename), 'gain': 75, 'binning': 1,
-        'camera_id': 7, 'exposure': 0.001,
-    }, i_ref)
+    shape = (sensor_size, sensor_size, 3) if color else (sensor_size, sensor_size)
+    processor.image = numpy.full(shape, 255, numpy.uint8)
+    open_fits = fits.open
+    opened = []
+    read_sizes = []
+
+    def open_short(*args, **kwargs):
+        hdulist = open_fits(*args, **kwargs)
+        opened.append(hdulist)
+        readarray = hdulist._file.readarray
+
+        def read_roi(*args, **kwargs):
+            assert not hdulist._file.closed
+            data = readarray(*args, **kwargs)
+            read_sizes.append(data.nbytes)
+            return data
+
+        hdulist._file.readarray = read_roi
+        return hdulist
+
+    with mock.patch('astropy.io.fits.open', side_effect=open_short):
+        processor.composite_moon({
+            'filename': str(filename), 'gain': 75, 'binning': 1,
+            'camera_id': 7, 'exposure': 0.001,
+        }, i_ref)
     assert numpy.all(processor.image[60, 57] == 90)
     assert numpy.all(processor.image[0, 0] == 255)
     assert not numpy.any(i_ref.hdulist[0].data)
+    assert sum(read_sizes) == 80 * 80 * numpy.dtype(dtype).itemsize * (3 if mode == 'rgb' else 1)
+    assert len(opened) == 1
+    assert not opened[0][0]._data_loaded
+    assert opened[0]._file.closed
+    filename.unlink()
+    assert not filename.exists()
 
 
 @pytest.mark.parametrize('mismatch', ['gain', 'binning', 'camera_id', 'exposure'])

@@ -1885,6 +1885,7 @@ class ImageProcessor(object):
             x1, y1, x2, y2 = settings['ROI']
             if x2 > self.image.shape[1] or y2 > self.image.shape[0]:
                 raise ValueError('moon ROI is outside the binned sensor image')
+            # section reads only the ROI; memmap=True rejects unsigned FITS with BZERO.
             with fits.open(frame['filename'], memmap=False) as hdulist:
                 hdu = hdulist[0]
                 if hdu.shape != i_ref.hdulist[0].data.shape:

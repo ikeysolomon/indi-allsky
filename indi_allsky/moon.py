@@ -99,5 +99,10 @@ def blend(image, patch, roi, threshold=40, display_patch=None):
     if patch.ndim == 3:
         alpha = alpha[:, :, None]
     target = image[y1:y2, x1:x2]
-    target[:] = numpy.rint(target * (1.0 - alpha) + display_patch * alpha).astype(numpy.uint8)
+    weighted_patch = numpy.multiply(display_patch, alpha)
+    numpy.subtract(1.0, alpha, out=alpha)
+    blended = numpy.multiply(target, alpha)
+    numpy.add(blended, weighted_patch, out=blended)
+    numpy.rint(blended, out=blended)
+    target[:] = blended
     return True

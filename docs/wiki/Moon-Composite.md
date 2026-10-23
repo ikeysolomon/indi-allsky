@@ -54,9 +54,22 @@ frame is discarded and the long image is processed normally.
 ## Safety and output
 
 No extra image job is queued: the short frame travels with its corresponding
-long frame. The compositor rejects small targets, multiple significant bright
+long frame. The camera accepts one BLOB per requested exposure. Duplicate
+callbacks are ignored, and a reported FITS `EXPTIME` that differs from the request
+is rejected rather than relabelled as the other half of a bracket. The tolerance
+is 1% or one microsecond, whichever is larger, to allow driver rounding.
+When `DATE-OBS` is supplied, it must be parseable and not predate the request by
+more than one second (allowing whole-second timestamp precision). Offset-free
+FITS timestamps are interpreted as UTC. Keep camera and host clocks synchronized.
+Rejected BLOBs leave the request waiting for a valid BLOB or the existing timeout;
+timeouts disconnect/restart capture rather than reuse an incomplete bracket.
+If either frame omits `EXPTIME`, capture continues with the original long image
+and logs the driver metadata limitation instead of attempting an unverified blend.
+
+The compositor rejects small targets, multiple significant bright
 objects, targets touching the region edge, clipped short exposures, or mismatched
-geometry/settings, with an explicit log message. The long image remains unchanged
+geometry/settings (including Bayer offsets, subframe origin, bit format and row
+order), with an explicit log message. The long image remains unchanged
 if replacement cannot be made. Temporary short frames are removed after
 processing (including failed long-frame processing), abort, or orderly shutdown.
 
@@ -94,3 +107,64 @@ ROI and inspect the result before enabling unattended.
 Validate with real camera frames before relying on it. Synthetic tests exercise
 pairing, skip paths, cleanup, monochrome/RGB FITS and 8/12/16-bit scaling, but do
 not substitute for camera-driver and night-sky testing.
+
+## Validation status and real-camera acceptance
+
+**Real-camera validation is outstanding. No captured lunar pairs or hardware
+timing logs have been supplied.** A passing synthetic or simulated-transport test
+must not be presented as evidence that lunar detail looks convincing or that an
+INDI camera/driver maintains cadence.
+
+The existing AST-isolated tests remain. Additional boundary integration tests
+import the complete camera, capture and image-processing modules, run their real
+constructors and the capture worker's main loop, deliver BLOBs through both
+legacy and newer INDI callback entry points, transfer jobs through a real
+multiprocessing queue, and decode/composite real FITS files containing synthetic
+pixels. They cover delayed/duplicate callbacks, timeout/shutdown cleanup,
+missing/malformed exposure metadata, readout geometry and clipped short frames.
+The INDI transport, clock, database and operating-system signal registration are
+explicit test doubles. These tests do **not** start an INDI server, launch the
+worker supervisor, use a real camera, or exercise the entire Flask/database
+application lifecycle.
+
+Before claiming hardware readiness, record the following for each tested camera
+and driver combination. At least 100 consecutive lunar brackets is a suggested
+starting run, not a universal guarantee:
+
+1. **Equipment and settings:** camera model, sensor resolution/bit depth, driver
+   name/version, INDI/PyIndi versions, host/USB connection, lens, gain, binning,
+   sky/short exposures, ROI, threshold and exposure period. Confirm the lunar
+   disk has enough resolved pixels to contain genuine surface detail.
+2. **Original evidence:** retain unmodified short and long FITS frames, final
+   display images and capture/processing logs for the same run. Short frames are
+   temporary in this experiment; use an existing trusted passive BLOB recorder
+   if available. Do not run a second exposure controller alongside indi-allsky.
+   Separately captured manual pairs can assess optical quality, but cannot prove
+   indi-allsky's pairing or callback timing.
+3. **Pairing:** correlate `Moon bracket <id> short received`, `queued` and
+   `Moon composite bracket=<id>` log entries. Compare actual FITS `EXPTIME` and
+   `DATE-OBS` with request times/settings. Check that every accepted long frame
+   has exactly one intended short partner and that rejected/missing frames never
+   become another bracket's partner. These bracket IDs are **local bookkeeping,
+   not IDs supplied by the camera**. Missing or coarse driver timestamps still
+   limit detection of delayed frames with the same exposure; hardware evidence
+   remains necessary.
+4. **Image quality:** examine full-resolution side-by-side long, short and
+   composite crops. Confirm surface contrast comes from the actual short frame,
+   not clipping, interpolation or the mask edge. Inspect alignment, crescent
+   phases, lunar motion, clouds, bloom and colour/brightness discontinuities.
+   Record failures as well as successes. A short exposure cannot recover detail
+   that the lens and sensor do not resolve.
+5. **Cadence:** measure consecutive sky-frame start times, short/long acquisition
+   and readout times, queue depth, and compositor median/p95 on the intended host.
+   Compare the same setup with the feature disabled. Test both a period with
+   enough headroom and one shorter than the combined acquisition/readout time;
+   report any slowdown rather than inferring it from the short exposure alone.
+6. **Transitions and recovery:** verify inactive Moon Mode/day/focus/SQM do not
+   acquire moon brackets. Check Moon Mode ending with a bracket in flight,
+   orderly shutdown, and a deliberately interrupted capture in a controlled
+   session. Confirm incomplete temporary frames are removed and normal
+   acquisition resumes after restart without reusing stale frames.
+
+Repeat with a second camera/driver before making cross-driver reliability
+claims. Keep the feature experimental until the evidence above is reviewed.

@@ -1886,6 +1886,18 @@ class ImageProcessor(object):
                     raise ValueError('short and long sensor geometry differ')
                 if hdu.header.get('BAYERPAT') != i_ref.hdulist[0].header.get('BAYERPAT'):
                     raise ValueError('short and long Bayer patterns differ')
+                long_header = i_ref.hdulist[0].header
+                for key, default in (
+                    ('BITPIX', None), ('XBAYROFF', 0), ('YBAYROFF', 0),
+                    ('XORGSUBF', 0), ('YORGSUBF', 0), ('ROWORDER', 'unset'),
+                ):
+                    if hdu.header.get(key, default) != long_header.get(key, default):
+                        raise ValueError('short and long {0} differ; check sensor format and readout geometry'.format(key))
+                reported_exposure = hdu.header.get('EXPTIME')
+                if reported_exposure is None or not math.isclose(
+                    float(reported_exposure), frame['exposure'], rel_tol=0.01, abs_tol=0.000001,
+                ):
+                    raise ValueError('short FITS EXPTIME is missing or differs from the request; check driver metadata')
                 if len(hdu.shape) == 2:
                     data = hdu.section[y1:y2, x1:x2]
                 else:
@@ -1903,7 +1915,8 @@ class ImageProcessor(object):
         except (OSError, ValueError) as e:
             logger.warning('Moon composite skipped: %s', e)
             return
-        logger.info('Moon composite applied=%s in %0.4fs', applied, time.monotonic() - started)
+        logger.info('Moon composite bracket=%s applied=%s in %0.4fs',
+                    frame.get('moon_composite_id', 'unknown'), applied, time.monotonic() - started)
 
 
     def rotate_90(self):

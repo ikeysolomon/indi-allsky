@@ -1,14 +1,16 @@
 import time
-#import math
+import math
 import re
 import io
 import tempfile
 import ctypes
 import importlib.metadata
 from datetime import datetime
+from datetime import timezone
 from dateutil import parser
 from pathlib import Path
 import logging
+from threading import RLock
 from pprint import pformat  # noqa: F401
 
 import PyIndi
@@ -143,6 +145,9 @@ class IndiClient(PyIndi.BaseClient):
         self.moon_composite_short = False
         self.moon_composite_frame = None
         self.moon_composite_waiting_blob = False
+        self.moon_composite_capture = bool(self.config.get('MOON_COMPOSITE', {}).get('ENABLE'))
+        self.moon_composite_id = 0
+        self._moon_composite_lock = RLock()
 
         self.exposureStartTime = 0
 
@@ -394,7 +399,16 @@ class IndiClient(PyIndi.BaseClient):
 
 
     def processBlob(self, blob):
+        with self._moon_composite_lock:
+            self._processBlob(blob)
+
+
+    def _processBlob(self, blob):
         from astropy.io import fits
+
+        if self.moon_composite_capture and not self.moon_composite_waiting_blob:
+            logger.warning('Ignoring duplicate or unsolicited Moon Mode BLOB; no exposure is awaiting an image')
+            return
 
         exposure_elapsed_s = time.time() - self.exposureStartTime
 
@@ -402,15 +416,53 @@ class IndiClient(PyIndi.BaseClient):
 
         ### get image data
         imgdata = blob.getblobdata()
-        blobfile = io.BytesIO(imgdata)
-        hdulist = fits.open(blobfile)
-
+        f_tmpfile_p = None
+        reported_exposure = None
         try:
-            with tempfile.NamedTemporaryFile(mode='w+b', delete=False, suffix='.fit') as f_tmpfile:
-                hdulist.writeto(f_tmpfile)
-                f_tmpfile_p = Path(f_tmpfile.name)
-        except OSError as e:
-            logger.error('OSError: %s', str(e))
+            with io.BytesIO(imgdata) as blobfile, fits.open(blobfile) as hdulist:
+                reported_exposure = hdulist[0].header.get('EXPTIME')
+                if self.moon_composite_capture and reported_exposure is not None:
+                    try:
+                        exposure_matches = math.isclose(
+                            float(reported_exposure), self.exposure, rel_tol=0.01, abs_tol=0.000001,
+                        )
+                    except (TypeError, ValueError):
+                        exposure_matches = False
+                    if not exposure_matches:
+                        logger.warning(
+                            'Ignoring Moon bracket %d BLOB: EXPTIME=%r, requested=%0.6fs; '
+                            'possible delayed frame or driver exposure mismatch. Waiting for a valid BLOB or timeout.',
+                            self.moon_composite_id, reported_exposure, self.exposure,
+                        )
+                        return
+                if self.moon_composite_capture and hdulist[0].header.get('DATE-OBS'):
+                    date_obs = hdulist[0].header['DATE-OBS']
+                    try:
+                        captured_at = parser.parse(str(date_obs))
+                        if captured_at.tzinfo is None:
+                            captured_at = captured_at.replace(tzinfo=timezone.utc)
+                        stale = captured_at.timestamp() < self.exposureStartTime - 1.0
+                    except (ValueError, TypeError, OverflowError) as e:
+                        logger.warning(
+                            'Ignoring Moon bracket %d BLOB: invalid DATE-OBS=%r (%s); '
+                            'check driver FITS timestamps. Waiting for a valid BLOB or timeout.',
+                            self.moon_composite_id, date_obs, e,
+                        )
+                        return
+                    if stale:
+                        logger.warning(
+                            'Ignoring stale Moon bracket %d BLOB: DATE-OBS=%r predates this exposure; '
+                            'check camera/host clocks and driver timestamps.',
+                            self.moon_composite_id, date_obs,
+                        )
+                        return
+                with tempfile.NamedTemporaryFile(mode='w+b', delete=False, suffix='.fit') as f_tmpfile:
+                    f_tmpfile_p = Path(f_tmpfile.name)
+                    hdulist.writeto(f_tmpfile)
+        except (OSError, ValueError) as e:
+            if f_tmpfile_p:
+                f_tmpfile_p.unlink(missing_ok=True)
+            logger.error('Invalid camera FITS BLOB: %s; waiting for another frame or exposure timeout', e)
             return
 
 
@@ -436,13 +488,33 @@ class IndiClient(PyIndi.BaseClient):
 
         self.sqm_exposure = False  # reset
 
+        if self.moon_composite_capture:
+            jobdata['moon_composite_id'] = self.moon_composite_id
+            jobdata['moon_composite_verified'] = reported_exposure is not None
+
         if self.moon_composite_short:
             self.moon_composite_frame = jobdata
+            logger.info(
+                'Moon bracket %d short received: exposure=%0.6fs elapsed=%0.4fs gain=%0.3f binning=%d',
+                self.moon_composite_id, self.exposure, exposure_elapsed_s, self.gain, self.binning,
+            )
             self.moon_composite_waiting_blob = False
             return
         if self.moon_composite_frame:
-            jobdata['moon_composite'] = self.moon_composite_frame
-            self.moon_composite_frame = None
+            short_frame = self.moon_composite_frame
+            if short_frame.get('moon_composite_verified') and jobdata.get('moon_composite_verified'):
+                jobdata['moon_composite'] = short_frame
+                logger.info(
+                    'Moon bracket %d queued: short=%0.6fs long=%0.6fs long_elapsed=%0.4fs',
+                    self.moon_composite_id, short_frame['exposure'], self.exposure, exposure_elapsed_s,
+                )
+            else:
+                logger.warning(
+                    'Moon bracket %d skipped: driver did not supply EXPTIME for both frames. '
+                    'Keeping the long exposure; check driver FITS metadata support.',
+                    self.moon_composite_id,
+                )
+                Path(short_frame['filename']).unlink(missing_ok=True)
 
 
         ### Not using DB task queue to reduce DB I/O
@@ -459,15 +531,24 @@ class IndiClient(PyIndi.BaseClient):
         #    self.image_q.put({'task_id' : task.id})
         ###
 
-        self.image_q.put(jobdata)
+        try:
+            self.image_q.put(jobdata)
+        except (OSError, ValueError) as e:
+            f_tmpfile_p.unlink(missing_ok=True)
+            logger.error('Unable to queue camera frame: %s; retaining bracket ownership until cleanup or timeout', e)
+            return
+        self.moon_composite_frame = None
         self.moon_composite_waiting_blob = False
 
     def clearMoonComposite(self):
-        self.moon_composite_short = False
-        self.moon_composite_waiting_blob = False
-        if self.moon_composite_frame:
-            Path(self.moon_composite_frame['filename']).unlink(missing_ok=True)
-            self.moon_composite_frame = None
+        with self._moon_composite_lock:
+            self.moon_composite_short = False
+            self.moon_composite_waiting_blob = False
+            # Ignore late callbacks after an abandoned bracket until a new request.
+            self.moon_composite_capture = bool(self.config.get('MOON_COMPOSITE', {}).get('ENABLE'))
+            if self.moon_composite_frame:
+                Path(self.moon_composite_frame['filename']).unlink(missing_ok=True)
+                self.moon_composite_frame = None
 
 
     def newMessage(self, d, m):
@@ -1097,10 +1178,6 @@ class IndiClient(PyIndi.BaseClient):
         if not timeout:
             timeout = self.timeout
 
-        self.exposure = exposure
-        self.sqm_exposure = sqm_exposure
-
-
         if self.gain != gain:
             self.setCcdGain(gain)
 
@@ -1108,22 +1185,28 @@ class IndiClient(PyIndi.BaseClient):
             self.setCcdBinning(binning)
 
 
-        self.exposureStartTime = time.time()
-        self.moon_composite_waiting_blob = bool(
-            self.config.get('MOON_COMPOSITE', {}).get('ENABLE')
-            and self.night_av[constants.NIGHT_NIGHT]
-            and self.night_av[constants.NIGHT_MOONMODE]
-            and not self.config.get('FOCUS_MODE')
-            and not sqm_exposure and not sync
-        )
+        with self._moon_composite_lock:
+            self.exposure = exposure
+            self.sqm_exposure = sqm_exposure
+            self.exposureStartTime = time.time()
+            self.moon_composite_capture = bool(
+                self.moon_composite_short or self.moon_composite_frame is not None
+                or (
+                    self.config.get('MOON_COMPOSITE', {}).get('ENABLE')
+                    and self.night_av[constants.NIGHT_NIGHT]
+                    and self.night_av[constants.NIGHT_MOONMODE]
+                    and not self.config.get('FOCUS_MODE')
+                    and not sqm_exposure and not sync
+                )
+            )
+            if self.moon_composite_short:
+                self.moon_composite_id += 1
+            self.moon_composite_waiting_blob = self.moon_composite_capture
+            self._expUtils.EXPOSURE_CURRENT = exposure
 
         ctl_ccd_exposure = self.set_number(self.ccd_device, 'CCD_EXPOSURE', {'CCD_EXPOSURE_VALUE': float(exposure)}, sync=sync, timeout=timeout)
 
         self._ctl_ccd_exposure = ctl_ccd_exposure
-
-
-        # Update shared exposure value
-        self._expUtils.EXPOSURE_CURRENT = exposure
 
 
     def getCcdExposureStatus(self):

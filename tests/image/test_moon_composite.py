@@ -1,12 +1,14 @@
 import ast
 import io
 import logging
+import math
 from datetime import datetime
 from pathlib import Path
 from queue import SimpleQueue
 import tempfile
 import time
 from types import SimpleNamespace
+from threading import RLock
 from unittest import mock
 
 from astropy.io import fits
@@ -160,15 +162,19 @@ def test_capture_gates_preserve_normal_exposure(gate):
 
 def indi_client():
     cls = isolated_class(Path('camera') / 'indi.py', 'IndiClient', {
-        'processBlob', 'clearMoonComposite', 'getCcdExposureStatus',
+        'processBlob', '_processBlob', 'clearMoonComposite', 'getCcdExposureStatus',
     }, {
-        'time': time, 'io': io, 'tempfile': tempfile, 'Path': Path,
+        'time': time, 'io': io, 'tempfile': tempfile, 'Path': Path, 'math': math,
         'datetime': datetime, 'logger': logging.getLogger('indi_allsky'),
     })
     client = cls()
     client.moon_composite_short = True
     client.moon_composite_frame = None
     client.moon_composite_waiting_blob = False
+    client.moon_composite_capture = True
+    client.moon_composite_id = 1
+    client._moon_composite_lock = RLock()
+    client.config = {'MOON_COMPOSITE': {'ENABLE': True}}
     client.exposureStartTime = time.time()
     client.exposure = 0.001
     client.gain = 75
@@ -185,8 +191,9 @@ def indi_client():
 
 def test_pairing_waits_for_blobs_and_queues_one_job():
     client = indi_client()
+    client.moon_composite_waiting_blob = True
     stream = io.BytesIO()
-    fits.PrimaryHDU(lunar_patch()).writeto(stream)
+    fits.PrimaryHDU(lunar_patch(), header=fits.Header({'EXPTIME': 0.001})).writeto(stream)
     blob = SimpleNamespace(getblobdata=stream.getvalue)
     assert client.getCcdExposureStatus()[0] is False
     client.processBlob(blob)
@@ -196,7 +203,11 @@ def test_pairing_waits_for_blobs_and_queues_one_job():
         assert client.getCcdExposureStatus()[0] is True
         client.moon_composite_short = False
         client.exposure = 15.0
+        client.moon_composite_waiting_blob = True
         assert client.getCcdExposureStatus()[0] is False
+        stream = io.BytesIO()
+        fits.PrimaryHDU(lunar_patch(), header=fits.Header({'EXPTIME': 15.0})).writeto(stream)
+        blob = SimpleNamespace(getblobdata=stream.getvalue)
         client.processBlob(blob)
         job = client.image_q.get_nowait()
         try:
@@ -253,7 +264,7 @@ def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits):
     cls = isolated_class('processing.py', 'ImageProcessor', {
         'composite_moon', '_debayer', '__cfa_bgr_map', '__cfa_gray_map',
     }, {
-        'time': time, 'numpy': numpy, 'cv2': cv2,
+        'time': time, 'numpy': numpy, 'cv2': cv2, 'math': math,
         'constants': constants,
         'logger': logging.getLogger('indi_allsky'),
         '__name__': 'indi_allsky.processing', '__package__': 'indi_allsky',
@@ -269,11 +280,15 @@ def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits):
     if mode == 'rgb':
         short = numpy.stack([short, short, short])
     filename = tmp_path / 'short.fit'
-    header = fits.Header({'BAYERPAT': 'RGGB'}) if mode.startswith('bayer') else fits.Header()
+    header = fits.Header({'EXPTIME': 0.001})
+    if mode.startswith('bayer'):
+        header['BAYERPAT'] = 'RGGB'
     fits.PrimaryHDU(short, header=header).writeto(filename)
+    long_header = fits.PrimaryHDU(numpy.zeros_like(short), header=header).header
+    long_header['EXPTIME'] = 15.0
     i_ref = SimpleNamespace(
         gain=75, binning=1, camera_id=7, exposure=15.0,
-        hdulist=[SimpleNamespace(data=numpy.zeros_like(short), header=header)],
+        hdulist=[SimpleNamespace(data=numpy.zeros_like(short), header=long_header)],
         image_bayerpat=header.get('BAYERPAT'),
     )
     color = mode in ('rgb', 'bayer')
@@ -337,6 +352,10 @@ def test_extra_blob_waits_only_in_active_moon_mode(night, moonmode, enabled, foc
         'time': time, 'constants': constants,
     })
     client = cls()
+    client._moon_composite_lock = RLock()
+    client.moon_composite_short = False
+    client.moon_composite_frame = None
+    client.moon_composite_id = 0
     client.config = {'MOON_COMPOSITE': {'ENABLE': enabled}, 'FOCUS_MODE': focus}
     client.night_av = {constants.NIGHT_NIGHT: night, constants.NIGHT_MOONMODE: moonmode}
     client.gain, client.binning, client.timeout = 75, 1, 10

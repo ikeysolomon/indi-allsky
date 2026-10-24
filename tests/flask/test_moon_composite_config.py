@@ -1,6 +1,7 @@
 """Exercise the actual form, save/load snippets and conditional Moon Mode UI."""
 
 import ast
+import logging
 import math
 from pathlib import Path
 import shutil
@@ -50,14 +51,11 @@ def enabled_data():
     return {
         'CAMERA_INTERFACE': 'indi', 'CCD_CONFIG__MOONMODE__GAIN': 75,
         'MOON_COMPOSITE__ENABLE': True, 'MOON_COMPOSITE__EXPOSURE': 0.001,
-        'MOON_COMPOSITE__THRESHOLD': 40,
-        'MOON_COMPOSITE__ROI_X1': 100, 'MOON_COMPOSITE__ROI_Y1': 200,
-        'MOON_COMPOSITE__ROI_X2': 300, 'MOON_COMPOSITE__ROI_Y2': 400,
     }
 
 
 @pytest.mark.parametrize('gain', [0, 75])
-def test_enabled_form_accepts_valid_gain_and_region(gain):
+def test_enabled_form_requires_only_exposure_with_valid_gain(gain):
     data = enabled_data()
     data['CCD_CONFIG__MOONMODE__GAIN'] = gain
     form = moon_form(data)
@@ -71,10 +69,6 @@ def test_enabled_form_accepts_valid_gain_and_region(gain):
     ('MOON_COMPOSITE__EXPOSURE', 0),
     ('MOON_COMPOSITE__EXPOSURE', float('nan')),
     ('MOON_COMPOSITE__EXPOSURE', ''),
-    ('MOON_COMPOSITE__ROI_X1', 101),
-    ('MOON_COMPOSITE__ROI_X2', 100),
-    ('MOON_COMPOSITE__THRESHOLD', 250),
-    ('MOON_COMPOSITE__THRESHOLD', ''),
 ])
 def test_invalid_enabled_settings_have_field_errors(key, value):
     data = enabled_data()
@@ -84,7 +78,7 @@ def test_invalid_enabled_settings_have_field_errors(key, value):
     assert form.MOON_COMPOSITE__ENABLE.errors
 
 
-def test_disabled_mode_does_not_require_a_configured_region_or_native_indi():
+def test_disabled_mode_does_not_require_native_indi():
     form = moon_form({'CAMERA_INTERFACE': 'libcamera_imx477', 'CCD_CONFIG__MOONMODE__GAIN': 0})
     assert form.validate(), form.errors
     assert not form.MOON_COMPOSITE__ENABLE.data
@@ -92,7 +86,7 @@ def test_disabled_mode_does_not_require_a_configured_region_or_native_indi():
 
 def test_user_can_turn_off_feature_with_incomplete_hidden_tuning():
     data = enabled_data()
-    data.update(MOON_COMPOSITE__ENABLE=False, MOON_COMPOSITE__EXPOSURE='', MOON_COMPOSITE__ROI_X1='')
+    data.update(MOON_COMPOSITE__ENABLE=False, MOON_COMPOSITE__EXPOSURE='')
     form = moon_form(data)
     assert form.validate(), form.errors
 
@@ -128,11 +122,7 @@ def load_settings(config):
     selected = ast.Assign(targets=assignment.targets, value=ast.Dict(
         keys=[key for key, _ in pairs], values=[value for _, value in pairs],
     ))
-    roi = next(
-        index for index, node in enumerate(method.body) if isinstance(node, ast.Assign)
-        and isinstance(node.targets[0], ast.Name) and node.targets[0].id == 'moon_roi'
-    )
-    module = ast.fix_missing_locations(ast.Module(body=[selected, *method.body[roi:roi + 2]], type_ignores=[]))
+    module = ast.fix_missing_locations(ast.Module(body=[selected], type_ignores=[]))
     scope = {'self': SimpleNamespace(indi_allsky_config=config)}
     exec(compile(module, 'views.py', 'exec'), scope)
     return scope['form_data']
@@ -142,10 +132,10 @@ def test_settings_save_reload_and_disable_preserve_tuning():
     data = enabled_data()
     form = moon_form(data)
     assert form.validate()
-    config = {}
+    config = {'MOON_COMPOSITE': {'ROI': [100, 200, 300, 400], 'THRESHOLD': 40, 'SEARCH_MARGIN': 0.08}}
     save_settings(config, form, data)
     assert config['MOON_COMPOSITE'] == {
-        'ENABLE': True, 'EXPOSURE': 0.001, 'ROI': [100, 200, 300, 400], 'THRESHOLD': 40,
+        'ENABLE': True, 'EXPOSURE': 0.001, 'SEARCH_MARGIN': 0.08,
     }
     loaded = load_settings(config)
     assert loaded == {key: value for key, value in data.items() if key.startswith('MOON_COMPOSITE__')}
@@ -154,7 +144,7 @@ def test_settings_save_reload_and_disable_preserve_tuning():
     assert disabled.validate()
     save_settings(config, disabled, loaded)
     assert not config['MOON_COMPOSITE']['ENABLE']
-    assert config['MOON_COMPOSITE']['ROI'] == [100, 200, 300, 400]
+    assert config['MOON_COMPOSITE']['EXPOSURE'] == 0.001
     before = config['MOON_COMPOSITE'].copy()
     save_settings(config, moon_form(), {})
     assert config['MOON_COMPOSITE'] == before
@@ -164,8 +154,25 @@ def test_missing_settings_load_safe_disabled_defaults():
     loaded = load_settings({})
     assert loaded['MOON_COMPOSITE__ENABLE'] is False
     assert loaded['MOON_COMPOSITE__EXPOSURE'] == 0.001
-    assert loaded['MOON_COMPOSITE__ROI_X1'] == 0
-    assert loaded['MOON_COMPOSITE__ROI_X2'] == 0
+    assert set(loaded) == {'MOON_COMPOSITE__ENABLE', 'MOON_COMPOSITE__EXPOSURE'}
+
+
+def test_config_save_migrates_obsolete_manual_settings(caplog):
+    tree = ast.parse((ROOT / 'indi_allsky' / 'config.py').read_text(encoding='utf-8'))
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'IndiAllSkyConfig')
+    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == '_validateConfig')
+    config = {'MOON_COMPOSITE': {
+        'ENABLE': True, 'EXPOSURE': 0.002, 'ROI': [0, 0, 0, 0], 'THRESHOLD': 40,
+    }}
+    scope = {'app': SimpleNamespace(logger=logging.getLogger('indi_allsky'))}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), 'config.py', 'exec'), scope)
+    with caplog.at_level(logging.INFO):
+        scope['_validateConfig'](SimpleNamespace(
+            config=config, base_config={'MOON_COMPOSITE': {'ENABLE': False, 'EXPOSURE': 0.001}},
+        ))
+    assert config == {'MOON_COMPOSITE': {'ENABLE': True, 'EXPOSURE': 0.002}}
+    assert 'detection is automatic' in caplog.text
+    assert 'Config key not found' not in caplog.text
 
 
 def render_controls(data=None):
@@ -185,6 +192,11 @@ def test_rendered_controls_and_submission_registration():
         assert f"'{field}'," in template
     assert 'Only runs while Moon Mode is active' in html
     assert 'step="any"' in html
+    assert 'located automatically' in html
+    assert 'MOON_COMPOSITE__ROI' not in html
+    assert 'MOON_COMPOSITE__THRESHOLD' not in html
+    assert 'MOON_COMPOSITE__ROI' not in template
+    assert 'MOON_COMPOSITE__THRESHOLD' not in template
 
 
 def test_conditional_moon_controls_javascript():

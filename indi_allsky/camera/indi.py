@@ -406,6 +406,7 @@ class IndiClient(PyIndi.BaseClient):
 
     def _processBlob(self, blob):
         from astropy.io import fits
+        from ..moon import reported_exposure as get_reported_exposure, exposure_matches
 
         capture = self._moon_capture
         bracket = capture is not None and capture.long_request is not None
@@ -424,20 +425,14 @@ class IndiClient(PyIndi.BaseClient):
         reported_exposure = None
         try:
             with io.BytesIO(imgdata) as blobfile, fits.open(blobfile) as hdulist:
-                reported_exposure = hdulist[0].header.get('EXPTIME')
+                reported_exposure = get_reported_exposure(hdulist[0].header)
                 if bracket and reported_exposure is None:
-                    capture.failure = 'driver did not supply EXPTIME; check driver FITS metadata support'
+                    capture.failure = 'driver did not supply EXPTIME/EXPOSURE; check driver FITS metadata support'
                     capture.status = 'failed'
                     logger.warning('Moon bracket %d skipped: %s', capture.id, capture.failure)
                     return
                 if bracket:
-                    try:
-                        exposure_matches = math.isclose(
-                            float(reported_exposure), self.exposure, rel_tol=0.01, abs_tol=0.000001,
-                        )
-                    except (TypeError, ValueError):
-                        exposure_matches = False
-                    if not exposure_matches:
+                    if not exposure_matches(reported_exposure, self.exposure):
                         logger.warning(
                             'Ignoring Moon bracket %d BLOB: EXPTIME=%r, requested=%0.6fs; '
                             'possible delayed frame or driver exposure mismatch. Waiting for a valid BLOB or timeout. '

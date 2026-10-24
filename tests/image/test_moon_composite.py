@@ -48,6 +48,97 @@ def lunar_patch(color=False):
     return cv2.cvtColor(patch, cv2.COLOR_GRAY2BGR) if color else patch
 
 
+@pytest.mark.parametrize('margin', [0, 0.009, 0.101, True, '0.05', float('nan'), float('inf')])
+def test_search_margin_is_validated(margin):
+    with pytest.raises(ValueError, match='SEARCH_MARGIN'):
+        moon.validate_config({
+            'CAMERA_INTERFACE': 'indi',
+            'MOON_COMPOSITE': {'ENABLE': True, 'EXPOSURE': 0.001, 'SEARCH_MARGIN': margin},
+        })
+
+
+@pytest.mark.parametrize('reported, matches', [
+    (0.001, True), ('0.0010004', True), (0.001011, False),
+    (None, False), (True, False), ('invalid', False), (0, False), (-0.001, False),
+    ('nan', False), ('inf', False),
+])
+def test_driver_exposure_matching_is_positive_finite_and_bounded(reported, matches):
+    assert moon.exposure_matches(reported, 0.001) is matches
+
+
+def test_exptime_is_authoritative_and_alternate_exposure_does_not_hide_bad_metadata():
+    assert moon.reported_exposure({'EXPOSURE': '0.001'}) == '0.001'
+    assert moon.reported_exposure({'EXPTIME': 'invalid', 'EXPOSURE': 0.001}) == 'invalid'
+    assert moon.reported_exposure({}) is None
+
+
+def test_guided_selection_prefers_position_but_rejects_star_sized_sources():
+    sensor = numpy.full((240, 320), 3, numpy.uint8)
+    cv2.circle(sensor, (50, 120), 12, 220, -1)
+    cv2.circle(sensor, (160, 120), 12, 150, -1)
+    cv2.circle(sensor, (260, 120), 2, 240, -1)
+    roi = moon.find_moon(sensor, expected=(160, 120), expected_radius=12)
+    assert roi is not None and roi[0] < 160 < roi[2]
+    star = sensor[:, 230:].copy()
+    assert moon.find_moon(star, expected=(30, 120), expected_radius=12) is None
+
+
+@pytest.mark.parametrize('phase', ['full', 'half', 'crescent'])
+@pytest.mark.parametrize('radius, dilation, feather', [(12, 1, 1), (60, 1, 2), (180, 3, 4)])
+def test_scaled_feather_preserves_lunar_detail_terminator_and_distant_sky(monkeypatch, phase, radius, dilation, feather):
+    side = 4 * radius + 32
+    center = side // 2
+    yy, xx = numpy.ogrid[:side, :side]
+    lit = (xx - center) ** 2 + (yy - center) ** 2 <= radius ** 2
+    if phase == 'half':
+        lit &= xx >= center
+    elif phase == 'crescent':
+        lit &= (xx - (center - radius * 0.25)) ** 2 + (yy - center) ** 2 > radius ** 2
+    patch = numpy.full((side, side), 3, numpy.uint8)
+    patch[lit] = 160
+    patch[lit & (xx % 9 < 4)] = 100
+    image = numpy.full_like(patch, 25)
+    image[lit] = 255
+    original = image.copy()
+    with mock.patch.object(cv2, 'GaussianBlur', wraps=cv2.GaussianBlur) as blur:
+        applied = moon.blend(
+            image, patch, (0, 0, side, side), expected=(center, center), expected_radius=radius,
+        )
+    if phase == 'crescent' and radius == 12:
+        # A narrow low-resolution limb must fail safely, not become a filled disk.
+        assert not applied
+        numpy.testing.assert_array_equal(image, original)
+        return
+    assert applied
+    assert blur.call_args.args[1] == (2 * feather + 1, 2 * feather + 1)
+    interior = cv2.erode(lit.astype(numpy.uint8), numpy.ones((9, 9), numpy.uint8)).astype(bool)
+    assert interior.any()
+    numpy.testing.assert_array_equal(image[interior], patch[interior])
+    reach = dilation + feather + 2
+    outside = cv2.dilate(lit.astype(numpy.uint8), numpy.ones((2 * reach + 1, 2 * reach + 1), numpy.uint8)) == 0
+    numpy.testing.assert_array_equal(image[outside], original[outside])
+
+
+@pytest.mark.parametrize('radius, margin', [(12, 1), (180, 5)])
+def test_feather_padding_rejects_near_edge_without_changing_image(radius, margin):
+    side = 4 * radius + 32
+    patch = numpy.full((side, side), 3, numpy.uint8)
+    cv2.circle(patch, (radius + margin, side // 2), radius, 180, -1)
+    image = numpy.full_like(patch, 25)
+    original = image.copy()
+    assert not moon.blend(image, patch, (0, 0, side, side))
+    numpy.testing.assert_array_equal(image, original)
+
+
+def test_underexposure_warning_keeps_manual_exposure_and_original_image(caplog):
+    patch = numpy.full((80, 80), 3, numpy.uint8)
+    cv2.circle(patch, (40, 40), 12, 6, -1)
+    image = numpy.full_like(patch, 25)
+    assert not moon.blend(image, patch, (0, 0, 80, 80))
+    assert numpy.all(image == 25)
+    assert 'too faint' in caplog.text and 'manual EXPOSURE' in caplog.text
+
+
 @pytest.mark.parametrize('color', [False, True])
 def test_surface_detail_and_untouched_sky(color):
     shape = (180, 220, 3) if color else (180, 220)
@@ -174,12 +265,11 @@ def test_unsafe_patch_keeps_original(failure):
 
 @pytest.mark.parametrize('settings', [
     {'EXPOSURE': 0}, {'EXPOSURE': float('nan')},
-    {'ROI': []}, {'ROI': [1, 0, 80, 80]},
-    {'ROI': [80, 0, 0, 80]}, {'THRESHOLD': 255},
+    {'EXPOSURE': float('inf')}, {'EXPOSURE': '0.001'}, {'EXPOSURE': True},
 ])
 def test_invalid_configuration_is_explicit(settings):
     config = {'CAMERA_INTERFACE': 'indi', 'MOON_COMPOSITE': {
-        'ENABLE': True, 'ROI': [0, 0, 80, 80], **settings,
+        'ENABLE': True, **settings,
     }}
     with pytest.raises(ValueError, match='MOON_COMPOSITE'):
         moon.validate_config(config)
@@ -190,6 +280,144 @@ def test_disabled_and_unsupported_configuration():
     moon.validate_config({'MOON_COMPOSITE': {'ENABLE': False}})
     with pytest.raises(ValueError, match='native indi'):
         moon.validate_config({'CAMERA_INTERFACE': 'indi_passive', 'MOON_COMPOSITE': {'ENABLE': True}})
+
+
+def test_legacy_manual_settings_do_not_constrain_detection():
+    moon.validate_config({'CAMERA_INTERFACE': 'indi', 'MOON_COMPOSITE': {
+        'ENABLE': True, 'EXPOSURE': 0.001, 'ROI': [0, 0, 0, 0], 'THRESHOLD': 255,
+    }})
+
+
+@pytest.mark.parametrize('radius', [5, 12, 40, 100])
+@pytest.mark.parametrize('center', [(170, 180), (580, 400), (850, 700)])
+@pytest.mark.parametrize('bayer', [False, True])
+def test_detects_moving_moon_and_autoscales_even_roi(radius, center, bayer):
+    sensor = numpy.full((950, 1100), 3, numpy.uint8)
+    cv2.circle(sensor, center, radius, 180, -1)
+    sensor[50, 50] = 255
+    if bayer:
+        sensor[::2, ::2] //= 2
+    roi = moon.find_moon(sensor, bayer=bayer)
+    assert roi is not None
+    x1, y1, x2, y2 = roi
+    assert all(value % 2 == 0 for value in roi)
+    assert x1 <= center[0] - radius - 4
+    assert y1 <= center[1] - radius - 4
+    assert x2 >= center[0] + radius + 4
+    assert y2 >= center[1] + radius + 4
+    assert x2 - x1 < radius * 4 + 32
+    assert y2 - y1 < radius * 4 + 32
+    image = numpy.full_like(sensor, 25)
+    assert moon.blend(image, sensor[y1:y2, x1:x2], roi)
+    assert image[center[1], center[0]] == sensor[center[1], center[0]]
+    assert image[0, 0] == 25
+
+
+@pytest.mark.parametrize('brightness', [12, 30, 90, 230])
+def test_threshold_adapts_to_short_exposure_brightness(brightness):
+    sensor = numpy.full((200, 240), 2, numpy.uint8)
+    cv2.circle(sensor, (140, 100), 15, brightness, -1)
+    roi = moon.find_moon(sensor)
+    assert roi is not None
+    x1, y1, x2, y2 = roi
+    image = numpy.full_like(sensor, 255)
+    assert moon.blend(image, sensor[y1:y2, x1:x2], roi)
+    assert image[100, 140] == brightness
+
+
+@pytest.mark.parametrize('shape', ['empty', 'uniform', 'noise', 'star', 'line', 'rectangle', 'square', 'edge', 'ambiguous'])
+def test_detection_rejects_unsafe_or_non_lunar_sources(shape):
+    sensor = numpy.zeros((240, 320), numpy.uint8)
+    if shape == 'uniform':
+        sensor[:] = 120
+    elif shape == 'noise':
+        sensor[:] = numpy.random.default_rng(4).integers(0, 5, sensor.shape, dtype=numpy.uint8)
+    elif shape == 'star':
+        sensor[100, 120] = 220
+    elif shape == 'line':
+        cv2.line(sensor, (50, 50), (200, 200), 180, 5)
+    elif shape in ('rectangle', 'square'):
+        cv2.rectangle(sensor, (80, 80), (160 if shape == 'rectangle' else 120, 120), 180, -1)
+    elif shape == 'edge':
+        cv2.circle(sensor, (0, 100), 20, 180, -1)
+    elif shape == 'ambiguous':
+        cv2.circle(sensor, (80, 100), 15, 180, -1)
+        cv2.circle(sensor, (220, 100), 15, 170, -1)
+    assert moon.find_moon(sensor) is None
+
+
+@pytest.mark.parametrize('distractors', [1, 2, 3])
+def test_three_seed_budget_can_reject_two_brighter_non_circular_sources(distractors):
+    sensor = numpy.zeros((320, 400), numpy.uint8)
+    for index in range(distractors):
+        x = 20 + index * 120
+        cv2.rectangle(sensor, (x, 20), (x + 60, 80), 240 - index * 20, -1)
+    cv2.circle(sensor, (280, 200), 20, 120, -1)
+    with mock.patch.object(cv2, 'minMaxLoc', wraps=cv2.minMaxLoc) as seeds:
+        roi = moon.find_moon(sensor)
+    assert seeds.call_count == 3
+    if distractors == 3:
+        assert roi is None
+        return
+    assert roi is not None
+    x1, y1, x2, y2 = roi
+    assert x1 < 280 < x2 and y1 < 200 < y2
+
+
+def test_hot_pixel_field_and_bright_crater_do_not_hide_lunar_extent():
+    sensor = numpy.full((900, 1200), 3, numpy.uint8)
+    rng = numpy.random.default_rng(12)
+    sensor[rng.integers(0, 900, 300), rng.integers(0, 1200, 300)] = 255
+    cv2.circle(sensor, (650, 450), 60, 75, -1)
+    cv2.circle(sensor, (640, 440), 9, 230, -1)
+    roi = moon.find_moon(sensor)
+    assert roi is not None
+    x1, y1, x2, y2 = roi
+    assert x1 < 590 and y1 < 390 and x2 > 710 and y2 > 510
+    image = numpy.full_like(sensor, 25)
+    assert moon.blend(image, sensor[y1:y2, x1:x2], roi)
+    assert image[450, 690] == 75
+    assert image[440, 640] == 230
+
+
+@pytest.mark.parametrize('layout', ['mono', 'rgb', 'bayer'])
+def test_large_sensor_preview_and_decoder_roi_remain_bounded(layout):
+    sensor = numpy.full((3010, 4010), 2, numpy.uint8)
+    cv2.circle(sensor, (2801, 1701), 25, 160, -1)
+    if layout == 'rgb':
+        sensor = numpy.stack([sensor, sensor // 2, sensor // 3])
+    with mock.patch.object(moon, '_select_region', wraps=moon._select_region) as select:
+        roi = moon.find_moon(sensor, bayer=layout == 'bayer')
+    assert roi is not None
+    assert max(select.call_args.args[0].shape) <= 768
+    x1, y1, x2, y2 = roi
+    assert x1 <= 2772 and y1 <= 1672 and x2 >= 2830 and y2 >= 1730
+    assert x2 - x1 < 130 and y2 - y1 < 130
+
+
+@pytest.mark.parametrize('shape', [(31, 47), (769, 1027)])
+@pytest.mark.parametrize('bayer', [False, True])
+def test_preview_max_pooling_preserves_bright_seeds_and_sensor_coordinates(shape, bayer):
+    sensor = numpy.random.default_rng(5).integers(0, 256, shape, dtype=numpy.uint8)
+    step = max(1, math.ceil(max(shape) / 768))
+    if bayer:
+        step = max(2, step + step % 2)
+    padded = numpy.pad(sensor, ((0, (-shape[0]) % step), (0, (-shape[1]) % step)))
+    expected = padded.reshape(
+        padded.shape[0] // step, step, padded.shape[1] // step, step,
+    ).max(axis=(1, 3))
+    with mock.patch.object(moon, '_select_region', return_value=None) as select:
+        assert moon.find_moon(sensor, bayer=bayer) is None
+    numpy.testing.assert_array_equal(select.call_args.args[0], expected)
+
+
+@pytest.mark.parametrize('phase', [0.5, 0.75, 1.0])
+def test_circular_limb_accepts_partial_lunar_disk(phase):
+    sensor = numpy.full((240, 320), 3, numpy.uint8)
+    cv2.circle(sensor, (160, 120), 30, 180, -1)
+    if phase < 1:
+        sensor[:, :int(160 - (phase - 0.5) * 60)] = 3
+    assert moon.find_moon(sensor) is not None
 
 
 def capture_worker():
@@ -261,6 +489,7 @@ def indi_client():
     }, {
         'time': time, 'io': io, 'tempfile': tempfile, 'Path': Path, 'math': math,
         'datetime': datetime, 'logger': logging.getLogger('indi_allsky'),
+        '__package__': 'indi_allsky.camera',
     })
     client = cls()
     client._moon_capture = moon.MoonCapture(1, (15.0, 75, 1), phase='short', status='waiting')
@@ -351,7 +580,8 @@ def test_worker_always_cleans_short_file(tmp_path, fail):
 @pytest.mark.parametrize('mode', ['mono', 'rgb', 'bayer', 'bayer_gray'])
 @pytest.mark.parametrize('bits', [8, 12, 16])
 @pytest.mark.parametrize('sensor_size', [120, 1024])
-def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits, sensor_size):
+@pytest.mark.parametrize('guided', [False, True])
+def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits, sensor_size, guided):
     cls = isolated_class('processing.py', 'ImageProcessor', {
         'composite_moon', '_debayer', '__cfa_bgr_map', '__cfa_gray_map',
     }, {
@@ -361,9 +591,12 @@ def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits, sensor_s
         '__name__': 'indi_allsky.processing', '__package__': 'indi_allsky',
     })
     processor = cls()
-    processor.config = {'MOON_COMPOSITE': {'ENABLE': True, 'ROI': [20, 20, 100, 100]}}
+    processor.config = {'MOON_COMPOSITE': {'ENABLE': True}}
     processor.config['NIGHT_GRAYSCALE'] = mode == 'bayer_gray'
     processor.night_av = {constants.NIGHT_NIGHT: True, constants.NIGHT_MOONMODE: True}
+    processor.position_av = {
+        constants.POSITION_LATITUDE: 0, constants.POSITION_LONGITUDE: 0, constants.POSITION_ELEVATION: 0,
+    }
     processor.max_bit_depth = bits
     processor._moon_display_lut = None
     dtype = numpy.uint8 if bits == 8 else numpy.uint16
@@ -404,17 +637,31 @@ def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits, sensor_s
         hdulist._file.readarray = read_roi
         return hdulist
 
-    with mock.patch('astropy.io.fits.open', side_effect=open_short):
+    decoder = processor._debayer
+    decoded_shapes = []
+
+    def decode_roi(ref):
+        decoded_shapes.append(ref.hdulist[0].data.shape[-2:])
+        return decoder(ref)
+
+    with mock.patch('astropy.io.fits.open', side_effect=open_short), mock.patch.object(processor, '_debayer', side_effect=decode_roi):
+        guide = SimpleNamespace(
+            search_region=mock.Mock(return_value=(20, 20, 100, 100)),
+            expected_position=(60, 60), expected_radius=12,
+        ) if guided else None
         processor.composite_moon({
             'filename': str(filename), 'gain': 75, 'binning': 1,
             'camera_id': 7, 'exposure': 0.001,
-        }, i_ref)
+        }, i_ref, guide=guide)
     assert numpy.all(processor.image[60, 57] == 90)
     assert numpy.all(processor.image[0, 0] == 255)
     assert not numpy.any(i_ref.hdulist[0].data)
-    assert sum(read_sizes) == 80 * 80 * numpy.dtype(dtype).itemsize * (3 if mode == 'rgb' else 1)
+    expected_bytes = 80 * 80 * numpy.dtype(dtype).itemsize * (3 if mode == 'rgb' else 1) if guided else short.nbytes
+    assert sum(read_sizes) == expected_bytes
+    assert len(decoded_shapes) == 1
+    assert all(dimension < 60 for dimension in decoded_shapes[0])
     assert len(opened) == 1
-    assert not opened[0][0]._data_loaded
+    assert opened[0][0]._data_loaded is not guided
     assert opened[0]._file.closed
     filename.unlink()
     assert not filename.exists()
@@ -427,7 +674,7 @@ def test_mismatched_pair_is_logged_and_preserves_image(mismatch, caplog):
         '__name__': 'indi_allsky.processing', '__package__': 'indi_allsky',
     })
     processor = cls()
-    processor.config = {'MOON_COMPOSITE': {'ENABLE': True, 'ROI': [0, 0, 80, 80]}}
+    processor.config = {'MOON_COMPOSITE': {'ENABLE': True}}
     processor.night_av = {constants.NIGHT_NIGHT: True, constants.NIGHT_MOONMODE: True}
     processor.image = numpy.full((80, 80), 255, numpy.uint8)
     before = processor.image.copy()

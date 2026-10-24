@@ -2397,7 +2397,6 @@ class ConfigView(FormView):
             'CCD_CONFIG__MOONMODE__BINNING'  : self.indi_allsky_config.get('CCD_CONFIG', {}).get('MOONMODE', {}).get('BINNING', 1),
             'MOON_COMPOSITE__ENABLE'        : self.indi_allsky_config.get('MOON_COMPOSITE', {}).get('ENABLE', False),
             'MOON_COMPOSITE__EXPOSURE'      : self.indi_allsky_config.get('MOON_COMPOSITE', {}).get('EXPOSURE', 0.001),
-            'MOON_COMPOSITE__THRESHOLD'     : self.indi_allsky_config.get('MOON_COMPOSITE', {}).get('THRESHOLD', 40),
             'CCD_CONFIG__DAY__GAIN'          : round(self.indi_allsky_config.get('CCD_CONFIG', {}).get('DAY', {}).get('GAIN', 0.0), 3),  # limit to 3 decimals
             'CCD_CONFIG__DAY__BINNING'       : self.indi_allsky_config.get('CCD_CONFIG', {}).get('DAY', {}).get('BINNING', 1),
             'CCD_CONFIG__EXPOSURE_CLASSNAME' : self.indi_allsky_config.get('CCD_CONFIG', {}).get('EXPOSURE_CLASSNAME', 'exposure_basic'),
@@ -3297,10 +3296,6 @@ class ConfigView(FormView):
         from ..sensor_slots import sensor_form_data
         form_data.update(sensor_form_data(self.indi_allsky_config))
 
-        moon_roi = self.indi_allsky_config.get('MOON_COMPOSITE', {}).get('ROI', [])
-        for index, coordinate in enumerate(('X1', 'Y1', 'X2', 'Y2')):
-            form_data['MOON_COMPOSITE__ROI_' + coordinate] = moon_roi[index] if len(moon_roi) > index else 0
-
         context['form_config'] = IndiAllskyConfigForm(data=form_data)
         context['chart_builtin_definitions'] = BUILTIN_CHARTS
         context['chart_maximum'] = MAX_CUSTOM_CHARTS
@@ -3439,11 +3434,7 @@ class AjaxConfigView(BaseView):
             self.indi_allsky_config['MOON_COMPOSITE'] = {
                 'ENABLE': form_config.MOON_COMPOSITE__ENABLE.data,
                 'EXPOSURE': form_config.MOON_COMPOSITE__EXPOSURE.data,
-                'ROI': [
-                    form_config.MOON_COMPOSITE__ROI_X1.data, form_config.MOON_COMPOSITE__ROI_Y1.data,
-                    form_config.MOON_COMPOSITE__ROI_X2.data, form_config.MOON_COMPOSITE__ROI_Y2.data,
-                ],
-                'THRESHOLD': form_config.MOON_COMPOSITE__THRESHOLD.data,
+                'SEARCH_MARGIN': self.indi_allsky_config.get('MOON_COMPOSITE', {}).get('SEARCH_MARGIN', 0.05),
             }
         self.indi_allsky_config['CCD_CONFIG']['DAY']['GAIN']            = float(round(float(request.json['CCD_CONFIG__DAY__GAIN']), 3))  # limit to 3 decimals
         self.indi_allsky_config['CCD_CONFIG']['DAY']['BINNING']         = int(request.json['CCD_CONFIG__DAY__BINNING'])

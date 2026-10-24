@@ -209,11 +209,6 @@ def MOON_COMPOSITE_validator(form, field):
             'MOON_COMPOSITE': {
                 'ENABLE': True,
                 'EXPOSURE': form.MOON_COMPOSITE__EXPOSURE.data,
-                'ROI': [
-                    form.MOON_COMPOSITE__ROI_X1.data, form.MOON_COMPOSITE__ROI_Y1.data,
-                    form.MOON_COMPOSITE__ROI_X2.data, form.MOON_COMPOSITE__ROI_Y2.data,
-                ],
-                'THRESHOLD': form.MOON_COMPOSITE__THRESHOLD.data,
             },
         })
     except ValueError as e:
@@ -4690,11 +4685,6 @@ class IndiAllskyConfigForm(FlaskForm):
     CCD_CONFIG__MOONMODE__BINNING    = IntegerField('Moon Mode Bin Mode', validators=[DataRequired(), CCD_BINNING_validator])
     MOON_COMPOSITE__ENABLE          = BooleanField('Recover Moon Surface Detail (Experimental)', validators=[MOON_COMPOSITE_validator])
     MOON_COMPOSITE__EXPOSURE        = FloatField('Short Exposure (seconds)', default=0.001, validators=[Optional()], widget=NumberInput(step='any'))
-    MOON_COMPOSITE__ROI_X1          = IntegerField('Left (X1)', default=0, validators=[Optional()], widget=NumberInput(min=0, step=2))
-    MOON_COMPOSITE__ROI_Y1          = IntegerField('Top (Y1)', default=0, validators=[Optional()], widget=NumberInput(min=0, step=2))
-    MOON_COMPOSITE__ROI_X2          = IntegerField('Right (X2)', default=0, validators=[Optional()], widget=NumberInput(min=0, step=2))
-    MOON_COMPOSITE__ROI_Y2          = IntegerField('Bottom (Y2)', default=0, validators=[Optional()], widget=NumberInput(min=0, step=2))
-    MOON_COMPOSITE__THRESHOLD       = IntegerField('Moon Mask Threshold (1-249)', default=40, validators=[Optional()], widget=NumberInput(min=1, max=249, step=1))
     CCD_CONFIG__DAY__GAIN            = FloatField('Daytime Gain', validators=[CCD_GAIN_validator])
     CCD_CONFIG__DAY__BINNING         = IntegerField('Daytime Bin Mode', validators=[DataRequired(), CCD_BINNING_validator])
     CCD_CONFIG__EXPOSURE_CLASSNAME   = SelectField('Exposure Mode', choices=CCD_CONFIG__EXPOSURE_CLASSNAME_choices, validators=[CCD_CONFIG__EXPOSURE_CLASSNAME_validator])

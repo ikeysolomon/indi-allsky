@@ -160,11 +160,11 @@
                                 <span class="tw:text-xs tw:font-bold">{{ form_config.MOON_COMPOSITE__ENABLE.label.text }}</span>
                             </label>
                             <div id="MOON_COMPOSITE__ENABLE-error" class="tw:text-error tw:text-xs" style="display: none;"></div>
-                            <p class="tw:text-xs tw:text-base-content/60 tw:mt-2">Only runs while Moon Mode is active. Uses this profile's gain and binning. Adds one short exposure and camera readout per sky frame; no extra image processing outside Moon Mode. Restart capture after saving.</p>
+                            <p class="tw:text-xs tw:text-base-content/60 tw:mt-2">Only runs while Moon Mode is active. Uses this profile's gain and binning. Adds one short exposure and camera readout per sky frame. If VirtualSky is not aligned, a one-time star solve runs on the first nighttime image; unsuccessful solves retry after five minutes. Restart capture after saving.</p>
                             <div id="moon-composite-settings" class="tw:mt-3" style="display: none;">
-                                <p class="tw:text-xs tw:text-base-content/60">Set a small moon search region in binned sensor pixels, before rotation, flip or crop. Use even coordinates and leave at least four pixels around the moon. This prototype does not track the moon automatically.</p>
+                                <p class="tw:text-xs tw:text-base-content/60">The Moon is located automatically near its predicted VirtualSky position using up to three bright regions and a circular-limb check. The search region and mask scale automatically as it moves. Missing or stale alignment triggers a star solve; uncertain detections leave the normal sky image unchanged.</p>
                                 <div class="tw:grid tw:grid-cols-2 tw:gap-2 tw:mt-2">
-                                    {% for field in [form_config.MOON_COMPOSITE__EXPOSURE, form_config.MOON_COMPOSITE__THRESHOLD, form_config.MOON_COMPOSITE__ROI_X1, form_config.MOON_COMPOSITE__ROI_Y1, form_config.MOON_COMPOSITE__ROI_X2, form_config.MOON_COMPOSITE__ROI_Y2] %}
+                                    {% for field in [form_config.MOON_COMPOSITE__EXPOSURE] %}
                                     <div class="tw:flex tw:flex-col tw:gap-1">
                                         {{ field.label(class='tw:text-xs tw:text-base-content/70') }}
                                         {{ field(class='tw:input tw:input-bordered tw:input-sm tw:h-11 tw:bg-base-200 tw:text-base-content tw:w-full') }}

@@ -99,8 +99,7 @@ class IndiAllSkyConfigBase(object):
         "MOON_COMPOSITE" : {
             "ENABLE"    : False,
             "EXPOSURE"  : 0.001,
-            "ROI"       : [],
-            "THRESHOLD" : 40,
+            "SEARCH_MARGIN" : 0.05,
         },
         "FOCUS_DELAY"          : 4.0,
         "CFA_PATTERN"      : "",  # None, GRBG, RGGB, BGGR, GBRG
@@ -685,6 +684,7 @@ class IndiAllSkyConfigBase(object):
             "BUBBLE_COUNT"           : 1000,
         },
         "VIRTUALSKY" : {
+            "ALIGNMENT"              : {},
             "CALIBRATION_ENABLED"    : False,
             "CALIBRATION"            : None,
             "POINTING_AZIMUTH"       : 0.0,
@@ -1222,6 +1222,13 @@ class IndiAllSkyConfig(IndiAllSkyConfigBase):
 
 
     def _validateConfig(self):
+        moon_settings = self.config.get('MOON_COMPOSITE', {})
+        if isinstance(moon_settings, dict) and ('ROI' in moon_settings or 'THRESHOLD' in moon_settings):
+            self.config['MOON_COMPOSITE'] = {
+                key: value for key, value in moon_settings.items() if key not in ('ROI', 'THRESHOLD')
+            }
+            app.logger.info('Removed obsolete manual Moon ROI/threshold; detection is automatic')
+
         skip_keys = [
             'INDI_CONFIG_DEFAULTS',
             'INDI_CONFIG_DAY',

@@ -700,10 +700,14 @@ class ImageWorker(Process):
             self.image_processor.drawDetections()
 
 
-        # rotation
+        moon_guide = None if exclude_from_exposure else self.moon_sky_guide()
         if i_dict.get('moon_composite'):
-            self.image_processor.composite_moon(i_dict['moon_composite'], i_ref)
+            if moon_guide is not None and moon_guide.is_aligned(i_ref):
+                self.image_processor.composite_moon(i_dict['moon_composite'], i_ref, guide=moon_guide)
+            else:
+                logger.warning('Moon composite skipped: awaiting a usable VirtualSky alignment')
 
+        # rotation
         self.image_processor.rotate_90()
         self.image_processor.rotate_angle()
 
@@ -851,6 +855,9 @@ class ImageWorker(Process):
 
 
         latest_file, new_filename = self.write_img(self.image_processor.image, i_ref, camera, jpeg_exif=jpeg_exif)
+
+        if moon_guide is not None:
+            self.align_moon_sky(moon_guide, i_ref, camera)
 
         if new_filename:
             self.start_image_save_post_hook(new_filename, exposure, gain, binning)
@@ -2169,6 +2176,73 @@ class ImageWorker(Process):
 
         self._miscUpload.s3_upload_raw(raw_entry, raw_metadata)
         self._miscUpload.upload_raw_image(raw_entry)
+
+
+    def moon_sky_guide(self):
+        from .moon import clahe_skip_reason
+        if (
+            not self.config.get('MOON_COMPOSITE', {}).get('ENABLE')
+            or not self.night_av[constants.NIGHT_NIGHT]
+            or self.config.get('FOCUS_MODE')
+            or clahe_skip_reason(self.config)
+        ):
+            return None
+        if not hasattr(self, '_moon_sky_guide'):
+            from .moon_sky import MoonSkyGuide
+            self._moon_sky_guide = MoonSkyGuide(self.config)
+        return self._moon_sky_guide
+
+
+    def align_moon_sky(self, guide, i_ref, camera):
+        try:
+            guide.align_first_image(
+                self.image_processor.image, i_ref,
+                self.position_av[constants.POSITION_LATITUDE],
+                self.position_av[constants.POSITION_LONGITUDE],
+                lambda values, record: self.save_moon_sky_alignment(values, record, camera),
+            )
+        except (OSError, ValueError, cv2.error):
+            logger.exception('Automatic VirtualSky Moon alignment failed; keeping the normal sky image')
+
+
+    def save_moon_sky_alignment(self, values, record, camera):
+        from .config import IndiAllSkyConfig
+        from .exceptions import ConfigSaveException
+        from .moon_sky import alignment_values
+        from .lens_solver import applySolvedValuesToConfig
+        from sqlalchemy.exc import SQLAlchemyError
+
+        try:
+            latest = IndiAllSkyConfig()
+            if (
+                alignment_values(latest.config) != alignment_values(self.config)
+                or latest.config.get('VIRTUALSKY', {}).get('ALIGNMENT', {})
+                != self.config.get('VIRTUALSKY', {}).get('ALIGNMENT', {})
+            ):
+                logger.warning('VirtualSky alignment changed during the solve; preserving the newer configuration')
+                self.config['VIRTUALSKY'] = dict(latest.config.get('VIRTUALSKY', {}))
+                self.config['LENS_AZIMUTH'] = latest.config['LENS_AZIMUTH']
+                self.config['LENS_ALTITUDE'] = latest.config['LENS_ALTITUDE']
+                return False
+            latest.config['VIRTUALSKY'] = dict(latest.config.get('VIRTUALSKY', {}))
+            applySolvedValuesToConfig(latest.config, values)
+            latest.config['VIRTUALSKY']['ALIGNMENT'] = record
+            camera.az = latest.config['LENS_AZIMUTH']
+            camera.alt = latest.config['LENS_ALTITUDE']
+            data = dict(camera.data or {})
+            for key in (
+                'POINTING_AZIMUTH', 'RADIAL_DISTORTION', 'PRECESSION', 'CALIBRATION',
+                'CALIBRATION_ENABLED', 'IMAGE_CIRCLE_DIAMETER', 'LATITUDE_OFFSET',
+                'LONGITUDE_OFFSET', 'OFFSET_X', 'OFFSET_Y',
+            ):
+                data['vs_' + key.lower()] = latest.config['VIRTUALSKY'].get(key)
+            camera.data = data
+            latest.save('system', 'Automatic first-image VirtualSky alignment for Moon recovery')
+        except (ConfigSaveException, SQLAlchemyError):
+            db.session.rollback()
+            logger.exception('Unable to persist automatic VirtualSky Moon alignment')
+            return False
+        return True
 
 
     def write_mask_base_img(self, data):

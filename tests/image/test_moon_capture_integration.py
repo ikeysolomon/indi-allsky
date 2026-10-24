@@ -96,7 +96,7 @@ def runtime(monkeypatch, tmp_path):
 
     config = {
         'CAMERA_INTERFACE': 'indi', 'IMAGE_FOLDER': str(tmp_path), 'VARLIB_FOLDER': str(tmp_path),
-        'MOON_COMPOSITE': {'ENABLE': True, 'EXPOSURE': 0.001, 'ROI': [0, 0, 80, 80], 'THRESHOLD': 40},
+        'MOON_COMPOSITE': {'ENABLE': True, 'EXPOSURE': 0.001},
         'NIGHT_SUN_ALT_DEG': -6, 'NIGHT_MOONMODE_ALT_DEG': 0,
         'NIGHT_MOONMODE_PHASE': 33, 'EXPOSURE_PERIOD': 1.0, 'EXPOSURE_PERIOD_DAY': 1.0,
         'IMAGE_FLIP_V': False, 'KEOGRAM_ANGLE': 0, 'TARGET_ADU': 75, 'TARGET_ADU_DAY': 75,
@@ -172,10 +172,11 @@ def runtime(monkeypatch, tmp_path):
             filename.unlink(missing_ok=True)
 
 
-def blob(exposure, value=180, headers=None, dtype=numpy.uint16):
-    data = numpy.zeros((80, 80), dtype)
-    yy, xx = numpy.ogrid[:80, :80]
-    data[(xx - 40) ** 2 + (yy - 40) ** 2 <= 12 ** 2] = value * (2 ** (numpy.iinfo(dtype).bits - 8))
+def blob(exposure, value=180, headers=None, dtype=numpy.uint16, data=None):
+    if data is None:
+        data = numpy.zeros((80, 80), dtype)
+        yy, xx = numpy.ogrid[:80, :80]
+        data[(xx - 40) ** 2 + (yy - 40) ** 2 <= 12 ** 2] = value * (2 ** (numpy.iinfo(dtype).bits - 8))
     stream = io.BytesIO()
     header = fits.Header({'EXPTIME': exposure}) if exposure is not None else fits.Header()
     if headers:
@@ -504,7 +505,8 @@ class Clock:
 
 def run_capture(runtime, monkeypatch, *, legacy=False, missing=None, shutdown_after_short=False,
                 missing_metadata=False, short_headers=None, short_value=180, short_dtype=numpy.uint16,
-                reported_exposures=None, normal_frames=1, recovery_busy=0):
+                reported_exposures=None, normal_frames=1, recovery_busy=0,
+                exposure_keyword='EXPTIME', frame_data=None):
     clock = Clock()
     worker, original_client = runtime.worker, runtime.client
     monkeypatch.setattr(runtime.capture, 'time', clock)
@@ -538,10 +540,14 @@ def run_capture(runtime, monkeypatch, *, legacy=False, missing=None, shutdown_af
                 nonlocal completed
                 omit_exposure = missing_metadata is True or missing_metadata == phase
                 reported_exposure = (reported_exposures or {}).get(phase, exposure)
-                payload = blob(None if omit_exposure else reported_exposure,
+                headers = dict(short_headers or {}) if phase == 'short' else {}
+                if exposure_keyword != 'EXPTIME' and not omit_exposure:
+                    headers[exposure_keyword] = reported_exposure
+                payload = blob(None if omit_exposure or exposure_keyword != 'EXPTIME' else reported_exposure,
                                value=short_value if phase == 'short' else 255,
-                               headers=short_headers if phase == 'short' else None,
-                               dtype=short_dtype if phase == 'short' else numpy.uint16)
+                               headers=headers,
+                               dtype=short_dtype if phase == 'short' else numpy.uint16,
+                               data=(frame_data or {}).get(phase))
                 if legacy:
                     client.newBLOB(payload)
                 else:
@@ -597,6 +603,104 @@ def ingest_long(runtime, job):
     processor.image_list = [i_ref]
     processor.image = numpy.right_shift(processor._debayer(i_ref), 8).astype(numpy.uint8)
     return i_ref
+
+
+@pytest.mark.parametrize('exposure_keyword', ['EXPTIME', 'EXPOSURE'])
+@pytest.mark.parametrize('scene', ['center', 'expanded', 'far-away', 'point-source'])
+def test_capture_to_saved_image_uses_bounded_lunar_prediction(runtime, monkeypatch, tmp_path, scene, exposure_keyword):
+    import cv2
+    from indi_allsky import moon, moon_sky
+    from indi_allsky.lens_solver.calibration import pipelineSignature
+
+    center_x = {'center': 200, 'expanded': 230, 'far-away': 290, 'point-source': 290}[scene]
+    short = numpy.full((300, 400), 3 * 256, numpy.uint16)
+    cv2.circle(short, (50, 50), 20, 255 * 256, -1)
+    cv2.circle(short, (center_x, 150), 12, 180 * 256, -1)
+    cv2.circle(short, (center_x - 3, 150), 4, 90 * 256, -1)
+    if scene == 'point-source':
+        cv2.circle(short, (200, 150), 3, 240 * 256, -1)
+    long = numpy.full_like(short, 25 * 256)
+    cv2.circle(long, (center_x, 150), 12, 255 * 256, -1)
+    requests, deliveries = run_capture(
+        runtime, monkeypatch, frame_data={'short': short, 'long': long},
+        exposure_keyword=exposure_keyword,
+        reported_exposures={'short': '0.0010004', 'long': '0.100004'},
+    )
+    assert [phase for phase, _ in requests] == ['short', 'long']
+    assert [phase for phase, _ in deliveries] == ['short', 'long']
+    assert requests[0][1] < deliveries[0][1] <= requests[1][1] < deliveries[1][1]
+    job = runtime.image_q.get(timeout=2)
+    frame = job['moon_composite']
+    assert frame['moon_composite_id'] == job['moon_composite_id']
+    assert (frame['exposure'], job['exposure']) == (0.001, 0.1)
+    assert not runtime.worker.moon_composite_suspended
+    short_file = Path(frame['filename'])
+    with fits.open(short_file) as hdulist:
+        numpy.testing.assert_array_equal(hdulist[0].data, short)
+        assert hdulist[0].header[exposure_keyword] == '0.0010004'
+        if exposure_keyword == 'EXPOSURE':
+            assert 'EXPTIME' not in hdulist[0].header
+    with fits.conf.set_temp('use_memmap', False):
+        i_ref = ingest_long(runtime, job)
+    processor = runtime.processor
+    processor.max_bit_depth = 16
+    original = processor.image.copy()
+    processor.config['VIRTUALSKY'] = {
+        'IMAGE_CIRCLE_DIAMETER': 300,
+        'ALIGNMENT': {'source': 'manual', 'pipeline': pipelineSignature(processor.config)},
+    }
+    guide = moon_sky.MoonSkyGuide(processor.config)
+    angular_size = numpy.degrees(4 * numpy.arcsin(numpy.sqrt(2) * 12 / 300)) * 3600
+    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: SimpleNamespace(
+        alt=numpy.pi / 2, az=0, size=angular_size,
+    ))
+    try:
+        with mock.patch.object(guide, 'search_region', wraps=guide.search_region) as search, \
+                mock.patch.object(moon, 'blend', wraps=moon.blend) as blend:
+            processor.composite_moon(frame, i_ref, guide=guide)
+        assert [call.kwargs['expanded'] for call in search.call_args_list] == (
+            [False] if scene == 'center' else [False, True]
+        )
+        numpy.testing.assert_allclose(guide.expected_position, (200, 150), atol=0.01)
+        assert guide.expected_radius == pytest.approx(12, abs=0.01)
+        if scene in ('center', 'expanded'):
+            assert processor.image[150, center_x - 3] == 90
+            assert processor.image[150, center_x + 6] == 180
+            x1, y1, x2, y2 = blend.call_args.args[2]
+            assert x1 < center_x < x2 and y1 < 150 < y2
+        else:
+            blend.assert_not_called()
+            numpy.testing.assert_array_equal(processor.image, original)
+        assert processor.image[50, 50] == 25
+        numpy.testing.assert_array_equal(i_ref.hdulist[0].data, long)
+        output = tmp_path / 'moon-output.png'
+        assert cv2.imwrite(str(output), processor.image)
+        numpy.testing.assert_array_equal(cv2.imread(str(output), cv2.IMREAD_UNCHANGED), processor.image)
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink(missing_ok=True)
+        short_file.unlink()
+
+
+def test_failed_prediction_keeps_paired_image_without_unguided_fallback(runtime, monkeypatch, caplog):
+    from indi_allsky import moon
+
+    run_capture(runtime, monkeypatch)
+    job = runtime.image_q.get(timeout=2)
+    with fits.conf.set_temp('use_memmap', False):
+        i_ref = ingest_long(runtime, job)
+    guide = SimpleNamespace(search_region=mock.Mock(side_effect=ValueError('alignment is stale')))
+    before = runtime.processor.image.copy()
+    try:
+        with mock.patch.object(moon, 'find_moon') as detect:
+            runtime.processor.composite_moon(job['moon_composite'], i_ref, guide=guide)
+        detect.assert_not_called()
+        numpy.testing.assert_array_equal(runtime.processor.image, before)
+        assert 'alignment is stale' in caplog.text
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink(missing_ok=True)
+        Path(job['moon_composite']['filename']).unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize('mode', stretch_classes.__all__)
@@ -923,6 +1027,32 @@ def test_driver_exptime_mismatch_suspends_until_reload_and_keeps_sky_capture(run
         Path(job['filename']).unlink()
         if job.get('moon_composite'):
             Path(job['moon_composite']['filename']).unlink()
+
+
+@pytest.mark.parametrize('phase', ['short', 'long'])
+@pytest.mark.parametrize('exposure_keyword', ['EXPTIME', 'EXPOSURE'])
+@pytest.mark.parametrize('reported', ['invalid', 'nan', 'inf', 0, -1])
+def test_invalid_exposure_metadata_recovers_and_cleans_pair(runtime, monkeypatch, phase, exposure_keyword, reported):
+    original_client = runtime.client
+    requests, _ = run_capture(
+        runtime, monkeypatch, exposure_keyword=exposure_keyword,
+        reported_exposures={phase: reported}, normal_frames=2,
+    )
+    assert [name for name, _ in requests] == (
+        ['short', 'long', 'long'] if phase == 'short' else ['short', 'long', 'long', 'long']
+    )
+    original_client.abortCcdExposure.assert_called_once()
+    assert original_client.disconnected and runtime.client is not original_client
+    assert original_client._moon_capture.short_frame is None
+    assert runtime.worker.moon_composite_suspended
+    for _ in range(2):
+        job = runtime.image_q.get(timeout=2)
+        assert 'moon_composite' not in job
+        assert (job['exposure'], job['gain'], job['binning']) == (0.1, 75, 1)
+        Path(job['filename']).unlink()
+    assert not list(runtime.directory.glob('*.fit'))
+    with pytest.raises(queue.Empty):
+        runtime.image_q.get(timeout=0.05)
 
 
 def test_orderly_shutdown_after_short_removes_short_without_starting_long(runtime, monkeypatch):

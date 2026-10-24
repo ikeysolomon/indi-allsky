@@ -174,6 +174,8 @@ class ImageProcessor(object):
         self._stacker = None
         self._stretch_o = None
         self._moon_display_lut = None
+        self._moon_native_lut = None
+        self._moon_clahe_source = None
         self._image_overlay_o = IndiAllSkyImageOverlay(self.config)
 
 
@@ -1865,12 +1867,9 @@ class ImageProcessor(object):
             or not self.night_av[constants.NIGHT_NIGHT]
             or not self.night_av[constants.NIGHT_MOONMODE]
         ):
+            self._moon_clahe_source = None
             return
-        from .moon import blend, clahe_skip_reason, find_moon, reported_exposure, exposure_matches
-        skip_reason = clahe_skip_reason(self.config)
-        if skip_reason and not self.focus_mode:
-            logger.warning('Moon composite skipped: %s; keeping the normal long image', skip_reason)
-            return
+        from .moon import blend, find_moon, reported_exposure, exposure_matches
         from astropy.io import fits
         from types import SimpleNamespace
 
@@ -1944,20 +1943,33 @@ class ImageProcessor(object):
                 )
                 patch = self._debayer(patch_ref)
             display_patch = None
-            if self._moon_display_lut is not None:
-                # Reuse the sky transfer, but keep linear pixels for masking/clipping.
+            clahe_active = (
+                self.config.get('CONTRAST_ENHANCE_16BIT')
+                and self.config.get('NIGHT_CONTRAST_ENHANCE') and not self.focus_mode
+            )
+            if clahe_active:
+                if self._moon_clahe_source is None:
+                    raise ValueError('16-bit CLAHE context is unavailable for this frame')
+                native_patch = patch
+                try:
+                    if self._moon_native_lut is not None:
+                        native_patch = self._moon_native_lut[patch]
+                        self._moon_split_patch(native_patch, patch, roi)
+                except IndexError as e:
+                    raise ValueError('short ROI exceeds sky stretch range; check sensor bit depth') from e
+                display_patch = self._moon_clahe_patch(native_patch, roi)
+                if patch_ref.image_bitpix != 8:
+                    display_patch = numpy.right_shift(display_patch, self.max_bit_depth - 8).astype(numpy.uint8)
+            elif self._moon_display_lut is not None:
+                # Masking/clipping always use linear pixels, not display pixels.
                 try:
                     display_patch = self._moon_display_lut[patch]
                 except IndexError as e:
                     raise ValueError('short ROI exceeds sky stretch range; check sensor bit depth') from e
             if patch_ref.image_bitpix != 8:
                 patch = numpy.right_shift(patch, self.max_bit_depth - 8).astype(numpy.uint8)
-            if display_patch is not None and self.config.get('IMAGE_STRETCH', {}).get('SPLIT'):
-                columns = numpy.arange(x1, x2)
-                midpoint = self.image.shape[1] // 2
-                unstretched = columns > midpoint if self.config.get('IMAGE_FLIP_H') else columns < midpoint
-                display_patch[:, unstretched] = patch[:, unstretched]
-                display_patch[:, columns == midpoint] = 0
+            if display_patch is not None and not clahe_active:
+                self._moon_split_patch(display_patch, patch, roi)
             applied = blend(
                 self.image, patch, roi,
                 display_patch=display_patch, expected=expected, expected_radius=expected_radius,
@@ -1965,8 +1977,56 @@ class ImageProcessor(object):
         except (OSError, ValueError) as e:
             logger.warning('Moon composite skipped: %s', e)
             return
+        finally:
+            self._moon_clahe_source = None
         logger.info('Moon composite bracket=%s applied=%s in %0.4fs',
                     frame.get('moon_composite_id', 'unknown'), applied, time.monotonic() - started)
+
+
+    def _moon_split_patch(self, display_patch, linear_patch, roi):
+        if not self.config.get('IMAGE_STRETCH', {}).get('SPLIT'):
+            return
+        columns = numpy.arange(roi[0], roi[2])
+        midpoint = self.image.shape[1] // 2
+        unstretched = columns > midpoint if self.config.get('IMAGE_FLIP_H') else columns < midpoint
+        display_patch[:, unstretched] = linear_patch[:, unstretched]
+        display_patch[:, columns == midpoint] = 0
+
+
+    def _moon_clahe_patch(self, patch, roi):
+        source = self._moon_clahe_source
+        if source.shape != self.image.shape:
+            raise ValueError('16-bit CLAHE context geometry differs from the sky image')
+        height, width = source.shape[:2]
+        grid = self.config.get('CLAHE_GRIDSIZE', 8)
+        padded = bool(width % grid or height % grid)
+        tile_width = width // grid + int(padded)
+        tile_height = height // grid + int(padded)
+        x1, y1, x2, y2 = roi
+        left = max(0, math.floor(x1 / tile_width - 0.5))
+        top = max(0, math.floor(y1 / tile_height - 0.5))
+        right = min(grid, math.floor((x2 - 1) / tile_width - 0.5) + 2)
+        bottom = min(grid, math.floor((y2 - 1) / tile_height - 0.5) + 2)
+        start_x, start_y = left * tile_width, top * tile_height
+        # Preserve OpenCV's global tile phase and reflect-101 image-edge padding.
+        columns = numpy.array([
+            cv2.borderInterpolate(x, width, cv2.BORDER_REFLECT_101)
+            for x in range(start_x, right * tile_width)
+        ])
+        rows = numpy.array([
+            cv2.borderInterpolate(y, height, cv2.BORDER_REFLECT_101)
+            for y in range(start_y, bottom * tile_height)
+        ])
+        context = source[numpy.ix_(rows, columns)]
+        local_x, local_y = x1 - start_x, y1 - start_y
+        patch_rows = numpy.flatnonzero((rows >= y1) & (rows < y2))
+        patch_columns = numpy.flatnonzero((columns >= x1) & (columns < x2))
+        # Reflected edge copies must contain the short pixels too.
+        context[numpy.ix_(patch_rows, patch_columns)] = patch[
+            numpy.ix_(rows[patch_rows] - y1, columns[patch_columns] - x1)
+        ]
+        rendered = self._apply_clahe_16bit(context, (right - left, bottom - top))
+        return rendered[local_y:local_y + y2 - y1, local_x:local_x + x2 - x1]
 
 
     def rotate_90(self):
@@ -2585,25 +2645,30 @@ class ImageProcessor(object):
         self.image = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
 
-    def contrast_clahe_16bit(self):
+    def contrast_clahe_16bit(self, moon_composite=False):
+        self._moon_clahe_source = None
         if self.focus_mode:
             # disable processing in focus mode
             return
 
-        #logger.info('Performing 16-bit CLAHE contrast enhance')
-
-        clip_limit = self.config.get('CLAHE_CLIPLIMIT', 3.0)
+        if (
+            moon_composite and self.config.get('MOON_COMPOSITE', {}).get('ENABLE')
+            and self.night_av[constants.NIGHT_NIGHT]
+            and self.night_av[constants.NIGHT_MOONMODE]
+        ):
+            self._moon_clahe_source = self.image
         grid_size = self.config.get('CLAHE_GRIDSIZE', 8)
+        self.image = self._apply_clahe_16bit(self.image, (grid_size, grid_size))
 
 
-        ### ohhhh, contrasty
-        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(grid_size, grid_size))
+    def _apply_clahe_16bit(self, image, grid_size):
+        clip_limit = self.config.get('CLAHE_CLIPLIMIT', 3.0)
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=grid_size)
 
 
-        if len(self.image.shape) == 2:
+        if len(image.shape) == 2:
             # mono
-            self.image = clahe.apply(self.image)
-            return
+            return clahe.apply(image)
 
 
         if self.max_bit_depth == 8:
@@ -2615,7 +2680,7 @@ class ImageProcessor(object):
         max_value = (2 ** self.max_bit_depth) - 1
 
         # float32 normalized values
-        norm_image = (self.image / max_value).astype(numpy.float32)
+        norm_image = (image / max_value).astype(numpy.float32)
 
 
         # color, apply to luminance
@@ -2633,7 +2698,7 @@ class ImageProcessor(object):
         #logger.info('L max: %0.4f', numpy.max(lab[:, :, 0]))
 
         # convert back to uint8 or uint16
-        self.image = (cv2.cvtColor(lab, cv2.COLOR_LAB2BGR) * max_value).astype(numpy_dtype)
+        return (cv2.cvtColor(lab, cv2.COLOR_LAB2BGR) * max_value).astype(numpy_dtype)
 
 
     def apply_gamma_correction(self):
@@ -4043,6 +4108,8 @@ class ImageProcessor(object):
 
     def stretch(self, moon_composite=False):
         self._moon_display_lut = None
+        self._moon_native_lut = None
+        self._moon_clahe_source = None
         if self._stretch_o is not None:
             self._stretch_o.reset_display_transfer()
         if self.focus_mode:
@@ -4073,15 +4140,14 @@ class ImageProcessor(object):
             and self.night_av[constants.NIGHT_NIGHT]
             and self.night_av[constants.NIGHT_MOONMODE]
         )
-        if record_moon_transfer:
-            from .moon import clahe_skip_reason
-            record_moon_transfer = clahe_skip_reason(self.config) is None
         self._stretch_o.record_display_transfer = bool(record_moon_transfer)
         stretched_image = self._stretch(i_ref)
 
         if record_moon_transfer:
             dtype = numpy.uint8 if self.max_bit_depth == 8 else numpy.uint16
             lut = self._stretch_o.apply_last_stretch(numpy.arange(2 ** self.max_bit_depth, dtype=dtype))
+            if self.config.get('CONTRAST_ENHANCE_16BIT') and self.config.get('NIGHT_CONTRAST_ENHANCE'):
+                self._moon_native_lut = lut
             if i_ref.image_bitpix != 8:
                 lut = numpy.right_shift(lut, self.max_bit_depth - 8).astype(numpy.uint8)
             self._moon_display_lut = lut

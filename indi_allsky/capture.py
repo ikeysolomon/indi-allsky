@@ -2350,13 +2350,8 @@ class CaptureWorker(Process):
             and not self.focus_mode and not sqm_exposure and not sync
             and exposure > moon.get('EXPOSURE', 0.001)
         ):
-            from .moon import clahe_skip_reason
-            skip_reason = clahe_skip_reason(self.config)
-            if skip_reason:
-                logger.warning('Moon composite skipped: %s; taking ordinary long exposure', skip_reason)
-            else:
-                self.indiclient.beginMoonComposite(exposure, gain, binning)
-                exposure = moon.get('EXPOSURE', 0.001)
+            self.indiclient.beginMoonComposite(exposure, gain, binning)
+            exposure = moon.get('EXPOSURE', 0.001)
 
         self.indiclient.setCcdExposure(exposure, gain, binning, sync=sync, timeout=timeout, sqm_exposure=sqm_exposure)
 

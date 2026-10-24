@@ -10038,6 +10038,36 @@ class JsonImageProcessingView(JsonView):
         return jsonify(json_data)
 
 
+def _match_journal_sources(reader, syslog_facility=None, user_unit_name=None, unit_name=None):
+    sources = [
+        (key, value) for key, value in (
+            ('SYSLOG_FACILITY', syslog_facility),
+            ('_SYSTEMD_USER_UNIT', user_unit_name),
+            ('_SYSTEMD_UNIT', unit_name),
+        ) if value is not None
+    ]
+    if not sources:
+        raise ValueError('No journal log source configured')
+    for index, (key, value) in enumerate(sources):
+        if index:
+            reader.add_disjunction()
+        reader.add_match(**{key: value})
+
+
+def _seek_journal_tail(reader, lines):
+    reader.seek_tail()
+    # Iteration starts after the current entry, so rewind one extra record.
+    for _ in range(lines + 1):
+        if not reader.get_previous():
+            reader.seek_head()
+            break
+
+
+def _journal_event(entry):
+    message = entry.get('MESSAGE', '').replace('\n', '\ndata: ')
+    return 'data: {0:s}\n\n'.format(message)
+
+
 class LogView(TemplateView):
     page_title = 'Log Viewer'
     log_stream_view = 'indi_allsky.stream_log_view'
@@ -10085,45 +10115,29 @@ class StreamLogViewBase(BaseView):
 
         def generate():
             reader = journal.Reader()
+            try:
+                _match_journal_sources(reader, self.syslog_facility, self.user_unit_name, self.unit_name)
+                _seek_journal_tail(reader, 10)
+                poller = select.poll()
+                poller.register(reader.fileno(), reader.get_events())
 
+                for entry in reader:
+                    yield _journal_event(entry)
 
-            if not isinstance(self.syslog_facility, type(None)):
-                app.logger.info('Streaming log from facility %s', self.syslog_facility)
-                reader.add_match(SYSLOG_FACILITY=self.syslog_facility)
-            elif not isinstance(self.user_unit_name, type(None)):
-                app.logger.info('Streaming log from user unit %s', self.user_unit_name)
-                reader.add_match(_SYSTEMD_USER_UNIT=self.user_unit_name)
-            else:
-                # use unit name
-                app.logger.info('Streaming log from system unit %s', self.unit_name)
-                reader.add_match(_SYSTEMD_UNIT=self.unit_name)
-
-
-            reader.seek_tail()
-
-            # return the previous 10 lines of log messages
-            for _ in range(11):
-                reader.get_previous()  # Fixes edge-case pointer positioning
-
-
-            poller = select.poll()
-            poller.register(reader.fileno(), reader.get_events())
-
-
-            while True:
-                if poller.poll(500):  # Check every 500ms
-                    if reader.process() == journal.APPEND:
-                        for entry in reader:
-                            message = entry.get('MESSAGE', '')
-                            yield 'data: {0:s}\n\n'.format(message)
-                else:
-                    yield ': keep-alive\n\n'
-
-
+                while True:
+                    if poller.poll(500):  # Check every 500ms
+                        if reader.process() == journal.APPEND:
+                            for entry in reader:
+                                yield _journal_event(entry)
+                    else:
+                        yield ': keep-alive\n\n'
+            finally:
+                reader.close()
 
         return Response(
             stream_with_context(generate()),
-            mimetype='text/event-stream'
+            mimetype='text/event-stream',
+            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
         )
 
 
@@ -10132,8 +10146,8 @@ class StreamLogView(StreamLogViewBase):
         super(StreamLogView, self).__init__(**kwargs)
 
         self.syslog_facility = '22'  # local6
-        self.user_unit_name = None
-        self.unit_name = None
+        self.user_unit_name = app.config['ALLSKY_SERVICE_NAME']
+        self.unit_name = app.config['ALLSKY_SERVICE_NAME']
 
 
 class StreamIndiserverLogView(StreamLogViewBase):
@@ -10153,39 +10167,52 @@ class LogDownloadView(BaseView):
     def dispatch_request(self):
         import gzip
 
-        log_file_p = Path('/var/log/indi-allsky/indi-allsky.log')
-        line_size = 150  # assuming lines have an average length
-
-        lines = int(request.args.get('lines', 20000))
-
-
-        if not log_file_p.exists():
-            # this can happen in docker
-            return 'Log file does not exist'
-
-
-        read_bytes = lines * line_size
-
-
-        log_file_size = log_file_p.stat().st_size
-        if log_file_size == 0:
-            return 'Log file is empty'
-        elif log_file_size < read_bytes:
-            # just read the whole file
-            #app.logger.info('Returning %d bytes of log data', log_file_size)
-            log_file_seek = 0
-        else:
-            #app.logger.info('Returning %d bytes of log data', read_bytes)
-            log_file_seek = log_file_size - read_bytes
-
-
         try:
-            with io.open(log_file_p, 'rb') as log_file_f:
-                log_file_f.seek(log_file_seek)
-                log_data = log_file_f.read()
-        except PermissionError as e:
-            return 'PermissionError: {0:s}'.format(str(e))
+            lines = int(request.args.get('lines', 20000))
+        except ValueError:
+            abort(400, description='Log line count must be a positive integer')
+        if lines <= 0:
+            abort(400, description='Log line count must be a positive integer')
 
+        log_data = None
+        source = 'journal'
+        try:
+            from systemd import journal
+        except ModuleNotFoundError as e:
+            if e.name != 'systemd':
+                raise
+            app.logger.warning('System journal unavailable; using legacy capture log file: %s', e)
+        else:
+            try:
+                reader = journal.Reader()
+                try:
+                    unit = app.config['ALLSKY_SERVICE_NAME']
+                    _match_journal_sources(reader, '22', unit, unit)
+                    _seek_journal_tail(reader, lines)
+                    messages = [entry.get('MESSAGE', '') for entry in reader]
+                    if messages:
+                        log_data = '\n'.join(messages).encode()
+                    else:
+                        app.logger.warning('No capture journal entries available; using legacy capture log file')
+                finally:
+                    reader.close()
+            except PermissionError as e:
+                app.logger.warning('Cannot read capture journal; using legacy capture log file: %s', e)
+
+        if log_data is None:
+            source = 'file'
+            log_file_p = Path('/var/log/indi-allsky/indi-allsky.log')
+            if not log_file_p.exists():
+                abort(404, description='No capture journal entries or legacy log file available')
+            read_bytes = lines * 150  # approximate average line length
+            log_file_seek = max(0, log_file_p.stat().st_size - read_bytes)
+            try:
+                with io.open(log_file_p, 'rb') as log_file_f:
+                    log_file_f.seek(log_file_seek)
+                    log_data = log_file_f.read()
+            except PermissionError as e:
+                app.logger.error('Cannot read legacy capture log file: %s', e)
+                abort(403, description='Permission denied reading the capture log file')
 
         log_buffer = io.BytesIO(gzip.compress(log_data))
 
@@ -10197,7 +10224,9 @@ class LogDownloadView(BaseView):
 
         download_name = 'indi-allsky_log_{ts:%Y%m%d_%H%M%S}.txt.gz'.format(**data)
 
-        return send_file(log_buffer, mimetype='application/octet-stream', download_name=download_name, as_attachment=True)
+        response = send_file(log_buffer, mimetype='application/octet-stream', download_name=download_name, as_attachment=True)
+        response.headers['X-Indi-Allsky-Log-Source'] = source
+        return response
 
 
 class LogWebappDownloadView(BaseView):

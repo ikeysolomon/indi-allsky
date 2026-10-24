@@ -27,6 +27,13 @@ def config():
     }
 
 
+def projected_moon(diameter=220, radius=12, altitude=math.pi / 2):
+    return SimpleNamespace(
+        alt=altitude, az=0,
+        size=math.degrees(4 * math.asin(math.sqrt(2) * radius / diameter)) * 3600,
+    )
+
+
 def reference(shape=(240, 320), binning=1):
     return SimpleNamespace(
         camera_uuid='camera-1', binning=binning,
@@ -206,7 +213,7 @@ def test_guidance_uses_short_exposure_time_not_processing_time(monkeypatch, date
 
     def moon_at(obs):
         observed.append(obs.date.datetime().replace(tzinfo=timezone.utc).timestamp())
-        return SimpleNamespace(alt=math.pi / 2, az=0)
+        return projected_moon()
 
     monkeypatch.setattr(moon_sky.ephem, 'Moon', moon_at)
     frame = {'exposure': 0.002, 'exp_time': ref.exp_date.timestamp() + 0.002}
@@ -221,7 +228,7 @@ def test_guided_search_ignores_brighter_circular_streetlights_elsewhere(monkeypa
     cfg, ref = config(), reference((800, 1000))
     cfg['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 700
     manual(cfg)
-    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: SimpleNamespace(alt=math.pi / 2, az=0))
+    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: projected_moon(diameter=700))
     search = MoonSkyGuide(cfg).search_region(
         {'exposure': 0.001, 'exp_time': ref.exp_date.timestamp()}, ref, {}, 40.1, -75.4, 0,
     )
@@ -254,14 +261,18 @@ def test_saved_reference_binning_and_pipeline_are_inverted(monkeypatch):
             'latitude': 40.1, 'longitude': -75.4,
         },
     )
-    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: SimpleNamespace(alt=math.pi / 2, az=0))
+    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: projected_moon(diameter=150))
     current = reference((120, 160), binning=2)
-    bounds = MoonSkyGuide(cfg).search_region(
+    guide = MoonSkyGuide(cfg)
+    bounds = guide.search_region(
         {'exposure': 0.001, 'exp_time': ref.exp_date.timestamp()}, current, {}, 40.1, -75.4, 0,
     )
     assert bounds[0] < 90 < bounds[2] and bounds[1] < 50 < bounds[3]
     assert abs((bounds[0] + bounds[2]) / 2 - 89.75) < 2
     assert abs((bounds[1] + bounds[3]) / 2 - 49.75) < 2
+    assert guide.expected_radius == pytest.approx(
+        12 * numpy.linalg.norm(numpy.linalg.inv(matrix[:2, :2]), ord=2) / 2, abs=0.01,
+    )
 
 
 @pytest.mark.parametrize('failure', ['below-horizon', 'outside', 'missing-time', 'invalid-time', 'stale'])
@@ -270,7 +281,7 @@ def test_bad_predictions_are_explicit_and_never_fall_back_to_whole_frame(monkeyp
     cfg['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 220
     manual(cfg)
     altitude = -0.1 if failure == 'below-horizon' else math.pi / 2
-    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: SimpleNamespace(alt=altitude, az=0))
+    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: projected_moon(altitude=altitude))
     if failure == 'outside':
         cfg['VIRTUALSKY']['OFFSET_X'] = 1000
     if failure == 'stale':
@@ -282,6 +293,79 @@ def test_bad_predictions_are_explicit_and_never_fall_back_to_whole_frame(monkeyp
         frame['exp_time'] = float('nan')
     with pytest.raises(ValueError):
         MoonSkyGuide(cfg).search_region(frame, ref, {}, 40.1, -75.4, 0)
+
+
+@pytest.mark.parametrize('margin', [0.01, 0.05, 0.1])
+def test_search_margin_and_single_expansion_are_in_sensor_coordinates(monkeypatch, margin):
+    cfg, ref = config(), reference((1200, 1600))
+    cfg['MOON_COMPOSITE']['SEARCH_MARGIN'] = margin
+    cfg['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 1000
+    manual(cfg)
+    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: projected_moon(diameter=1000))
+    guide = MoonSkyGuide(cfg)
+    frame = {'exposure': 0.001, 'exp_time': ref.exp_date.timestamp()}
+    first = guide.search_region(frame, ref, {}, 40.1, -75.4, 0)
+    expanded = guide.search_region(frame, ref, {}, 40.1, -75.4, 0, expanded=True)
+    tolerance = max(24, 1000 * margin)
+    assert first[2] - first[0] == pytest.approx(2 * tolerance, abs=2)
+    assert expanded[2] - expanded[0] == pytest.approx(4 * tolerance, abs=2)
+    numpy.testing.assert_allclose(guide.expected_position, (800, 600), atol=0.01)
+    assert guide.expected_radius == pytest.approx(12, abs=0.01)
+
+
+def test_real_apparent_moon_size_rejects_unresolved_prediction(monkeypatch):
+    cfg, ref = config(), reference()
+    cfg['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 220
+    manual(cfg)
+    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: SimpleNamespace(alt=math.pi / 2, az=0, size=1800))
+    with pytest.raises(ValueError, match='too small to resolve'):
+        MoonSkyGuide(cfg).search_region(
+            {'exposure': 0.001, 'exp_time': ref.exp_date.timestamp()}, ref, {}, 40.1, -75.4, 0,
+        )
+
+
+def test_real_half_degree_moon_projects_to_resolved_sensor_radius(monkeypatch):
+    cfg, ref = config(), reference((3600, 3600))
+    cfg['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 3000
+    manual(cfg)
+    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: SimpleNamespace(alt=math.pi / 2, az=0, size=1800))
+    guide = MoonSkyGuide(cfg)
+    guide.search_region(
+        {'exposure': 0.001, 'exp_time': ref.exp_date.timestamp()}, ref, {}, 40.1, -75.4, 0,
+    )
+    radius = 1500 * math.sin(math.radians(0.5 / 4)) / math.sin(math.pi / 4)
+    assert guide.expected_radius == pytest.approx(radius, abs=0.001)
+    assert guide.expected_radius == pytest.approx(4.628, abs=0.001)
+
+
+def test_empirical_distortion_applies_to_both_moon_position_and_apparent_radius(monkeypatch):
+    from tests.lens_solver.test_calibration import saved_model
+
+    cfg, ref = config(), reference()
+    cfg['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 220
+    manual(cfg)
+    values = moon_sky.alignment_values(cfg)
+    model = saved_model(version=2)
+    coefficients = numpy.zeros((10, 2))
+    coefficients[0, 0] = 0.01
+    coefficients[1, 0] = coefficients[2, 1] = 0.01
+    model.update(
+        coefficients=coefficients.tolist(), image_size=[320, 240], camera_uuid=ref.camera_uuid,
+        pipeline=pipelineSignature(cfg), context=[40.1, -75.4, 0],
+        geometry=[values[key] for key in (
+            'AZIMUTH_ANGLE', 'LATITUDE_OFFSET', 'LONGITUDE_OFFSET', 'IMAGE_CIRCLE_DIAMETER',
+            'OFFSET_X', 'OFFSET_Y', 'LENS_ALTITUDE', 'POINTING_AZIMUTH', 'RADIAL_DISTORTION',
+        )] + [int(values['PRECESSION'])],
+    )
+    assert moon_sky.validateCalibration(model)
+    cfg['VIRTUALSKY'].update(CALIBRATION_ENABLED=True, CALIBRATION=model)
+    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: projected_moon())
+    guide = MoonSkyGuide(cfg)
+    guide.search_region(
+        {'exposure': 0.001, 'exp_time': ref.exp_date.timestamp()}, ref, {}, 40.1, -75.4, 0,
+    )
+    numpy.testing.assert_allclose(guide.expected_position, (161.1, 120), atol=0.01)
+    assert guide.expected_radius == pytest.approx(12.12, abs=0.01)
 
 
 @pytest.mark.parametrize('failure', [None, 'concurrent', 'save'])

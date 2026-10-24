@@ -98,6 +98,7 @@ class IndiAllSkyConfigBase(object):
         "MOON_COMPOSITE" : {
             "ENABLE"    : False,
             "EXPOSURE"  : 0.001,
+            "SEARCH_MARGIN" : 0.05,
         },
         "FOCUS_DELAY"          : 4.0,
         "CFA_PATTERN"      : "",  # None, GRBG, RGGB, BGGR, GBRG

@@ -40,9 +40,28 @@ def validate_config(config):
     exposure = settings.get('EXPOSURE', 0.001)
     if type(exposure) not in (int, float) or not math.isfinite(exposure) or exposure <= 0:
         raise ValueError('MOON_COMPOSITE EXPOSURE must be finite and positive')
+    margin = settings.get('SEARCH_MARGIN', 0.05)
+    if type(margin) not in (int, float) or not math.isfinite(margin) or not 0.01 <= margin <= 0.1:
+        raise ValueError('MOON_COMPOSITE SEARCH_MARGIN must be a fraction from 0.01 to 0.1')
 
 
-def _bright_regions(gray):
+def reported_exposure(header):
+    return header.get('EXPTIME', header.get('EXPOSURE'))
+
+
+def exposure_matches(reported, requested):
+    if isinstance(reported, bool):
+        return False
+    try:
+        value = float(reported)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(value) and value > 0 and math.isclose(
+        value, requested, rel_tol=0.01, abs_tol=0.000001,
+    )
+
+
+def _bright_regions(gray, expected_radius=None):
     """Grow a bounded number of bright seeds, not full-frame contour searches."""
     remaining = cv2.medianBlur(gray, 3)
     height, width = gray.shape
@@ -95,21 +114,47 @@ def _bright_regions(gray):
             circularity = 4 * math.pi * contour_area / perimeter ** 2
             occupancy = contour_area / (math.pi * disk_radius ** 2)
             # Allow a terminator on a partial disk, but require a curved limb.
-            if circularity < 0.6 or occupancy < 0.35 or circular_arc < 0.55:
+            partial_disk = (
+                expected_radius is not None and circularity >= 0.1
+                and occupancy >= 0.08 and circular_arc >= 0.4
+            )
+            if not partial_disk and (circularity < 0.6 or occupancy < 0.35 or circular_arc < 0.55):
                 break
             mask = numpy.zeros_like(selected)
             cv2.drawContours(mask, [contour], -1, 1, cv2.FILLED)
             brightness = float(window[y:y + h, x:x + w][selected != 0].mean())
-            regions.append((bounds, mask, int(area), brightness))
+            regions.append((bounds, mask, int(area), brightness, (bx1 + cx, by1 + cy), disk_radius))
             break
     return regions
 
 
-def _select_region(gray):
-    regions = _bright_regions(gray)
+def _select_region(gray, expected=None, expected_radius=None):
+    regions = _bright_regions(gray, expected_radius)
     if not regions:
-        logger.warning('Moon composite skipped: no reliable circular moon candidate')
+        if int(gray.max()) - float(numpy.median(gray)) < 4:
+            logger.warning('Moon may be too faint or prediction misaligned; check alignment before increasing manual EXPOSURE')
+        else:
+            logger.warning('Moon composite skipped: no resolved circular lunar candidate (small source or non-lunar shape)')
         return None
+    if expected_radius is not None:
+        regions = [region for region in regions if 0.55 * expected_radius <= region[5] <= 1.8 * expected_radius]
+        if not regions:
+            logger.warning('Moon composite skipped: candidate size differs from predicted lunar radius; rejecting point sources')
+            return None
+    if expected is not None:
+        def distance(region):
+            return math.hypot(region[4][0] - expected[0], region[4][1] - expected[1])
+
+        regions.sort(key=lambda region: (distance(region), -region[2] * region[3]))
+        best = regions[0]
+        if any(
+            abs(distance(region) - distance(best)) <= max(2, best[5] * 0.5)
+            and region[2] >= best[2] * 0.1 and region[3] >= best[3] * 0.5
+            for region in regions[1:]
+        ):
+            logger.warning('Moon composite skipped: ambiguous nearby circular targets')
+            return None
+        return best
     # Integrated brightness favors a resolved lunar disk over isolated hot pixels.
     regions.sort(key=lambda region: region[2] * region[3], reverse=True)
     best = regions[0]
@@ -119,7 +164,7 @@ def _select_region(gray):
     return best
 
 
-def find_moon(sensor, bayer=False, search=None):
+def find_moon(sensor, bayer=False, search=None, expected=None, expected_radius=None):
     """Locate on a max-pooled sensor preview; return an even, padded sensor ROI."""
     if sensor.dtype != numpy.uint8 or sensor.ndim not in (2, 3):
         raise ValueError('Moon detection requires 8-bit mono or channel-first sensor data')
@@ -142,10 +187,15 @@ def find_moon(sensor, bayer=False, search=None):
         gray, numpy.ones((step, step), numpy.uint8), anchor=(0, 0),
         borderType=cv2.BORDER_CONSTANT, borderValue=0,
     )[::step, ::step]
-    region = _select_region(preview)
+    preview_expected = None if expected is None else (
+        (expected[0] - offset_x) / step, (expected[1] - offset_y) / step,
+    )
+    region = _select_region(
+        preview, preview_expected, None if expected_radius is None else expected_radius / step,
+    )
     if region is None:
         return None
-    (x1, y1, x2, y2), _, _, _ = region
+    (x1, y1, x2, y2), _, _, _, _, _ = region
     margin = max(6, math.ceil(max(x2 - x1, y2 - y1) * step * 0.25))
     roi = (
         offset_x + max(0, (x1 * step - margin) // 2 * 2),
@@ -157,7 +207,7 @@ def find_moon(sensor, bayer=False, search=None):
     return roi
 
 
-def blend(image, patch, roi, display_patch=None):
+def blend(image, patch, roi, display_patch=None, expected=None, expected_radius=None):
     """Mask the linear lunar ROI and blend its display pixels; leave sky untouched."""
     x1, y1, x2, y2 = roi
     if image.dtype != numpy.uint8 or patch.dtype != numpy.uint8:
@@ -173,14 +223,18 @@ def blend(image, patch, roi, display_patch=None):
         raise ValueError('Moon display patch must match the linear ROI geometry and 8-bit format')
 
     gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY) if patch.ndim == 3 else patch
-    region = _select_region(gray)
+    patch_expected = None if expected is None else (expected[0] - x1, expected[1] - y1)
+    region = _select_region(gray, patch_expected, expected_radius)
     if region is None:
         return False
-    (x, y, right, bottom), silhouette, area, _ = region
+    (x, y, right, bottom), silhouette, area, _, _, radius = region
     if area < 16:
-        logger.warning('Moon composite skipped: unresolved target')
+        logger.warning('Moon too small to resolve surface detail; keeping the normal image')
         return False
-    if x < 4 or y < 4 or right > gray.shape[1] - 4 or bottom > gray.shape[0] - 4:
+    dilation = min(3, max(1, round(radius * 0.02)))
+    feather = min(4, max(1, round(radius * 0.04)))
+    padding = max(4, dilation + feather + 1)
+    if x < padding or y < padding or right > gray.shape[1] - padding or bottom > gray.shape[0] - padding:
         logger.warning('Moon composite skipped: target touches ROI edge')
         return False
     mask = numpy.zeros_like(gray)
@@ -191,8 +245,8 @@ def blend(image, patch, roi, display_patch=None):
         logger.warning('Moon composite skipped: short exposure is clipped; reduce EXPOSURE')
         return False
 
-    mask = cv2.dilate(mask, numpy.ones((3, 3), numpy.uint8))
-    alpha = cv2.GaussianBlur(mask.astype(numpy.float32), (5, 5), 0)
+    mask = cv2.dilate(mask, numpy.ones((2 * dilation + 1, 2 * dilation + 1), numpy.uint8))
+    alpha = cv2.GaussianBlur(mask.astype(numpy.float32), (2 * feather + 1, 2 * feather + 1), 0)
     if patch.ndim == 3:
         alpha = alpha[:, :, None]
     target = image[y1:y2, x1:x2]

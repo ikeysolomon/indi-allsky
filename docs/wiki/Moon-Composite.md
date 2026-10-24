@@ -12,7 +12,7 @@ Currently supported only by `CAMERA_INTERFACE: "indi"` (native active INDI).
 Disabled by default. In **Camera Settings > Gain & Binning Modes > Moon Mode
 Profile**, enter a valid Moon Mode gain (zero is valid) to reveal **Recover Moon
 Surface Detail (Experimental)**. The option appears only for native INDI cameras.
-Turn it on to reveal the short exposure time, the only numeric setting.
+Turn it on to reveal the short exposure time, the only numeric UI setting.
 Moon location, search-region size, and mask threshold are automatic.
 Save and restart capture. The option is also shown on page load
 when a valid gain is already saved; entering a gain never enables it automatically.
@@ -34,6 +34,11 @@ Add this object to the configuration:
   limits; it is independent of the normal sky exposure minimum. Start at 1 ms,
   then tune for your camera/lens and moon-mode gain. If the moon is still clipped,
   reduce it. The short frame uses the **same gain and binning** as the sky frame.
+- Optional advanced `SEARCH_MARGIN`: prediction safety margin as a fraction of
+  the aligned image-circle diameter, default `0.05`, allowed range `0.01`-`0.1`.
+  It is available through configuration export/edit/import, not another UI control,
+  and is retained when saving the camera settings. Sensor transforms and binning
+  scale this margin; the minimum is 24 sensor pixels.
 
 Old `ROI` and `THRESHOLD` values are ignored and removed on the next configuration
 save/import. No manual migration or coordinate updates are needed.
@@ -51,24 +56,43 @@ reference binning is converted to the current binning.
 
 Only a neighbourhood around that predicted position is searched. Its margin
 scales with the reference image-circle diameter, with a 24-sensor-pixel minimum.
+If no reliable candidate is found, the margin doubles **once**. There are at most
+two search windows, never an indefinite expansion or an unguided fallback.
 The detector never falls back to unrelated full-frame lights if prediction or
 alignment fails. Within this neighbourhood, a max-pooled brightness preview
 (at most 768 pixels per dimension) preserves bright seeds without full-frame debayering.
 Bayer previews pool complete CFA cells. Starting with the brightest remaining
 pixel, the detector grows a local window until the connected bright region is
 enclosed, deriving its threshold with Otsu's method and a brightness floor.
-It examines at most three bright seeds, rejecting tiny sources, image-edge
+It examines at most three bright seeds per window (six total with expansion),
+rejecting tiny sources, image-edge
 targets, and shapes without a sufficiently circular limb. A partial illuminated
 disk can pass; narrow crescents and poorly resolved disks may be skipped.
-Resolved candidates are ranked by integrated brightness; competing substantial
-circular candidates cause a logged skip rather than a guess.
+The apparent lunar diameter from ephemeris is projected through the same lens,
+distortion and sensor transforms. Unresolved predictions and candidates with
+inconsistent radii are rejected, rather than accepting a point source when the
+Moon is absent. Shape- and brightness-valid candidates are preferred by distance
+from the prediction. Similarly plausible nearby candidates cause a logged skip
+rather than a guess. Unguided utility calls retain integrated-brightness ranking.
 
 The chosen region gets proportional padding and even sensor-coordinate origins
 to preserve Bayer phase. Only this crop is debayered. Its mask is refined at
 native resolution with the same automatic shape checks, then clipping checks
 and feathering are applied. `DEBUG` logging records the selected sensor ROI.
+Guided detection permits resolved crescents with a circular outer limb and a
+matching predicted radius; it does not require a full illuminated disk.
+Mask dilation scales at 2% of detected radius, clamped to 1-3 pixels. Gaussian
+feather radius scales at 4%, clamped to 1-4 pixels (3x3 to 9x9 kernels).
+Edge padding accounts for both. Interior detail is preserved, while the limb
+transition stays bounded rather than softening with an arbitrary fixed kernel.
 The enable switch remains opt-in; there are no location, size, threshold, or
 opacity controls.
+
+Exposure remains manual: there is no automatic exposure adjustment. Clipped
+short frames warn to reduce `EXPOSURE`; insufficient contrast warns to check
+alignment before increasing it. Unresolved disks are skipped with a resolution
+warning, not "recovered" by increasing their display brightness. These diagnostics
+cannot prove whether clouds, focus or a bad prediction caused a failed detection.
 
 ### First-image star alignment
 
@@ -116,7 +140,11 @@ loop asks that operation to advance; it no longer coordinates separate pending
 settings and short-frame flags. Only one operation may be outstanding.
 Each exposure request accepts at most one BLOB. Callbacks received when no image
 is awaited are ignored; that does not identify a duplicate arriving during a
-later request. A reported FITS `EXPTIME` that differs from the request
+later request. Exposure metadata must be finite, positive and match the request.
+FITS `EXPTIME` is authoritative; `EXPOSURE` (seconds) is accepted only when
+`EXPTIME` is absent. Numeric strings and driver rounding are supported, but invalid
+`EXPTIME` is never hidden by an alternate field. Capture and processing share
+the same matching rules. A reported duration that differs from the request
 is rejected rather than relabelled as the other half of a bracket. The tolerance
 is 1% or one microsecond, whichever is larger, to allow driver rounding.
 Local operation state, callback ownership and camera readiness coordinate the
@@ -138,7 +166,7 @@ still required; missing timestamps are currently accepted, not automatically
 treated as a reason to suspend compositing.
 
 Rejected BLOBs leave the request waiting for a valid BLOB or the existing timeout.
-A timed-out bracket, or missing `EXPTIME` needed to verify the pair, suspends
+A timed-out bracket, or missing both exposure keywords needed to verify the pair, suspends
 compositing until configuration reload/restart, without changing the saved
 enable setting. The incomplete pair is discarded, the capture connection is
 reset, and the camera must report ready before an ordinary long exposure is
@@ -298,6 +326,16 @@ check and continued ordinary captures within the same worker. Tests also check
 that a permanently busy camera surfaces a recovery error, and that a new worker
 can resume pairing with corrected metadata or run with the feature disabled.
 These simulate recovery; they do not certify any real driver's exposure reporting.
+Capture-to-output cases send synthetic lunar/streetlight pixels through the real
+capture requests and callbacks, pair their accepted FITS files, decode the normal
+image, run actual ephemeris-guided localization/compositing, and save/reload a PNG.
+They verify short acceptance before the long request, matching bracket IDs,
+sensor-coordinate crops, one expansion for an offset Moon, rejection of remote
+Moons and point sources, untouched sky and original FITS pixels, and both exposure
+keywords with rounded numeric strings. No FITS pixels are rewritten after capture.
+Invalid/nonfinite/nonpositive metadata for either bracket phase is also exercised
+through timeout, file cleanup, reconnection and two consecutive ordinary captures.
+These cases do not run the full ImageWorker rendering/output orchestration.
 Transfer tests cover all four stretch variants, mono/RGB and 8/12/16-bit data,
 verify exact agreement with the sky transfer, preserve the linear mask/clipping
 checks, and ensure skipped stretches cannot reuse a previous frame's transfer.

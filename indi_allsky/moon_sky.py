@@ -83,6 +83,8 @@ class MoonSkyGuide:
         self._geometry_key = None
         self._geometry = None
         self._validated_model = None
+        self.expected_position = None
+        self.expected_radius = None
 
     def is_aligned(self, i_ref, latitude=None, longitude=None):
         if not has_saved_alignment(self.config):
@@ -153,7 +155,7 @@ class MoonSkyGuide:
         self._retry_after = 0
         logger.info('Saved automatic VirtualSky Moon alignment: %s', result['message'])
 
-    def search_region(self, frame, i_ref, header, latitude, longitude, elevation):
+    def search_region(self, frame, i_ref, header, latitude, longitude, elevation, expanded=False):
         if not self.is_aligned(i_ref, latitude, longitude):
             raise ValueError('VirtualSky alignment is unavailable or stale')
         values = alignment_values(self.config)
@@ -190,8 +192,22 @@ class MoonSkyGuide:
             'AZIMUTH_ANGLE', 'LATITUDE_OFFSET', 'LONGITUDE_OFFSET',
             'IMAGE_CIRCLE_DIAMETER', 'OFFSET_X', 'OFFSET_Y', 'RADIAL_DISTORTION',
         )]
+        angular_radius = math.radians(float(moon.size) / 3600 / 2)
+        if not math.isfinite(angular_radius) or angular_radius <= 0:
+            raise ValueError('Predicted lunar angular size is invalid')
+        direction = numpy.array([math.cos(alt) * math.sin(az), math.cos(alt) * math.cos(az), math.sin(alt)])
+        axis = [1, 0, 0] if abs(direction[2]) > 0.9 else [0, 0, 1]
+        tangent = numpy.cross(direction, axis)
+        tangent /= numpy.linalg.norm(tangent)
+        across = numpy.cross(direction, tangent)
+        rays = numpy.vstack([direction, *(
+            direction * math.cos(angular_radius) + vector * math.sin(angular_radius)
+            for vector in (tangent, -tangent, across, -across)
+        )])
+        altitudes = numpy.arctan2(rays[:, 2], numpy.hypot(rays[:, 0], rays[:, 1]))
+        azimuths = numpy.arctan2(rays[:, 0], rays[:, 1])
         x, y = projectToPixels(
-            alt, az, params, width, height, lens_altitude=values['LENS_ALTITUDE'],
+            altitudes, azimuths, params, width, height, lens_altitude=values['LENS_ALTITUDE'],
             pointing_azimuth=values['POINTING_AZIMUTH'],
         )
         if self.config.get('VIRTUALSKY', {}).get('CALIBRATION_ENABLED') and model:
@@ -208,13 +224,21 @@ class MoonSkyGuide:
                 raise ValueError('Saved VirtualSky distortion calibration is stale')
             center = numpy.array([width / 2 + params[4], height / 2 - params[5]])
             radius = params[3] / 2
-            xy = numpy.array([[x, y]])
+            xy = numpy.column_stack([x, y])
             xy += displacement((xy - center) / radius, model) * radius
-            x, y = xy[0]
-        point = numpy.linalg.solve(matrix, [x, y, 1])
+            x, y = xy.T
+        points = numpy.linalg.solve(matrix, numpy.vstack([x, y, numpy.ones(5)])).T
         scale = binning / i_ref.binning
-        point[:2] = (point[:2] + 0.5) * scale - 0.5
-        tolerance = max(24, params[3] * 0.05 * numpy.linalg.norm(numpy.linalg.inv(matrix[:2, :2]), ord=2) * scale)
+        points[:, :2] = (points[:, :2] + 0.5) * scale - 0.5
+        point = points[0]
+        self.expected_position = tuple(float(value) for value in point[:2])
+        self.expected_radius = float(numpy.linalg.norm(points[1:, :2] - point[:2], axis=1).max())
+        if self.expected_radius < 2.5:
+            raise ValueError('Predicted Moon is too small to resolve surface detail at this sensor scale')
+        margin = self.config.get('MOON_COMPOSITE', {}).get('SEARCH_MARGIN', 0.05)
+        tolerance = max(24, params[3] * margin * numpy.linalg.norm(numpy.linalg.inv(matrix[:2, :2]), ord=2) * scale)
+        if expanded:
+            tolerance *= 2
         sensor_height, sensor_width = i_ref.hdulist[0].data.shape[-2:]
         if not numpy.isfinite(point).all() or not 0 <= point[0] < sensor_width or not 0 <= point[1] < sensor_height:
             raise ValueError('Predicted Moon is outside the sensor image')

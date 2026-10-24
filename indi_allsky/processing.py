@@ -1866,7 +1866,7 @@ class ImageProcessor(object):
             or not self.night_av[constants.NIGHT_MOONMODE]
         ):
             return
-        from .moon import blend, clahe_skip_reason, find_moon
+        from .moon import blend, clahe_skip_reason, find_moon, reported_exposure, exposure_matches
         skip_reason = clahe_skip_reason(self.config)
         if skip_reason and not self.focus_mode:
             logger.warning('Moon composite skipped: %s; keeping the normal long image', skip_reason)
@@ -1896,31 +1896,41 @@ class ImageProcessor(object):
                 ):
                     if hdu.header.get(key, default) != long_header.get(key, default):
                         raise ValueError('short and long {0} differ; check sensor format and readout geometry'.format(key))
-                reported_exposure = hdu.header.get('EXPTIME')
-                if reported_exposure is None or not math.isclose(
-                    float(reported_exposure), frame['exposure'], rel_tol=0.01, abs_tol=0.000001,
-                ):
-                    raise ValueError('short FITS EXPTIME is missing or differs from the request; check driver metadata')
-                offset_x = offset_y = 0
-                if guide is not None:
-                    offset_x, offset_y, right, bottom = guide.search_region(
-                        frame, i_ref, hdu.header,
-                        self.position_av[constants.POSITION_LATITUDE],
-                        self.position_av[constants.POSITION_LONGITUDE],
-                        self.position_av[constants.POSITION_ELEVATION],
-                    )
-                    if len(hdu.shape) == 2:
-                        sensor = hdu.section[offset_y:bottom, offset_x:right]
+                if not exposure_matches(reported_exposure(hdu.header), frame['exposure']):
+                    raise ValueError('short FITS EXPTIME/EXPOSURE is missing or differs from the request; check driver metadata')
+                expected = expected_radius = None
+                for attempt in range(2 if guide is not None else 1):
+                    offset_x = offset_y = 0
+                    if guide is not None:
+                        offset_x, offset_y, right, bottom = guide.search_region(
+                            frame, i_ref, hdu.header,
+                            self.position_av[constants.POSITION_LATITUDE],
+                            self.position_av[constants.POSITION_LONGITUDE],
+                            self.position_av[constants.POSITION_ELEVATION],
+                            expanded=bool(attempt),
+                        )
+                        expected, expected_radius = guide.expected_position, guide.expected_radius
+                        if len(hdu.shape) == 2:
+                            sensor = hdu.section[offset_y:bottom, offset_x:right]
+                        else:
+                            sensor = hdu.section[:, offset_y:bottom, offset_x:right]
                     else:
-                        sensor = hdu.section[:, offset_y:bottom, offset_x:right]
+                        sensor = hdu.data
+                    if int(hdu.header['BITPIX']) == 8:
+                        detection = sensor
+                    else:
+                        detection = numpy.right_shift(sensor, self.max_bit_depth - 8).astype(numpy.uint8)
+                    local_expected = None if expected is None else (expected[0] - offset_x, expected[1] - offset_y)
+                    roi = find_moon(
+                        detection, bayer=bool(i_ref.image_bayerpat),
+                        expected=local_expected, expected_radius=expected_radius,
+                    )
+                    if roi is not None:
+                        break
+                    if guide is not None and not attempt:
+                        logger.info('Moon not identified near prediction; expanding search once (2x margin)')
                 else:
-                    sensor = hdu.data
-                if int(hdu.header['BITPIX']) == 8:
-                    detection = sensor
-                else:
-                    detection = numpy.right_shift(sensor, self.max_bit_depth - 8).astype(numpy.uint8)
-                roi = find_moon(detection, bayer=bool(i_ref.image_bayerpat))
-                if roi is None:
+                    logger.warning('Moon composite skipped: bounded search found no reliable lunar candidate')
                     return
                 x1, y1, x2, y2 = roi
                 data = sensor[y1:y2, x1:x2] if sensor.ndim == 2 else sensor[:, y1:y2, x1:x2]
@@ -1950,7 +1960,7 @@ class ImageProcessor(object):
                 display_patch[:, columns == midpoint] = 0
             applied = blend(
                 self.image, patch, roi,
-                display_patch=display_patch,
+                display_patch=display_patch, expected=expected, expected_radius=expected_radius,
             )
         except (OSError, ValueError) as e:
             logger.warning('Moon composite skipped: %s', e)

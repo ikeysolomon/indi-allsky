@@ -132,10 +132,10 @@ def test_settings_save_reload_and_disable_preserve_tuning():
     data = enabled_data()
     form = moon_form(data)
     assert form.validate()
-    config = {'MOON_COMPOSITE': {'ROI': [100, 200, 300, 400], 'THRESHOLD': 40}}
+    config = {'MOON_COMPOSITE': {'ROI': [100, 200, 300, 400], 'THRESHOLD': 40, 'SEARCH_MARGIN': 0.08}}
     save_settings(config, form, data)
     assert config['MOON_COMPOSITE'] == {
-        'ENABLE': True, 'EXPOSURE': 0.001,
+        'ENABLE': True, 'EXPOSURE': 0.001, 'SEARCH_MARGIN': 0.08,
     }
     loaded = load_settings(config)
     assert loaded == {key: value for key, value in data.items() if key.startswith('MOON_COMPOSITE__')}

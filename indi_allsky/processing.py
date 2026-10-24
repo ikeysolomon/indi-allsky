@@ -174,6 +174,7 @@ class ImageProcessor(object):
         self._draw = None
         self._stacker = None
         self._stretch_o = None
+        self._moon_display_lut = None
         self._image_overlay_o = IndiAllSkyImageOverlay(self.config)
 
 
@@ -1856,6 +1857,89 @@ class ImageProcessor(object):
         shift_factor = self.max_bit_depth - 8
 
         return numpy.right_shift(self.image, shift_factor).astype(numpy.uint8)
+
+
+    def composite_moon(self, frame, i_ref):
+        settings = self.config.get('MOON_COMPOSITE', {})
+        if (
+            not settings.get('ENABLE')
+            or not self.night_av[constants.NIGHT_NIGHT]
+            or not self.night_av[constants.NIGHT_MOONMODE]
+        ):
+            return
+        from .moon import blend, clahe_skip_reason
+        skip_reason = clahe_skip_reason(self.config)
+        if skip_reason and not self.focus_mode:
+            logger.warning('Moon composite skipped: %s; keeping the normal long image', skip_reason)
+            return
+        from astropy.io import fits
+        from types import SimpleNamespace
+
+        started = time.monotonic()
+        try:
+            if frame['gain'] != i_ref.gain or frame['binning'] != i_ref.binning:
+                raise ValueError('short and long gain/binning differ')
+            if frame['camera_id'] != i_ref.camera_id:
+                raise ValueError('short and long cameras differ')
+            if not 0 < frame['exposure'] < i_ref.exposure:
+                raise ValueError('moon exposure is not shorter than sky exposure')
+            x1, y1, x2, y2 = settings['ROI']
+            if x2 > self.image.shape[1] or y2 > self.image.shape[0]:
+                raise ValueError('moon ROI is outside the binned sensor image')
+            # section reads only the ROI; memmap=True rejects unsigned FITS with BZERO.
+            with fits.open(frame['filename'], memmap=False) as hdulist:
+                hdu = hdulist[0]
+                if hdu.shape != i_ref.hdulist[0].data.shape:
+                    raise ValueError('short and long sensor geometry differ')
+                if hdu.header.get('BAYERPAT') != i_ref.hdulist[0].header.get('BAYERPAT'):
+                    raise ValueError('short and long Bayer patterns differ')
+                long_header = i_ref.hdulist[0].header
+                for key, default in (
+                    ('BITPIX', None), ('XBAYROFF', 0), ('YBAYROFF', 0),
+                    ('XORGSUBF', 0), ('YORGSUBF', 0), ('ROWORDER', 'unset'),
+                ):
+                    if hdu.header.get(key, default) != long_header.get(key, default):
+                        raise ValueError('short and long {0} differ; check sensor format and readout geometry'.format(key))
+                reported_exposure = hdu.header.get('EXPTIME')
+                if reported_exposure is None or not math.isclose(
+                    float(reported_exposure), frame['exposure'], rel_tol=0.01, abs_tol=0.000001,
+                ):
+                    raise ValueError('short FITS EXPTIME is missing or differs from the request; check driver metadata')
+                if len(hdu.shape) == 2:
+                    data = hdu.section[y1:y2, x1:x2]
+                else:
+                    data = hdu.section[:, y1:y2, x1:x2]
+                # Even ROI origins preserve CFA phase; reuse the normal decoder.
+                patch_ref = SimpleNamespace(
+                    hdulist=[SimpleNamespace(data=numpy.ascontiguousarray(data))],
+                    image_bitpix=int(hdu.header['BITPIX']),
+                    image_bayerpat=i_ref.image_bayerpat,
+                )
+                patch = self._debayer(patch_ref)
+            display_patch = None
+            if self._moon_display_lut is not None:
+                # Reuse the sky transfer, but keep linear pixels for masking/clipping.
+                try:
+                    display_patch = self._moon_display_lut[patch]
+                except IndexError as e:
+                    raise ValueError('short ROI exceeds sky stretch range; check sensor bit depth') from e
+            if patch_ref.image_bitpix != 8:
+                patch = numpy.right_shift(patch, self.max_bit_depth - 8).astype(numpy.uint8)
+            if display_patch is not None and self.config.get('IMAGE_STRETCH', {}).get('SPLIT'):
+                columns = numpy.arange(x1, x2)
+                midpoint = self.image.shape[1] // 2
+                unstretched = columns > midpoint if self.config.get('IMAGE_FLIP_H') else columns < midpoint
+                display_patch[:, unstretched] = patch[:, unstretched]
+                display_patch[:, columns == midpoint] = 0
+            applied = blend(
+                self.image, patch, settings['ROI'], settings.get('THRESHOLD', 40),
+                display_patch=display_patch,
+            )
+        except (OSError, ValueError) as e:
+            logger.warning('Moon composite skipped: %s', e)
+            return
+        logger.info('Moon composite bracket=%s applied=%s in %0.4fs',
+                    frame.get('moon_composite_id', 'unknown'), applied, time.monotonic() - started)
 
 
     def rotate_90(self):
@@ -3950,7 +4034,10 @@ class ImageProcessor(object):
             self.text_font_height = int(size_data['size'])  # increase spacing
 
 
-    def stretch(self):
+    def stretch(self, moon_composite=False):
+        self._moon_display_lut = None
+        if self._stretch_o is not None:
+            self._stretch_o.reset_display_transfer()
         if self.focus_mode:
             # disable processing in focus mode
             return
@@ -3973,8 +4060,24 @@ class ImageProcessor(object):
         i_ref = self.getLatestImage()
 
 
+        record_moon_transfer = (
+            moon_composite
+            and self.config.get('MOON_COMPOSITE', {}).get('ENABLE')
+            and self.night_av[constants.NIGHT_NIGHT]
+            and self.night_av[constants.NIGHT_MOONMODE]
+        )
+        if record_moon_transfer:
+            from .moon import clahe_skip_reason
+            record_moon_transfer = clahe_skip_reason(self.config) is None
+        self._stretch_o.record_display_transfer = bool(record_moon_transfer)
         stretched_image = self._stretch(i_ref)
 
+        if record_moon_transfer:
+            dtype = numpy.uint8 if self.max_bit_depth == 8 else numpy.uint16
+            lut = self._stretch_o.apply_last_stretch(numpy.arange(2 ** self.max_bit_depth, dtype=dtype))
+            if i_ref.image_bitpix != 8:
+                lut = numpy.right_shift(lut, self.max_bit_depth - 8).astype(numpy.uint8)
+            self._moon_display_lut = lut
 
         if self.config.get('IMAGE_STRETCH', {}).get('SPLIT'):
             self.image = self.splitscreen(self.image, stretched_image)

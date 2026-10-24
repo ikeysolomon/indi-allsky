@@ -39,6 +39,7 @@ from wtforms.widgets import PasswordInput
 from wtforms.widgets import NumberInput
 from wtforms.validators import DataRequired
 from wtforms.validators import NumberRange
+from wtforms.validators import Optional
 #from wtforms.validators import regexp as validator_regexp
 from wtforms.validators import ValidationError
 from markupsafe import Markup
@@ -192,6 +193,31 @@ def CCD_GAIN_validator(form, field):
 
     if field.data < 0:
         raise ValidationError('Gain must be 0 or higher')
+
+
+def MOON_COMPOSITE_validator(form, field):
+    if not field.data:
+        return
+    from ..moon import validate_config
+
+    gain = form.CCD_CONFIG__MOONMODE__GAIN.data
+    if not isinstance(gain, (int, float)) or not math.isfinite(gain) or gain < 0:
+        raise ValidationError('Enter a valid Moon Mode gain before enabling moon detail')
+    try:
+        validate_config({
+            'CAMERA_INTERFACE': form.CAMERA_INTERFACE.data,
+            'MOON_COMPOSITE': {
+                'ENABLE': True,
+                'EXPOSURE': form.MOON_COMPOSITE__EXPOSURE.data,
+                'ROI': [
+                    form.MOON_COMPOSITE__ROI_X1.data, form.MOON_COMPOSITE__ROI_Y1.data,
+                    form.MOON_COMPOSITE__ROI_X2.data, form.MOON_COMPOSITE__ROI_Y2.data,
+                ],
+                'THRESHOLD': form.MOON_COMPOSITE__THRESHOLD.data,
+            },
+        })
+    except ValueError as e:
+        raise ValidationError(str(e)) from e
 
 
 def CCD_BINNING_validator(form, field):
@@ -4662,6 +4688,13 @@ class IndiAllskyConfigForm(FlaskForm):
     CCD_CONFIG__NIGHT__BINNING       = IntegerField('Night Bin Mode', validators=[DataRequired(), CCD_BINNING_validator])
     CCD_CONFIG__MOONMODE__GAIN       = FloatField('Moon Mode Gain', validators=[CCD_GAIN_validator])
     CCD_CONFIG__MOONMODE__BINNING    = IntegerField('Moon Mode Bin Mode', validators=[DataRequired(), CCD_BINNING_validator])
+    MOON_COMPOSITE__ENABLE          = BooleanField('Recover Moon Surface Detail (Experimental)', validators=[MOON_COMPOSITE_validator])
+    MOON_COMPOSITE__EXPOSURE        = FloatField('Short Exposure (seconds)', default=0.001, validators=[Optional()], widget=NumberInput(step='any'))
+    MOON_COMPOSITE__ROI_X1          = IntegerField('Left (X1)', default=0, validators=[Optional()], widget=NumberInput(min=0, step=2))
+    MOON_COMPOSITE__ROI_Y1          = IntegerField('Top (Y1)', default=0, validators=[Optional()], widget=NumberInput(min=0, step=2))
+    MOON_COMPOSITE__ROI_X2          = IntegerField('Right (X2)', default=0, validators=[Optional()], widget=NumberInput(min=0, step=2))
+    MOON_COMPOSITE__ROI_Y2          = IntegerField('Bottom (Y2)', default=0, validators=[Optional()], widget=NumberInput(min=0, step=2))
+    MOON_COMPOSITE__THRESHOLD       = IntegerField('Moon Mask Threshold (1-249)', default=40, validators=[Optional()], widget=NumberInput(min=1, max=249, step=1))
     CCD_CONFIG__DAY__GAIN            = FloatField('Daytime Gain', validators=[CCD_GAIN_validator])
     CCD_CONFIG__DAY__BINNING         = IntegerField('Daytime Bin Mode', validators=[DataRequired(), CCD_BINNING_validator])
     CCD_CONFIG__EXPOSURE_CLASSNAME   = SelectField('Exposure Mode', choices=CCD_CONFIG__EXPOSURE_CLASSNAME_choices, validators=[CCD_CONFIG__EXPOSURE_CLASSNAME_validator])

@@ -34,6 +34,7 @@ class IndiAllSky_Mode1_Stretch(IndiAllSky_Stretch_Base):
 
         stretch_start = time.time()
 
+        self._display_luts = ()
 
         data = self.mode1_apply_gamma(data, image_bit_depth, binning)
         data = self.mode1_adjustImageLevels(data, image_bit_depth, binning)
@@ -63,6 +64,8 @@ class IndiAllSky_Mode1_Stretch(IndiAllSky_Stretch_Base):
 
         range_array = numpy.arange(0, data_max + 1, dtype=numpy.float32)
         lut = (((range_array / data_max) ** (1.0 / self.gamma)) * data_max).astype(numpy_dtype)
+        if self.record_display_transfer:
+            self._display_luts += (lut,)
 
 
         # apply lookup table
@@ -106,6 +109,8 @@ class IndiAllSky_Mode1_Stretch(IndiAllSky_Stretch_Base):
         lut[lut > data_max] = data_max  # clip high end
 
         lut = lut.astype(numpy_dtype)  # this must come after clipping
+        if self.record_display_transfer:
+            self._display_luts += (lut,)
 
 
         # apply lookup table
@@ -187,4 +192,3 @@ class IndiAllSky_Mode1_Stretch(IndiAllSky_Stretch_Base):
 
 
         self._numpy_mask_dict[binning] = mask
-

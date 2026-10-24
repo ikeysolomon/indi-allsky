@@ -15,6 +15,8 @@ indi-allsky is software used to manage a Linux-based All Sky Camera using the IN
 *Pictured: SpaceX Cargo Dragon (over Georgia) headed for splashdown off the coast of Florida*
 
 ## New Features
+* [Experimental Moon Composite](./docs/wiki/Moon-Composite.md)
+    * Opt-in native INDI short-exposure lunar detail replacement within a configured sensor region.
 * Home Assistant Integration
     * Allow Home Assistant to work with your observatory data. [![Open your Home Assistant instance and start setting up a new integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=indi_allsky) 
 * OIDC (OpenID Connect) Authentication (beta)

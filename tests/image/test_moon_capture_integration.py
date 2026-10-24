@@ -785,7 +785,7 @@ def test_split_display_preserves_linear_side_and_divider(runtime, monkeypatch, f
         Path(job['moon_composite']['filename']).unlink()
 
 
-@pytest.mark.parametrize('gate', ['moonmode', 'focus', 'no-operator', 'disabled', 'not-moon', 'day', 'no-pair', 'clahe'])
+@pytest.mark.parametrize('gate', ['moonmode', 'focus', 'no-operator', 'disabled', 'not-moon', 'day', 'no-pair'])
 def test_skipped_stretch_cannot_reuse_previous_frames_transfer(runtime, gate):
     processor = runtime.processor
     processor.config['IMAGE_STRETCH'] = {'MOONMODE': True}
@@ -806,8 +806,6 @@ def test_skipped_stretch_cannot_reuse_previous_frames_transfer(runtime, gate):
         runtime.shared.night[constants.NIGHT_MOONMODE] = 0
     elif gate == 'day':
         runtime.shared.night[constants.NIGHT_NIGHT] = 0
-    elif gate == 'clahe':
-        processor.config.update(CONTRAST_ENHANCE_16BIT=True, NIGHT_CONTRAST_ENHANCE=True)
     elif gate == 'no-operator':
         processor._stretch_o = None
     processor.stretch(moon_composite=gate != 'no-pair')
@@ -835,7 +833,7 @@ def test_invalid_roi_transfer_range_keeps_sky_and_reports_bit_depth(runtime, mon
 
 
 @pytest.mark.parametrize('sixteen_bit,night_contrast', [(True, True), (True, False), (False, True)])
-def test_contrast_compatibility_only_skips_active_16bit_night_brackets(
+def test_contrast_settings_do_not_disable_moon_brackets(
     runtime, monkeypatch, caplog, sixteen_bit, night_contrast,
 ):
     runtime.worker.config.update(
@@ -843,44 +841,207 @@ def test_contrast_compatibility_only_skips_active_16bit_night_brackets(
     )
     requests, _ = run_capture(runtime, monkeypatch)
     job = runtime.image_q.get(timeout=2)
-    blocked = sixteen_bit and night_contrast
     try:
-        assert [phase for phase, _ in requests] == (['long'] if blocked else ['short', 'long'])
-        assert ('moon_composite' in job) is not blocked
+        assert [phase for phase, _ in requests] == ['short', 'long']
+        assert 'moon_composite' in job
         assert runtime.worker.config['MOON_COMPOSITE']['ENABLE']
         assert not runtime.worker.moon_composite_suspended
-        if blocked:
-            assert '16-bit night contrast enhancement (CLAHE) is active' in caplog.text
-            assert len(list(runtime.directory.glob('*.fit'))) == 1
+        assert 'disable CONTRAST_ENHANCE_16BIT' not in caplog.text
+        assert len(list(runtime.directory.glob('*.fit'))) == 2
     finally:
         Path(job['filename']).unlink()
         if job.get('moon_composite'):
             Path(job['moon_composite']['filename']).unlink()
 
 
-@pytest.mark.parametrize('color', [False, True])
-def test_queued_pair_keeps_clahe_sky_without_reading_short_roi(runtime, monkeypatch, caplog, color):
+def test_missing_clahe_context_keeps_sky_and_reports_skip(runtime, monkeypatch, caplog):
     run_capture(runtime, monkeypatch)
     job = runtime.image_q.get(timeout=2)
     i_ref = ingest_long(runtime, job)
     processor = runtime.processor
     processor.config.update(CONTRAST_ENHANCE_16BIT=True, NIGHT_CONTRAST_ENHANCE=True)
-    processor.image = processor._debayer(i_ref)
-    if color:
-        processor.image = numpy.repeat(processor.image[:, :, None], 3, axis=2)
-    original_fits = i_ref.hdulist[0].data.copy()
+    before = processor.image.copy()
     try:
-        processor.contrast_clahe_16bit()
-        processor.convert_16bit_to_8bit()
-        before = processor.image.copy()
-        with mock.patch.object(fits, 'open', side_effect=AssertionError('incompatible composite must not read ROI')):
-            processor.composite_moon(job['moon_composite'], i_ref)
+        processor.composite_moon(job['moon_composite'], i_ref)
         numpy.testing.assert_array_equal(processor.image, before)
-        numpy.testing.assert_array_equal(i_ref.hdulist[0].data, original_fits)
-        assert '16-bit night contrast enhancement (CLAHE) is active' in caplog.text
+        assert '16-bit CLAHE context is unavailable for this frame' in caplog.text
+        assert processor._moon_clahe_source is None
     finally:
         i_ref.hdulist.close()
         Path(job['filename']).unlink(missing_ok=True)
+        Path(job['moon_composite']['filename']).unlink()
+
+
+@pytest.mark.parametrize('gate', ['disabled', 'day', 'not-moon'])
+def test_moon_mode_ending_releases_clahe_context(runtime, gate):
+    processor = runtime.processor
+    processor.config.update(CONTRAST_ENHANCE_16BIT=True, NIGHT_CONTRAST_ENHANCE=True)
+    processor.image = numpy.full((80, 80), 100, numpy.uint8)
+    processor.max_bit_depth = 8
+    processor.contrast_clahe_16bit(moon_composite=True)
+    assert processor._moon_clahe_source is not None
+    if gate == 'disabled':
+        processor.config['MOON_COMPOSITE']['ENABLE'] = False
+    elif gate == 'day':
+        runtime.shared.night[constants.NIGHT_NIGHT] = 0
+    else:
+        runtime.shared.night[constants.NIGHT_MOONMODE] = 0
+    processor.composite_moon({}, None)
+    assert processor._moon_clahe_source is None
+
+
+def test_ordinary_clahe_frame_releases_context_without_changing_contrast(runtime):
+    processor = runtime.processor
+    processor.config.update(CONTRAST_ENHANCE_16BIT=True, NIGHT_CONTRAST_ENHANCE=True)
+    linear = numpy.full((80, 80), 100, numpy.uint8)
+    processor.image = linear
+    processor.max_bit_depth = 8
+    processor.contrast_clahe_16bit(moon_composite=True)
+    assert processor._moon_clahe_source is linear
+    expected = processor.image.copy()
+    processor.image = linear
+    processor.contrast_clahe_16bit()
+    assert processor._moon_clahe_source is None
+    numpy.testing.assert_array_equal(processor.image, expected)
+
+
+@pytest.mark.parametrize('color', [False, True])
+def test_queued_pair_composites_with_16bit_clahe_and_preserves_sky(runtime, monkeypatch, caplog, color):
+    import cv2
+
+    caplog.set_level('INFO', logger='indi_allsky')
+    short = numpy.full((80, 80), 3 * 256, numpy.uint16)
+    cv2.circle(short, (40, 40), 12, 180 * 256, -1)
+    cv2.circle(short, (37, 40), 4, 90 * 256, -1)
+    long = numpy.full_like(short, 25 * 256)
+    cv2.circle(long, (40, 40), 12, 255 * 256, -1)
+    if color:
+        short, long = numpy.stack([short] * 3), numpy.stack([long] * 3)
+    run_capture(runtime, monkeypatch, frame_data={'short': short, 'long': long})
+    job = runtime.image_q.get(timeout=2)
+    i_ref = ingest_long(runtime, job)
+    processor = runtime.processor
+    processor.config.update(CONTRAST_ENHANCE_16BIT=True, NIGHT_CONTRAST_ENHANCE=True)
+    processor.image = processor._debayer(i_ref)
+    processor.max_bit_depth = 16
+    original_fits = i_ref.hdulist[0].data.copy()
+    try:
+        processor.contrast_clahe_16bit(moon_composite=True)
+        processor.convert_16bit_to_8bit()
+        before = processor.image.copy()
+        processor.composite_moon(job['moon_composite'], i_ref)
+        assert numpy.all(processor.image[40, 37] < processor.image[40, 46])
+        assert not numpy.array_equal(processor.image, before)
+        numpy.testing.assert_array_equal(processor.image[:, :20], before[:, :20])
+        numpy.testing.assert_array_equal(i_ref.hdulist[0].data, original_fits)
+        assert processor._moon_clahe_source is None
+        assert 'applied=True' in caplog.text
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink(missing_ok=True)
+        Path(job['moon_composite']['filename']).unlink()
+
+
+@pytest.mark.parametrize('color', [False, True])
+@pytest.mark.parametrize('bits', [8, 12, 16])
+@pytest.mark.parametrize('height,width,grid', [(80, 96, 8), (81, 96, 8), (80, 97, 8), (81, 97, 3)])
+@pytest.mark.parametrize('edge', [False, True])
+def test_moon_clahe_crop_matches_full_sensor_tile_context(runtime, color, bits, height, width, grid, edge):
+    processor = runtime.processor
+    processor.config['CLAHE_GRIDSIZE'] = grid
+    processor.max_bit_depth = bits
+    rng = numpy.random.default_rng(21)
+    dtype = numpy.uint8 if bits == 8 else numpy.uint16
+    shape = (height, width, 3) if color else (height, width)
+    source = rng.integers(0, 2 ** (bits - 1), shape, dtype=dtype)
+    original = source.copy()
+    roi = (width - 16, height - 12, width, height) if edge else (
+        width // 2 - 8, height // 2 - 6, width // 2 + 8, height // 2 + 6,
+    )
+    x1, y1, x2, y2 = roi
+    patch = rng.integers(0, 2 ** bits, (12, 16, 3) if color else (12, 16), dtype=dtype)
+    processor.image = source
+    processor.contrast_clahe_16bit(moon_composite=True)
+    assert processor._moon_clahe_source is source
+    reference = source.copy()
+    reference[y1:y2, x1:x2] = patch
+    expected = processor._apply_clahe_16bit(reference, (grid, grid))[y1:y2, x1:x2]
+    with mock.patch.object(processor, '_apply_clahe_16bit', wraps=processor._apply_clahe_16bit) as render:
+        actual = processor._moon_clahe_patch(patch, roi)
+    difference = numpy.abs(actual.astype(numpy.int32) - expected.astype(numpy.int32))
+    assert difference.max() <= (4 if color else 1)
+    if grid == 8:
+        assert render.call_args.args[0].shape[0] < height
+        assert render.call_args.args[0].shape[1] < width
+    numpy.testing.assert_array_equal(source, original)
+
+
+@pytest.mark.parametrize('mode', [None, *stretch_classes.__all__])
+@pytest.mark.parametrize('bits', [8, 12, 16])
+@pytest.mark.parametrize('color', [False, True])
+@pytest.mark.parametrize('split', [False, True])
+def test_capture_stretch_clahe_and_moon_transfer_agree(runtime, monkeypatch, mode, bits, color, split, caplog):
+    import cv2
+    from indi_allsky import moon
+
+    caplog.set_level('INFO', logger='indi_allsky')
+    dtype = numpy.uint8 if bits == 8 else numpy.uint16
+    scale = 2 ** (bits - 8)
+    short = numpy.full((80, 80), 3 * scale, dtype)
+    cv2.circle(short, (40, 40), 12, 180 * scale, -1)
+    cv2.circle(short, (37, 40), 4, 90 * scale, -1)
+    long = numpy.broadcast_to((20 + numpy.arange(80) // 4) * scale, (80, 80)).astype(dtype).copy()
+    cv2.circle(long, (40, 40), 12, 255 * scale, -1)
+    if color:
+        short, long = numpy.stack([short] * 3), numpy.stack([long] * 3)
+    processor = runtime.processor
+    processor.config.update(CONTRAST_ENHANCE_16BIT=True, NIGHT_CONTRAST_ENHANCE=True)
+    processor.config['IMAGE_STRETCH'] = {'MOONMODE': True, 'SPLIT': split}
+    requests, _ = run_capture(runtime, monkeypatch, frame_data={'short': short, 'long': long})
+    assert [phase for phase, _ in requests] == ['short', 'long']
+    job = runtime.image_q.get(timeout=2)
+    with fits.conf.set_temp('use_memmap', False):
+        i_ref = ingest_long(runtime, job)
+    try:
+        original_fits = i_ref.hdulist[0].data.copy()
+        processor.max_bit_depth = bits
+        processor.image = processor._debayer(i_ref)
+        processor._stretch_o = getattr(stretch_classes, mode)(processor.config, mask={1: None}) if mode else None
+        processor.stretch(moon_composite=True)
+        source = processor.image.copy()
+        native_lut = processor._moon_native_lut
+        processor.contrast_clahe_16bit(moon_composite=True)
+        processor.convert_16bit_to_8bit()
+        sky = processor.image.copy()
+        with mock.patch.object(moon, 'blend', wraps=moon.blend) as blend:
+            processor.composite_moon(job['moon_composite'], i_ref)
+        assert blend.call_count == 1
+        roi = blend.call_args.args[2]
+        x1, y1, x2, y2 = roi
+        native_short = numpy.moveaxis(short, 0, -1)[:, :, ::-1] if color else short
+        linear_patch = native_short[y1:y2, x1:x2]
+        display_patch = native_lut[linear_patch] if native_lut is not None else linear_patch
+        if split and native_lut is not None:
+            columns = numpy.arange(x1, x2)
+            display_patch[:, columns < 40] = linear_patch[:, columns < 40]
+            display_patch[:, columns == 40] = 0
+        reference = source.copy()
+        reference[y1:y2, x1:x2] = display_patch
+        expected = processor._apply_clahe_16bit(reference, (8, 8))[y1:y2, x1:x2]
+        if bits != 8:
+            expected = numpy.right_shift(expected, bits - 8).astype(numpy.uint8)
+        actual_patch = blend.call_args.kwargs['display_patch']
+        assert numpy.abs(actual_patch.astype(int) - expected.astype(int)).max() <= 1
+        expected_image = sky.copy()
+        assert moon.blend(expected_image, blend.call_args.args[1], roi, display_patch=expected)
+        assert numpy.abs(processor.image.astype(int) - expected_image.astype(int)).max() <= 1
+        numpy.testing.assert_array_equal(processor.image[:, :20], sky[:, :20])
+        numpy.testing.assert_array_equal(i_ref.hdulist[0].data, original_fits)
+        assert processor._moon_clahe_source is None
+        assert 'applied=True' in caplog.text
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink()
         Path(job['moon_composite']['filename']).unlink()
 
 

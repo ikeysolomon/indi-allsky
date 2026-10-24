@@ -120,8 +120,8 @@ the very first image contains enough stars to solve.
 
 The initial solve is synchronous and can delay processing/cadence. It is a
 one-time nighttime cost, not a per-frame solve, and may run before Moon Mode
-starts. It is disabled during daytime, focus mode, incompatible 16-bit night
-CLAHE, excluded diagnostic frames, or when Moon recovery is disabled.
+starts. It is disabled during daytime, focus mode, excluded diagnostic frames,
+or when Moon recovery is disabled. Nighttime 16-bit CLAHE does not disable alignment.
 
 Normal moon-mode altitude/phase gates still apply. Daytime, focus, synchronous
 test captures, SQM captures, and sky exposures no longer than the short exposure
@@ -193,17 +193,16 @@ measurements but before rotation/crop. FITS, raw exports, sky exposure control,
 and stacking inputs remain long-exposure originals. Subsequent white balance,
 gamma and contrast adjustments also affect the replacement moon.
 
-**16-bit night contrast compatibility:** when both `CONTRAST_ENHANCE_16BIT`
-and `NIGHT_CONTRAST_ENHANCE` are enabled, Moon replacement is skipped with an
-actionable warning. This local CLAHE step runs before replacement and cannot be
-reproduced by the shared global stretch lookup. No short exposure or Moon
-transfer table is generated; normal long-exposure processing is unchanged.
-Any already-queued pair is also skipped before reading the short ROI, with normal
-temporary-file cleanup. The saved Moon enable setting is retained, not suspended
-as a capture failure. Disable `CONTRAST_ENHANCE_16BIT` to allow replacement;
-ordinary 8-bit contrast enhancement runs after blending and remains supported.
-If night contrast enhancement is off, the 16-bit option alone does not block
-replacement.
+**16-bit night contrast compatibility:** Moon brackets and replacement also run
+when `CONTRAST_ENHANCE_16BIT` and `NIGHT_CONTRAST_ENHANCE` are enabled. A global
+stretch lookup alone cannot reproduce local CLAHE. Instead, processing retains
+the stretched sky before CLAHE and inserts the native-depth short ROI into the
+aligned neighbouring tiles needed for its contrast mapping. The same CLAHE
+algorithm, clip limit, global tile positions and reflected edge padding are
+replayed for that neighbourhood before conversion to display pixels. Only the
+detected lunar mask is blended back; sky pixels and measurements are unchanged.
+Missing per-frame CLAHE context causes an explicit safe skip, not an unmatched
+replacement. Ordinary 8-bit contrast enhancement still runs after blending.
 
 When sky stretching is enabled for Moon Mode, the short ROI reuses the **actual
 lookup tables from that long frame**, at native bit depth before conversion to
@@ -212,15 +211,36 @@ the two-pass variant) and Mode 3 adaptive MTF. Adaptive parameters are not fitte
 again to the short ROI. Threshold selection, geometry and short-exposure clipping
 checks still use the original linearly scaled ROI, so brightening the display
 does not enlarge the lunar mask or falsely report sensor saturation.
-Stretch-disabled Moon Mode remains linear. Split-screen preview uses the matching
-transfer on each side and preserves the central divider.
+With stretching disabled, the input to any configured CLAHE remains linear.
+Split-screen preview uses the matching transfer on each side and preserves the
+central divider.
 
 Using the same transfer fixes the linear-versus-stretched processing mismatch;
 it does **not** guarantee equal brightness from two different exposures or a
-natural boundary. The incompatible pre-blend 16-bit CLAHE combination is skipped,
-not independently fitted to the short ROI. Denoising and dark calibration are not
-replayed on the short ROI. Real pairs must still be inspected for residual discontinuities;
+natural boundary. CLAHE uses the surrounding sky tiles, not an independent fit
+to the short ROI. Denoising and dark calibration are not replayed on the short
+ROI. Real pairs must still be inspected for residual discontinuities;
 no independent auto-stretch or automatic brightness matching is assumed.
+
+## Capture logs
+
+The web Log Viewer includes the configured capture service's **system and user
+systemd units**, as well as legacy local6 syslog messages. This includes captures
+started with the default stderr logging, rather than requiring `--log syslog`.
+The viewer immediately replays the ten most recent matching journal entries,
+then streams new ones; multiline messages are preserved and proxy buffering is
+disabled for the stream.
+
+Capture-log downloads use the same journal sources so they do not prefer a stale
+legacy log file over a running capture service. If the journal is unavailable,
+inaccessible or empty, the download logs a warning and explicitly falls back to
+the legacy capture log file. Its `X-Indi-Allsky-Log-Source` response header
+identifies `journal` or `file`.
+
+Look for `Moon composite bracket=<id> applied=True` or the specific skip warning,
+not just a Moon Mode overlay. Older code reports that 16-bit night CLAHE disables
+replacement; that restriction is removed by this implementation. Capture and web
+processes must both load the updated code.
 
 ## Cost and limitations
 
@@ -242,9 +262,16 @@ Clipping rejection and alpha feathering are retained.
 Timing is logged as
 `Moon composite bracket=<id> applied=... in ...s`.
 Disabled mode performs no extra capture, FITS read, or pixel processing.
-The sky transfer is combined into one 8-bit display lookup table per frame;
-the ROI needs one lookup, not another full-frame stretch or adaptive-statistics
-calculation. Tables are prepared for replay only when compositing and Moon Mode
+Without native CLAHE, the sky transfer is combined into one 8-bit display lookup
+table per frame; the ROI needs one lookup, not another full-frame stretch or
+adaptive-statistics calculation. With native CLAHE, a native-depth lookup is
+retained instead, followed by tile-context contrast processing and display
+conversion. The pre-CLAHE sky reference is retained until compositing completes;
+the aligned tile neighbourhood requires an additional temporary buffer. Coarse
+tile grids or a large ROI can make this neighbourhood approach full-frame size,
+so this path costs more memory and CPU than lookup-only replacement. Raspberry
+Pi CLAHE timing and memory usage remain unverified.
+Tables are prepared for replay only when compositing and Moon Mode
 stretching are active **and that image has a paired short frame**, not for ordinary
 fallback captures.
 
@@ -339,9 +366,13 @@ These cases do not run the full ImageWorker rendering/output orchestration.
 Transfer tests cover all four stretch variants, mono/RGB and 8/12/16-bit data,
 verify exact agreement with the sky transfer, preserve the linear mask/clipping
 checks, and ensure skipped stretches cannot reuse a previous frame's transfer.
-Compatibility tests verify that active 16-bit night CLAHE suppresses brackets
-and transfer preparation, and that queued pairs leave the CLAHE-processed mono/RGB
-sky and original FITS unchanged without reading the short frame.
+CLAHE integration tests verify short/long capture requests, all stretch variants
+and split previews, mono/RGB and 8/12/16-bit data, applied replacement, cleanup,
+and unchanged sky/original FITS. Aligned tile replay is compared with a full-sensor
+reference, including image edges, reflected short pixels, non-divisible image
+sizes and different tile grids. Small native colour-conversion rounding
+differences are tolerated; full-pipeline comparisons allow at most one display
+pixel value. These tests do not establish real-camera lunar detail or Pi cadence.
 A timestamp characterization test replays the same old short BLOB into a later
 bracket: without `DATE-OBS` it is accepted, while an accurately reported old
 timestamp is rejected. This intentionally demonstrates the identification limit,

@@ -629,10 +629,10 @@ class ImageWorker(Process):
         if self.config.get('CONTRAST_ENHANCE_16BIT'):
             if not self.night_av[constants.NIGHT_NIGHT] and self.config['DAYTIME_CONTRAST_ENHANCE']:
                 # Contrast enhancement during the day
-                self.image_processor.contrast_clahe_16bit()
+                self.image_processor.contrast_clahe_16bit(moon_composite=bool(i_dict.get('moon_composite')))
             elif self.night_av[constants.NIGHT_NIGHT] and self.config['NIGHT_CONTRAST_ENHANCE']:
                 # Contrast enhancement during night
-                self.image_processor.contrast_clahe_16bit()
+                self.image_processor.contrast_clahe_16bit(moon_composite=bool(i_dict.get('moon_composite')))
 
 
         self.image_processor.convert_16bit_to_8bit()
@@ -2179,12 +2179,10 @@ class ImageWorker(Process):
 
 
     def moon_sky_guide(self):
-        from .moon import clahe_skip_reason
         if (
             not self.config.get('MOON_COMPOSITE', {}).get('ENABLE')
             or not self.night_av[constants.NIGHT_NIGHT]
             or self.config.get('FOCUS_MODE')
-            or clahe_skip_reason(self.config)
         ):
             return None
         if not hasattr(self, '_moon_sky_guide'):

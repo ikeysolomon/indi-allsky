@@ -20,6 +20,14 @@ class MaskProcessor(object):
 
         self._image = None
         self._binning = 1
+        self.sensor_to_image = numpy.eye(3)
+
+
+    def _record_transform(self, matrix):
+        matrix = numpy.asarray(matrix, dtype=float)
+        if matrix.shape == (2, 3):
+            matrix = numpy.vstack((matrix, [0, 0, 1]))
+        self.sensor_to_image = matrix @ self.sensor_to_image
 
 
     @property
@@ -51,7 +59,14 @@ class MaskProcessor(object):
             logger.error('Unknown rotation option: %s', self.config['IMAGE_ROTATE'])
             return
 
+        height, width = self.image.shape[:2]
         self.image = cv2.rotate(self.image, rotate_enum)
+        if rotate_enum == cv2.ROTATE_90_CLOCKWISE:
+            self._record_transform([[0, -1, height - 1], [1, 0, 0]])
+        elif rotate_enum == cv2.ROTATE_90_COUNTERCLOCKWISE:
+            self._record_transform([[0, 1, 0], [-1, 0, width - 1]])
+        elif rotate_enum == cv2.ROTATE_180:
+            self._record_transform([[-1, 0, width - 1], [0, -1, height - 1]])
 
 
     def rotate_angle(self):
@@ -88,6 +103,7 @@ class MaskProcessor(object):
 
 
         self.image = cv2.warpAffine(self.image, rot, (bound_w, bound_h))
+        self._record_transform(rot)
 
         rot_height, rot_width = self.image.shape[:2]
         mod_height = rot_height % 2
@@ -117,6 +133,7 @@ class MaskProcessor(object):
             return
 
         self.image = self._flip(self.image, 0)
+        self._record_transform([[1, 0, 0], [0, -1, self.image.shape[0] - 1]])
 
 
     def flip_h(self):
@@ -124,6 +141,7 @@ class MaskProcessor(object):
             return
 
         self.image = self._flip(self.image, 1)
+        self._record_transform([[-1, 0, self.image.shape[1] - 1], [0, 1, 0]])
 
 
     def crop_image(self):
@@ -159,6 +177,7 @@ class MaskProcessor(object):
                 y1:y2,
                 x1:x2,
             ]
+            self._record_transform([[1, 0, -x1], [0, 1, -y1]])
 
             #new_height, new_width = self.image.shape[:2]
             #logger.info('New cropped size: %d x %d', new_width, new_height)
@@ -171,11 +190,15 @@ class MaskProcessor(object):
             x2 = int(self.config['IMAGE_CROP_ROI'][2] / self.binning)
             y2 = int(self.config['IMAGE_CROP_ROI'][3] / self.binning)
 
+            height, width = self.image.shape[:2]
+            x1, x2, _ = slice(x1, x2).indices(width)
+            y1, y2, _ = slice(y1, y2).indices(height)
 
             self.image = self.image[
                 y1:y2,
                 x1:x2,
             ]
+            self._record_transform([[1, 0, -x1], [0, 1, -y1]])
 
             #new_height, new_width = self.image.shape[:2]
             #logger.info('New cropped size: %d x %d', new_width, new_height)
@@ -199,6 +222,8 @@ class MaskProcessor(object):
         logger.info('New size: %d x %d', new_width, new_height)
 
         self.image = cv2.resize(self.image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        sx, sy = new_width / image_width, new_height / image_height
+        self._record_transform([[sx, 0, (sx - 1) / 2], [0, sy, (sy - 1) / 2]])
 
 
     def add_border(self):
@@ -227,4 +252,4 @@ class MaskProcessor(object):
 
 
         self.image = new_image
-
+        self._record_transform([[1, 0, left], [0, 1, top]])

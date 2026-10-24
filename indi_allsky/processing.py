@@ -1858,7 +1858,7 @@ class ImageProcessor(object):
         return numpy.right_shift(self.image, shift_factor).astype(numpy.uint8)
 
 
-    def composite_moon(self, frame, i_ref):
+    def composite_moon(self, frame, i_ref, guide=None):
         settings = self.config.get('MOON_COMPOSITE', {})
         if (
             not settings.get('ENABLE')
@@ -1866,7 +1866,7 @@ class ImageProcessor(object):
             or not self.night_av[constants.NIGHT_MOONMODE]
         ):
             return
-        from .moon import blend, clahe_skip_reason
+        from .moon import blend, clahe_skip_reason, find_moon
         skip_reason = clahe_skip_reason(self.config)
         if skip_reason and not self.focus_mode:
             logger.warning('Moon composite skipped: %s; keeping the normal long image', skip_reason)
@@ -1882,10 +1882,7 @@ class ImageProcessor(object):
                 raise ValueError('short and long cameras differ')
             if not 0 < frame['exposure'] < i_ref.exposure:
                 raise ValueError('moon exposure is not shorter than sky exposure')
-            x1, y1, x2, y2 = settings['ROI']
-            if x2 > self.image.shape[1] or y2 > self.image.shape[0]:
-                raise ValueError('moon ROI is outside the binned sensor image')
-            # section reads only the ROI; memmap=True rejects unsigned FITS with BZERO.
+            # Predict before reading pixels; only read/debayer the lunar neighbourhood.
             with fits.open(frame['filename'], memmap=False) as hdulist:
                 hdu = hdulist[0]
                 if hdu.shape != i_ref.hdulist[0].data.shape:
@@ -1904,10 +1901,31 @@ class ImageProcessor(object):
                     float(reported_exposure), frame['exposure'], rel_tol=0.01, abs_tol=0.000001,
                 ):
                     raise ValueError('short FITS EXPTIME is missing or differs from the request; check driver metadata')
-                if len(hdu.shape) == 2:
-                    data = hdu.section[y1:y2, x1:x2]
+                offset_x = offset_y = 0
+                if guide is not None:
+                    offset_x, offset_y, right, bottom = guide.search_region(
+                        frame, i_ref, hdu.header,
+                        self.position_av[constants.POSITION_LATITUDE],
+                        self.position_av[constants.POSITION_LONGITUDE],
+                        self.position_av[constants.POSITION_ELEVATION],
+                    )
+                    if len(hdu.shape) == 2:
+                        sensor = hdu.section[offset_y:bottom, offset_x:right]
+                    else:
+                        sensor = hdu.section[:, offset_y:bottom, offset_x:right]
                 else:
-                    data = hdu.section[:, y1:y2, x1:x2]
+                    sensor = hdu.data
+                if int(hdu.header['BITPIX']) == 8:
+                    detection = sensor
+                else:
+                    detection = numpy.right_shift(sensor, self.max_bit_depth - 8).astype(numpy.uint8)
+                roi = find_moon(detection, bayer=bool(i_ref.image_bayerpat))
+                if roi is None:
+                    return
+                x1, y1, x2, y2 = roi
+                data = sensor[y1:y2, x1:x2] if sensor.ndim == 2 else sensor[:, y1:y2, x1:x2]
+                roi = (x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y)
+                x1, y1, x2, y2 = roi
                 # Even ROI origins preserve CFA phase; reuse the normal decoder.
                 patch_ref = SimpleNamespace(
                     hdulist=[SimpleNamespace(data=numpy.ascontiguousarray(data))],
@@ -1931,7 +1949,7 @@ class ImageProcessor(object):
                 display_patch[:, unstretched] = patch[:, unstretched]
                 display_patch[:, columns == midpoint] = 0
             applied = blend(
-                self.image, patch, settings['ROI'], settings.get('THRESHOLD', 40),
+                self.image, patch, roi,
                 display_patch=display_patch,
             )
         except (OSError, ValueError) as e:

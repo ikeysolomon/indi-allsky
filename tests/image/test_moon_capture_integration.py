@@ -96,7 +96,7 @@ def runtime(monkeypatch, tmp_path):
 
     config = {
         'CAMERA_INTERFACE': 'indi', 'IMAGE_FOLDER': str(tmp_path), 'VARLIB_FOLDER': str(tmp_path),
-        'MOON_COMPOSITE': {'ENABLE': True, 'EXPOSURE': 0.001, 'ROI': [0, 0, 80, 80], 'THRESHOLD': 40},
+        'MOON_COMPOSITE': {'ENABLE': True, 'EXPOSURE': 0.001},
         'NIGHT_SUN_ALT_DEG': -6, 'NIGHT_MOONMODE_ALT_DEG': 0,
         'NIGHT_MOONMODE_PHASE': 33, 'EXPOSURE_PERIOD': 1.0, 'EXPOSURE_PERIOD_DAY': 1.0,
         'IMAGE_FLIP_V': False, 'KEOGRAM_ANGLE': 0, 'TARGET_ADU': 75, 'TARGET_ADU_DAY': 75,
@@ -597,6 +597,63 @@ def ingest_long(runtime, job):
     processor.image_list = [i_ref]
     processor.image = numpy.right_shift(processor._debayer(i_ref), 8).astype(numpy.uint8)
     return i_ref
+
+
+def test_paired_fits_composite_uses_predicted_moon_not_bright_streetlight(runtime, monkeypatch):
+    import cv2
+    from indi_allsky import moon_sky
+    from indi_allsky.lens_solver.calibration import pipelineSignature
+
+    run_capture(runtime, monkeypatch)
+    job = runtime.image_q.get(timeout=2)
+    short_file = Path(job['moon_composite']['filename'])
+    short = numpy.full((300, 400), 3 * 256, numpy.uint16)
+    cv2.circle(short, (50, 50), 20, 255 * 256, -1)
+    cv2.circle(short, (200, 150), 12, 180 * 256, -1)
+    fits.PrimaryHDU(short, header=fits.Header({'EXPTIME': 0.001})).writeto(short_file, overwrite=True)
+    fits.PrimaryHDU(numpy.full_like(short, 255 * 256),
+                    header=fits.Header({'EXPTIME': 0.1})).writeto(job['filename'], overwrite=True)
+    with fits.conf.set_temp('use_memmap', False):
+        i_ref = ingest_long(runtime, job)
+    processor = runtime.processor
+    processor.max_bit_depth = 16
+    processor.image = numpy.full((300, 400), 25, numpy.uint8)
+    processor.config['VIRTUALSKY'] = {
+        'IMAGE_CIRCLE_DIAMETER': 300,
+        'ALIGNMENT': {'source': 'manual', 'pipeline': pipelineSignature(processor.config)},
+    }
+    guide = moon_sky.MoonSkyGuide(processor.config)
+    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: SimpleNamespace(alt=numpy.pi / 2, az=0))
+    try:
+        processor.composite_moon(job['moon_composite'], i_ref, guide=guide)
+        assert processor.image[150, 200] == 180
+        assert processor.image[50, 50] == 25
+        assert numpy.all(i_ref.hdulist[0].data == 255 * 256)
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink(missing_ok=True)
+        short_file.unlink()
+
+
+def test_failed_prediction_keeps_paired_image_without_unguided_fallback(runtime, monkeypatch, caplog):
+    from indi_allsky import moon
+
+    run_capture(runtime, monkeypatch)
+    job = runtime.image_q.get(timeout=2)
+    with fits.conf.set_temp('use_memmap', False):
+        i_ref = ingest_long(runtime, job)
+    guide = SimpleNamespace(search_region=mock.Mock(side_effect=ValueError('alignment is stale')))
+    before = runtime.processor.image.copy()
+    try:
+        with mock.patch.object(moon, 'find_moon') as detect:
+            runtime.processor.composite_moon(job['moon_composite'], i_ref, guide=guide)
+        detect.assert_not_called()
+        numpy.testing.assert_array_equal(runtime.processor.image, before)
+        assert 'alignment is stale' in caplog.text
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink(missing_ok=True)
+        Path(job['moon_composite']['filename']).unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize('mode', stretch_classes.__all__)

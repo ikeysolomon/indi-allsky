@@ -12,8 +12,9 @@ Currently supported only by `CAMERA_INTERFACE: "indi"` (native active INDI).
 Disabled by default. In **Camera Settings > Gain & Binning Modes > Moon Mode
 Profile**, enter a valid Moon Mode gain (zero is valid) to reveal **Recover Moon
 Surface Detail (Experimental)**. The option appears only for native INDI cameras.
-Turn it on to reveal the short exposure, four search-region coordinates, and
-mask threshold. Save and restart capture. The option is also shown on page load
+Turn it on to reveal the short exposure time, the only numeric setting.
+Moon location, search-region size, and mask threshold are automatic.
+Save and restart capture. The option is also shown on page load
 when a valid gain is already saved; entering a gain never enables it automatically.
 
 Clearing/invalidating the gain or selecting another camera interface hides and
@@ -25,9 +26,7 @@ Add this object to the configuration:
 ```json
 "MOON_COMPOSITE": {
     "ENABLE": true,
-    "EXPOSURE": 0.001,
-    "ROI": [1000, 800, 1200, 1000],
-    "THRESHOLD": 40
+    "EXPOSURE": 0.001
 }
 ```
 
@@ -35,13 +34,70 @@ Add this object to the configuration:
   limits; it is independent of the normal sky exposure minimum. Start at 1 ms,
   then tune for your camera/lens and moon-mode gain. If the moon is still clipped,
   reduce it. The short frame uses the **same gain and binning** as the sky frame.
-- `ROI`: `[left, top, right, bottom]` in **binned sensor pixels, before any
-  rotation, flipping, or crop**. All coordinates must be even to preserve Bayer
-  phase. Keep this region small, but allow for lunar movement and at least four
-  pixels of margin around the moon. Update it as the moon moves; this prototype
-  does not track the moon across the sky.
-- `THRESHOLD`: lunar silhouette threshold in 8-bit sensor-scaled short-frame
-  intensity (1-249). Default 40. Lower it if dark lunar regions are missed.
+
+Old `ROI` and `THRESHOLD` values are ignored and removed on the next configuration
+save/import. No manual migration or coordinate updates are needed.
+
+### Automatic localization
+
+The Moon's topocentric altitude/azimuth is calculated for each short exposure
+using the camera location and the exposure midpoint. FITS `DATE-OBS` is preferred
+(offset-free timestamps mean UTC); otherwise the capture receipt time and elapsed
+capture duration estimate that midpoint. Wall-clock processing time is not used.
+VirtualSky's lens projection, pointing, offsets and enabled distortion correction
+map that direction into image pixels. The image pipeline's rotation, flips,
+crop, scale and borders are inverted to recover sensor coordinates. A saved
+reference binning is converted to the current binning.
+
+Only a neighbourhood around that predicted position is searched. Its margin
+scales with the reference image-circle diameter, with a 24-sensor-pixel minimum.
+The detector never falls back to unrelated full-frame lights if prediction or
+alignment fails. Within this neighbourhood, a max-pooled brightness preview
+(at most 768 pixels per dimension) preserves bright seeds without full-frame debayering.
+Bayer previews pool complete CFA cells. Starting with the brightest remaining
+pixel, the detector grows a local window until the connected bright region is
+enclosed, deriving its threshold with Otsu's method and a brightness floor.
+It examines at most three bright seeds, rejecting tiny sources, image-edge
+targets, and shapes without a sufficiently circular limb. A partial illuminated
+disk can pass; narrow crescents and poorly resolved disks may be skipped.
+Resolved candidates are ranked by integrated brightness; competing substantial
+circular candidates cause a logged skip rather than a guess.
+
+The chosen region gets proportional padding and even sensor-coordinate origins
+to preserve Bayer phase. Only this crop is debayered. Its mask is refined at
+native resolution with the same automatic shape checks, then clipping checks
+and feathering are applied. `DEBUG` logging records the selected sensor ROI.
+The enable switch remains opt-in; there are no location, size, threshold, or
+opacity controls.
+
+### First-image star alignment
+
+With Moon recovery enabled, the first eligible nighttime image is saved normally
+and supplied to the existing local catalogue/star solver if there is no current
+`VIRTUALSKY.ALIGNMENT` record. This is a long sky exposure, not the short Moon
+exposure: stars must be visible. The first unaligned image is not composited.
+Successful full solutions are saved to the configuration database together with
+camera identity, reference image/sensor dimensions, binning, image-pipeline
+signature, location, geometry and fit quality. Camera metadata is updated in the
+same database transaction so VirtualSky can use the result. Following frames use
+the saved alignment, including after a restart.
+
+This is an explicit new alignment workflow: custom geometry values alone are
+initial guesses, not proof of a completed alignment. A changed camera, image
+pipeline, saved geometry or location invalidates the recorded solution and
+triggers another solve. The automatic save checks for concurrent geometry edits
+and merges into the latest configuration instead of replacing unrelated settings.
+
+A cloudy, starless or only partially solved image cannot establish alignment.
+The normal image remains available, the failure is logged, and automatic
+alignment retries no sooner than five minutes later. Persistence failures are
+also reported rather than applying an unsaved solution. There is no guarantee
+the very first image contains enough stars to solve.
+
+The initial solve is synchronous and can delay processing/cadence. It is a
+one-time nighttime cost, not a per-frame solve, and may run before Moon Mode
+starts. It is disabled during daytime, focus mode, incompatible 16-bit night
+CLAHE, excluded diagnostic frames, or when Moon recovery is disabled.
 
 Normal moon-mode altitude/phase gates still apply. Daytime, focus, synchronous
 test captures, SQM captures, and sky exposures no longer than the short exposure
@@ -145,15 +201,16 @@ There is always an extra exposure **and full sensor readout/transfer**. Existing
 cadence is retained when the pair fits within the exposure period; otherwise
 capture slows. This mode cannot promise zero capture overhead.
 
-Image processing reads/debayers only the short-frame ROI and blends that ROI,
-not a second full image pipeline. FITS reads use `hdu.section` with
-`memmap=False`: section access reads only the requested pixels, without loading
-the full image. Explicit memory mapping is not used because Astropy rejects it
-for unsigned 16-bit FITS images with `BZERO` scaling. The FITS file stays open
-through section extraction and decoding, and closes before short-frame cleanup.
+Ephemeris-guided localization predicts the sensor neighbourhood before reading
+short-frame pixels. FITS `hdu.section` reads only that neighbourhood; brightness
+scaling and seed-local analysis run on those pixels, not the full short image.
+Only the final detected crop is debayered and blended, not a second full image
+pipeline. FITS reads use `memmap=False` because Astropy rejects explicit memory
+mapping for unsigned 16-bit FITS images with `BZERO` scaling. The file closes
+before short-frame cleanup.
 Blending reuses two ROI-sized float buffers for weighted pixels, addition and
 rounding, preserving the original float32 arithmetic and round-to-even output.
-Clipping, connected-component ambiguity checks and alpha feathering are unchanged.
+Clipping rejection and alpha feathering are retained.
 Timing is logged as
 `Moon composite bracket=<id> applied=... in ...s`.
 Disabled mode performs no extra capture, FITS read, or pixel processing.
@@ -163,6 +220,18 @@ calculation. Tables are prepared for replay only when compositing and Moon Mode
 stretching are active **and that image has a paired short frame**, not for ordinary
 fallback captures.
 
+A local Windows check of the automatic localizer (20 measured iterations after
+two warm-ups, NumPy 2.4.2 / OpenCV 4.13.0) used synthetic 8-bit Bayer brightness
+frames with a 25-pixel-radius disk. Median / p95 times were 4.41 / 8.87 ms at
+1024x1024, 14.89 / 18.53 ms at 3008x3008, and 19.58 / 24.17 ms at 4096x4096.
+These measure the standalone full-frame localizer only: they exclude ephemeris
+projection, first-image alignment, FITS I/O, bit-depth conversion, ROI
+debayering/blending, camera acquisition and transfer. Guided operation searches
+a smaller neighbourhood. These numbers are not
+Raspberry Pi or real-camera performance evidence.
+
+Historical **manual-ROI implementation** benchmarks below do not measure the
+new full-frame localization cost and must not be used as its performance claim.
 A local Windows benchmark with a 3008x3008, 16-bit Bayer FITS input measured
 15 ms median / 20 ms p95 for a 200x200 ROI, and 52 ms / 65 ms for a 512x512 ROI
 (100 iterations, warm filesystem cache). These include FITS open/ROI read,
@@ -189,12 +258,24 @@ inter-frame registration or lunar-motion compensation; long exposures, vibration
 cloud motion, and a low-resolution lunar disk can make the result imperfect.
 The short exposure is not dark-calibrated or independently auto-stretched. It cannot
 invent surface detail that the lens/sensor does not resolve. A cloud or terrestrial
-light in the configured ROI can still resemble the moon: use a tight unobstructed
-ROI and inspect the result before enabling unattended.
+light with a circular outline can still resemble the moon: brightness and shape
+are not astronomical identification. Inspect real results before enabling
+unattended. Clouds, narrow crescents, unresolved disks, or multiple similar
+circular lights can cause detection to be skipped, preserving the normal image.
 
 Validate with real camera frames before relying on it. Synthetic tests exercise
 pairing, skip paths, cleanup, monochrome/RGB FITS and 8/12/16-bit scaling, but do
 not substitute for camera-driver and night-sky testing.
+Automatic-detection tests also cover changing position and disk size, dim and
+partial disks, bright craters, hot-pixel fields, non-circular distractions,
+ambiguous disks, image edges, bounded previews, exact max-pool coordinates,
+automatic decoder crops, and legacy configuration migration.
+Guidance tests also run an actual star-catalogue solve against a synthetic sky,
+check persisted alignment reuse, failed/partial solves and retry backoff,
+invert image transformations and binning, verify exposure-midpoint timestamps,
+ignore bright circular streetlights away from the prediction, and assert that
+guided FITS reads load only the predicted section for mono/RGB/Bayer formats.
+Database-save tests use test doubles; no real INDI camera is certified by these tests.
 
 ## Validation status and real-camera acceptance
 
@@ -246,7 +327,7 @@ starting run, not a universal guarantee:
 
 1. **Equipment and settings:** camera model, sensor resolution/bit depth, driver
    name/version, INDI/PyIndi versions, host/USB connection, lens, gain, binning,
-   sky/short exposures, ROI, threshold and exposure period. Confirm the lunar
+   sky/short exposures, automatically detected ROI from debug logs, and exposure period. Confirm the lunar
    disk has enough resolved pixels to contain genuine surface detail.
 2. **Original evidence:** retain unmodified short and long FITS frames, final
    display images and capture/processing logs for the same run. Short frames are

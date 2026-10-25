@@ -2,8 +2,9 @@
 
 This opt-in mode takes a short exposure immediately **before** each normal night
 exposure while indi-allsky's existing moon mode is active. It replaces the
-bright lunar silhouette in the display image using the short exposure, with a
-small feathered edge. This is replacement/alpha compositing, not a screen blend
+bright lunar silhouette and its larger blown-out long-exposure footprint using
+same-scale short-frame pixels, with a feathered edge. The Moon is not resized.
+This is replacement/alpha compositing, not a screen blend
 (which would keep an already white moon white).
 
 ## Configuration
@@ -76,9 +77,22 @@ from the prediction. Similarly plausible nearby candidates cause a logged skip
 rather than a guess. Unguided utility calls retain integrated-brightness ranking.
 
 The chosen region gets proportional padding and even sensor-coordinate origins
-to preserve Bayer phase. Only this crop is debayered. Its mask is refined at
+to preserve Bayer phase. The long frame is then checked for a connected bright
+footprint overlapping that detected Moon. A larger footprint expands the crop
+and replacement mask, **not the apparent size of the short-exposure Moon**.
+Its plateau threshold is estimated locally, including after dark subtraction.
+Unrelated bright sources are not added to the mask. If the footprint reaches the
+prediction window edge, the existing single 2x search expansion is used; a
+footprint that still cannot be enclosed safely causes an explicit skip.
+
+Only this final crop is debayered. Its lunar silhouette is refined at
 native resolution with the same automatic shape checks, then clipping checks
-and feathering are applied. `DEBUG` logging records the selected sensor ROI.
+and feathering are applied. Surrounding short-frame background is offset to match
+the long-frame boundary ring, leaving pixels inside the measured lunar disk
+unchanged. The linear short Moon still controls shape, size and clipping checks;
+the oversized long footprint never defines the Moon's physical diameter.
+`INFO` logging reports expanded footprint dimensions and that the Moon was not
+resized; `DEBUG` logging records the initially detected sensor ROI.
 Guided detection permits resolved crescents with a circular outer limb and a
 matching predicted radius; it does not require a full illuminated disk.
 Mask dilation scales at 2% of detected radius, clamped to 1-3 pixels. Gaussian
@@ -94,22 +108,36 @@ alignment before increasing it. Unresolved disks are skipped with a resolution
 warning, not "recovered" by increasing their display brightness. These diagnostics
 cannot prove whether clouds, focus or a bad prediction caused a failed detection.
 
-### First-image star alignment
+### Saved calibration or first-image star alignment
 
-With Moon recovery enabled, the first eligible nighttime image is saved normally
-and supplied to the existing local catalogue/star solver if there is no current
-`VIRTUALSKY.ALIGNMENT` record. This is a long sky exposure, not the short Moon
-exposure: stars must be visible. The first unaligned image is not composited.
+Moon recovery accepts either a saved manual VirtualSky calibration or a saved
+star-solver result. In VirtualSky, adjust the overlay manually or run **Solve**,
+then press **Save**. Both paths record the current geometry and image-pipeline
+signature in `VIRTUALSKY.ALIGNMENT`; saving the displayed frame also records
+camera identity, binning and reference dimensions when available. The saved
+mapping provides a rough starting region, not an unconditional Moon detection:
+brightness, apparent size, shape and bounded-search checks still apply.
+
+Select **Reload on Save** to apply the calibration to the running capture worker,
+or reload it later. Existing manual calibrations saved before alignment records
+were supported need to be saved once again. Geometry defaults or unsaved slider
+changes are not treated as an intentional calibration.
+
+With Moon recovery enabled and no usable saved calibration, the first eligible
+nighttime image is saved normally and supplied to the existing local catalogue/
+star solver. This is a long sky exposure, not the short Moon exposure: stars must
+be visible. The first unaligned image is not composited.
 Successful full solutions are saved to the configuration database together with
 camera identity, reference image/sensor dimensions, binning, image-pipeline
 signature, location, geometry and fit quality. Camera metadata is updated in the
 same database transaction so VirtualSky can use the result. Following frames use
 the saved alignment, including after a restart.
 
-This is an explicit new alignment workflow: custom geometry values alone are
-initial guesses, not proof of a completed alignment. A changed camera, image
-pipeline, saved geometry or location invalidates the recorded solution and
-triggers another solve. The automatic save checks for concurrent geometry edits
+Manual calibration does not require visible stars or a successful automatic
+solve. Once either calibration is saved and loaded, it is reused across captures
+and restarts; only the Moon's time-dependent ephemeris position is recalculated.
+A changed camera, image pipeline or saved geometry invalidates the recorded
+mapping; an automatic solution also checks location. The automatic save checks for concurrent geometry edits
 and merges into the latest configuration instead of replacing unrelated settings.
 
 A cloudy, starless or only partially solved image cannot establish alignment.
@@ -200,7 +228,8 @@ the stretched sky before CLAHE and inserts the native-depth short ROI into the
 aligned neighbouring tiles needed for its contrast mapping. The same CLAHE
 algorithm, clip limit, global tile positions and reflected edge padding are
 replayed for that neighbourhood before conversion to display pixels. Only the
-detected lunar mask is blended back; sky pixels and measurements are unchanged.
+combined lunar/long-footprint mask is blended back; pixels outside its feathered
+boundary and ordinary sky measurements are unchanged.
 Missing per-frame CLAHE context causes an explicit safe skip, not an unmatched
 replacement. Ordinary 8-bit contrast enhancement still runs after blending.
 
@@ -308,7 +337,10 @@ Outputs matched exactly. These blend-only measurements exclude FITS I/O and
 camera acquisition, and do not establish an embedded-host speedup.
 
 This is a deliberately small first implementation, not HDR recovery of the whole
-scene: long-exposure glow/bloom outside the lunar mask remains. There is no
+scene: wide cloud-scattered glow outside the bounded replacement mask remains.
+Background matching cannot reconstruct missing cloud detail, and the larger-mask
+path needs additional ROI processing. Earlier blend-only benchmarks do not
+measure this path. There is no
 inter-frame registration or lunar-motion compensation; long exposures, vibration,
 cloud motion, and a low-resolution lunar disk can make the result imperfect.
 The short exposure is not dark-calibrated or independently auto-stretched. It cannot

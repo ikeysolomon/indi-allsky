@@ -976,6 +976,110 @@ def test_moon_clahe_crop_matches_full_sensor_tile_context(runtime, color, bits, 
     numpy.testing.assert_array_equal(source, original)
 
 
+@pytest.mark.parametrize('clahe', [False, True])
+@pytest.mark.parametrize('bits', [8, 12, 16])
+@pytest.mark.parametrize('color', [False, True])
+def test_capture_replaces_larger_footprint_with_same_scale_short_pixels(
+    runtime, monkeypatch, caplog, clahe, bits, color,
+):
+    import cv2
+    from indi_allsky import moon
+
+    caplog.set_level('INFO', logger='indi_allsky')
+    scale = 2 ** (bits - 8)
+    dtype = numpy.uint8 if bits == 8 else numpy.uint16
+    short = numpy.full((80, 80), 3 * scale, dtype)
+    cv2.circle(short, (40, 40), 12, 180 * scale, -1)
+    cv2.circle(short, (37, 40), 4, 90 * scale, -1)
+    long = numpy.full_like(short, 25 * scale)
+    cv2.circle(long, (40, 40), 22, 255 * scale, -1)
+    if color:
+        short, long = numpy.stack([short] * 3), numpy.stack([long] * 3)
+    run_capture(runtime, monkeypatch, frame_data={'short': short, 'long': long})
+    job = runtime.image_q.get(timeout=2)
+    with fits.conf.set_temp('use_memmap', False):
+        i_ref = ingest_long(runtime, job)
+    processor = runtime.processor
+    try:
+        processor.config.update(CONTRAST_ENHANCE_16BIT=clahe, NIGHT_CONTRAST_ENHANCE=clahe)
+        processor.max_bit_depth = bits
+        processor.image = processor._debayer(i_ref)
+        original = i_ref.hdulist[0].data.copy()
+        if clahe:
+            processor.contrast_clahe_16bit(moon_composite=True)
+        processor.convert_16bit_to_8bit()
+        before = processor.image.copy()
+        with mock.patch.object(moon, 'blend', wraps=moon.blend) as blend:
+            processor.composite_moon(job['moon_composite'], i_ref)
+        assert blend.call_count == 1
+        call = blend.call_args
+        x1, y1, x2, y2 = call.args[2]
+        assert x2 - x1 > 2 * 22
+        assert call.kwargs['replacement_mask'] is not None
+        native_short = numpy.moveaxis(short, 0, -1) if color else short
+        expected_patch = (native_short[y1:y2, x1:x2] // scale).astype(numpy.uint8)
+        numpy.testing.assert_array_equal(call.args[1], expected_patch)
+        display = call.kwargs['display_patch']
+        expected_detail = expected_patch[40 - y1, 37 - x1] if display is None else display[40 - y1, 37 - x1]
+        numpy.testing.assert_array_equal(processor.image[40, 37], expected_detail)
+        numpy.testing.assert_array_equal(processor.image[:y1], before[:y1])
+        numpy.testing.assert_array_equal(processor.image[y2:], before[y2:])
+        numpy.testing.assert_array_equal(processor.image[:, :x1], before[:, :x1])
+        numpy.testing.assert_array_equal(processor.image[:, x2:], before[:, x2:])
+        numpy.testing.assert_array_equal(i_ref.hdulist[0].data, original)
+        assert 'short Moon is not resized' in caplog.text
+        assert 'applied=True' in caplog.text
+        assert processor._moon_clahe_source is None
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink(missing_ok=True)
+        Path(job['moon_composite']['filename']).unlink()
+
+
+@pytest.mark.parametrize('radius,applied', [(22, True), (40, False)])
+def test_long_footprint_expands_search_only_once(runtime, monkeypatch, caplog, radius, applied):
+    import cv2
+
+    caplog.set_level('INFO', logger='indi_allsky')
+    short = numpy.full((80, 80), 3, numpy.uint8)
+    cv2.circle(short, (40, 40), 12, 180, -1)
+    long = numpy.full_like(short, 25)
+    cv2.circle(long, (40, 40), radius, 255, -1)
+    run_capture(runtime, monkeypatch, frame_data={'short': short, 'long': long})
+    job = runtime.image_q.get(timeout=2)
+    with fits.conf.set_temp('use_memmap', False):
+        i_ref = ingest_long(runtime, job)
+    processor = runtime.processor
+    windows = []
+    processor.image = processor._debayer(i_ref)
+
+    class Guide:
+        expected_position = (40, 40)
+        expected_radius = 12
+
+        def search_region(self, *args, expanded=False):
+            windows.append(expanded)
+            return (4, 4, 76, 76) if expanded else (24, 24, 56, 56)
+
+    before = processor.image.copy()
+    try:
+        processor.composite_moon(job['moon_composite'], i_ref, guide=Guide())
+        assert windows == [False, True]
+        assert 'expanding search once' in caplog.text
+        if applied:
+            assert 'applied=True' in caplog.text
+            assert processor.image[40, 40] == 180
+            assert processor.image[40, 59] == 25
+        else:
+            assert 'bounded search edge' in caplog.text
+            numpy.testing.assert_array_equal(processor.image, before)
+        assert not runtime.worker.moon_composite_suspended
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink(missing_ok=True)
+        Path(job['moon_composite']['filename']).unlink()
+
+
 @pytest.mark.parametrize('mode', [None, *stretch_classes.__all__])
 @pytest.mark.parametrize('bits', [8, 12, 16])
 @pytest.mark.parametrize('color', [False, True])

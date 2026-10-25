@@ -530,13 +530,16 @@ function loadJS(url, data, onDone, onError) {
                         <p>Lens curvature separates radial lens distortion from camera tilt. It is calibrated by
                            the normal solver; zero retains the original equisolid projection.</p>
                         <p id="lens_save_help"><strong>Save</strong> writes all nine calibration values to the camera configuration,
-                           including manually entered values. Display controls are not saved. Azimuth also repositions
+                           including manually entered values, and records the alignment for the Moon's bounded search.
+                           A successful star solve is not required; the saved overlay can be a rough guide.
+                           Display controls are not saved. Azimuth also repositions
                            the cardinal-direction labels burned into future captured images.</p>
                         <p><strong>Additional overlay correction</strong> is optional and can reduce residual mismatches
                            after the normal solve. It requires a reliable star match and uses the detection mask
                            and sky ROI as hints. The correction is accepted only when independent validation stars
                            support an improvement; otherwise the normal alignment is kept and the reason is shown.
-                           Save stores the model and whether it is enabled; only the overlay is corrected.</p>
+                           Save stores the model and whether it is enabled; the overlay and Moon search
+                           position use the correction, without resampling the captured image.</p>
                         <p><strong>Reload on Save</strong> also reloads the capture service to apply the saved
                            configuration. If unchecked, the values become page defaults after the next service reload.</p>
                         <p>Direction labels stay inside the visible photo and its image mask. Directions outside
@@ -907,6 +910,7 @@ $(SOLVE_FIELDS.map(f => '#' + f).concat('#POINTING_AZIMUTH').join(', ')).on('cha
 
 function solverPayload(action) {
     var payload = {'action': action, 'camera_id': camera_id};
+    if (action === 'save' && last_image_timestamp) payload.timestamp = last_image_timestamp;
     payload['POINTING_AZIMUTH'] = $('#POINTING_AZIMUTH').val();
     payload['LENS_ALTITUDE'] = camera_altitude;
     payload['PRECESSION'] = action === 'solve' ? true : precession;

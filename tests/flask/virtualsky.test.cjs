@@ -151,6 +151,8 @@ test('manual Save is available without solving and sends pointing and large offs
     $('#lens_save').handlers.click();
     const payload = JSON.parse(requests[0].data);
     assert.equal(payload.action, 'save');
+    assert.equal(payload.camera_id, 1);
+    assert.equal(payload.timestamp, 1770000000);
     assert.equal(payload.PRECESSION, false);
     assert.equal(payload.LATITUDE_OFFSET, '43.49');
     assert.equal(payload.POINTING_AZIMUTH, '123');

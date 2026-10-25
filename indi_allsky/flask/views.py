@@ -31,6 +31,8 @@ from ..processing import ImageProcessor
 from ..lens_solver import IndiAllSkyLensSolver
 from ..lens_solver import parseSolverRequestValues
 from ..lens_solver import applySolvedValuesToConfig
+from ..lens_solver.calibration import pipelineSignature
+from ..moon_sky import alignment_values, image_geometry
 from ..panorama import panoramaSourceCircleClipped
 from ..panorama import validatePanoramaMiniTimelapseRequest
 
@@ -8199,7 +8201,57 @@ class AjaxLensSolverView(BaseView):
         if not isinstance(reload_on_save, bool):
             return jsonify({'success': False, 'message': 'RELOAD_ON_SAVE must be a boolean'}), 400
 
+        alignment = {'source': 'manual', 'timestamp': datetime.now().timestamp()}
+        if 'camera_id' in request.json:
+            try:
+                if isinstance(request.json['camera_id'], bool):
+                    raise ValueError
+                camera_id = int(request.json['camera_id'])
+                if not 0 < camera_id < 2**63:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
+                return jsonify({'success': False, 'message': 'Invalid camera_id'}), 400
+            camera = IndiAllSkyDbCameraTable.query.filter(IndiAllSkyDbCameraTable.id == camera_id).first()
+            if camera is None:
+                return jsonify({'success': False, 'message': 'Unknown camera'}), 400
+            alignment['camera_uuid'] = camera.uuid
+            if 'timestamp' in request.json:
+                try:
+                    if isinstance(request.json['timestamp'], bool):
+                        raise ValueError
+                    timestamp = int(request.json['timestamp'])
+                    ts_dt = datetime.fromtimestamp(timestamp)
+                    ts_dt_end = ts_dt + timedelta(seconds=1)
+                except (TypeError, ValueError, OverflowError, OSError):
+                    return jsonify({'success': False, 'message': 'Invalid timestamp'}), 400
+                image_entry = IndiAllSkyDbImageTable.query\
+                    .filter(IndiAllSkyDbImageTable.camera_id == camera_id)\
+                    .filter(IndiAllSkyDbImageTable.createDate >= ts_dt)\
+                    .filter(IndiAllSkyDbImageTable.createDate < ts_dt_end)\
+                    .first()
+                if image_entry is None:
+                    return jsonify({'success': False, 'message': 'Reference image not found; refresh VirtualSky before saving'}), 400
+                binning = image_entry.binmode or 1
+                alignment['binning'] = binning
+                if camera.width and camera.height:
+                    sensor_shape = (camera.height // binning, camera.width // binning)
+                    try:
+                        _, shape = image_geometry(self.indi_allsky_config, sensor_shape, binning)
+                    except ValueError as e:
+                        return jsonify({'success': False, 'message': str(e)}), 400
+                    alignment['sensor_shape'] = list(sensor_shape)
+                    alignment['image_size'] = list(shape[1::-1])
+                else:
+                    app.logger.warning('Saved VirtualSky reference has no camera sensor dimensions; Moon guidance requires unchanged binning')
+            else:
+                app.logger.warning('VirtualSky save has no reference timestamp; Moon guidance will use capture dimensions')
+        else:
+            app.logger.warning('Legacy VirtualSky save has no camera reference; Moon guidance will use capture dimensions')
+
         applySolvedValuesToConfig(self.indi_allsky_config, values)
+        alignment['pipeline'] = pipelineSignature(self.indi_allsky_config)
+        alignment['geometry'] = alignment_values(self.indi_allsky_config)
+        self.indi_allsky_config['VIRTUALSKY']['ALIGNMENT'] = alignment
 
         # do NOT reassign `self._indi_allsky_config_obj.config = self.indi_allsky_config` here:
         # the setter rebuilds `_config` as a new OrderedDict, breaking the object identity the
@@ -8217,7 +8269,7 @@ class AjaxLensSolverView(BaseView):
             }
             return jsonify(error_data), 400
 
-        message = 'Saved lens calibration to config. Note: saving Azimuth Angle also moves the cardinal-direction (N/E/S/W) labels burned into future images.'
+        message = 'Saved lens calibration and Moon search alignment to config. No automatic star solve is required to use this saved alignment. Note: saving Azimuth Angle also moves the cardinal-direction (N/E/S/W) labels burned into future images.'
 
         if reload_on_save:
             self._miscDb.setState('STATUS', constants.STATUS_RELOADING)

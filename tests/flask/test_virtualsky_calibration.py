@@ -13,6 +13,7 @@ from flask_sqlalchemy import SQLAlchemy
 
 from indi_allsky.exceptions import ConfigSaveException
 from indi_allsky.lens_solver.calibration import displacement
+from indi_allsky.moon_sky import MoonSkyGuide, alignment_values
 from tests.flask.test_virtualsky import run_node
 from tests.lens_solver.test_calibration import saved_model
 from tests.flask.test_virtualsky_requests import endpoint, VALUES
@@ -160,6 +161,13 @@ def test_calibration_survives_real_config_save_and_reload(config_store, version)
             response = app.make_response(view.dispatch_request())
         assert response.status_code == 200, response.get_json()
         reloaded = cls()
+        alignment = reloaded.config['VIRTUALSKY']['ALIGNMENT']
+        assert alignment['source'] == 'manual'
+        assert alignment['geometry'] == alignment_values(reloaded.config)
+        assert MoonSkyGuide(reloaded.config).is_aligned(SimpleNamespace(
+            camera_uuid='test-camera', binning=1,
+            hdulist=[SimpleNamespace(data=SimpleNamespace(shape=(1520, 2028)))],
+        ))
         assert reloaded.config['VIRTUALSKY']['CALIBRATION'] == calibration
         assert reloaded.config['VIRTUALSKY']['CALIBRATION_ENABLED'] is enabled
         assert reloaded.config['VIRTUALSKY']['RADIAL_DISTORTION'] == (0.08 if version == 2 else 0)

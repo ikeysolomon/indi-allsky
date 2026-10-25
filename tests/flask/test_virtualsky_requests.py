@@ -6,11 +6,17 @@ from pathlib import Path
 from types import SimpleNamespace
 import threading
 import math
+from unittest import mock
 
+import cv2
 import flask
+import numpy
 import pytest
 
+from indi_allsky import moon, moon_sky
 from indi_allsky.lens_solver.request import parseSolverRequestValues, applySolvedValuesToConfig
+from indi_allsky.lens_solver.calibration import pipelineSignature
+from indi_allsky.moon_sky import alignment_values, image_geometry
 
 
 VALUES = dict(AZIMUTH_ANGLE=200, POINTING_AZIMUTH=123, LATITUDE_OFFSET=43.49,
@@ -28,6 +34,8 @@ def endpoint():
                      app=flask.current_app, current_user=SimpleNamespace(is_admin=True, username='test'),
                      request=flask.request, jsonify=flask.jsonify, datetime=datetime, timedelta=timedelta,
                      parseSolverRequestValues=parseSolverRequestValues,
+                     alignment_values=alignment_values, image_geometry=image_geometry,
+                     pipelineSignature=pipelineSignature,
                      applySolvedValuesToConfig=applySolvedValuesToConfig, ConfigSaveException=RuntimeError)
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), namespace)
     view = namespace['AjaxLensSolverView']()
@@ -47,6 +55,138 @@ def test_manual_save_without_solve(endpoint):
     assert saved[0]['VIRTUALSKY']['POINTING_AZIMUTH'] == 123
     assert saved[0]['VIRTUALSKY']['MAGNITUDE'] == 6
     assert saved[0]['LENS_ALTITUDE'] == 54
+    alignment = saved[0]['VIRTUALSKY']['ALIGNMENT']
+    assert alignment['source'] == 'manual'
+    assert alignment['pipeline'] == pipelineSignature(saved[0])
+    assert alignment['geometry'] == alignment_values(saved[0])
+
+
+@pytest.fixture
+def saved_reference(endpoint):
+    _, _, namespace, _ = endpoint
+    camera = SimpleNamespace(uuid='camera-1', width=800, height=600)
+    image = SimpleNamespace(binmode=1)
+
+    class Query:
+        def __init__(self, row):
+            self.row = row
+
+        def filter(self, *args):
+            return self
+
+        def first(self):
+            return self.row
+
+    namespace['IndiAllSkyDbCameraTable'] = SimpleNamespace(id=7, query=Query(camera))
+    namespace['IndiAllSkyDbImageTable'] = SimpleNamespace(
+        camera_id=7, createDate=datetime.fromtimestamp(1770000000), query=Query(image))
+    return camera, image
+
+
+@pytest.mark.parametrize('solved_values', [False, True])
+def test_saved_calibration_guides_moon_without_star_solve(endpoint, saved_reference, monkeypatch, solved_values):
+    app, view, _, saved = endpoint
+    payload = dict(
+        VALUES, action='save', camera_id=7, timestamp=1770000000,
+        AZIMUTH_ANGLE=0, LENS_ALTITUDE=90, POINTING_AZIMUTH=0,
+        LATITUDE_OFFSET=0, LONGITUDE_OFFSET=0, IMAGE_CIRCLE_DIAMETER=700,
+        OFFSET_X=0, OFFSET_Y=0, CALIBRATION_ENABLED=solved_values, CALIBRATION=None,
+    )
+    with app.test_request_context(json=payload):
+        assert view.dispatch_request().get_json()['success']
+    cfg = deepcopy(saved[0])
+    cfg['MOON_COMPOSITE'] = {'ENABLE': True}
+    ref = SimpleNamespace(
+        camera_uuid='camera-1', binning=1,
+        hdulist=[SimpleNamespace(data=numpy.zeros((600, 800), numpy.uint8), header={})],
+    )
+    solve = mock.Mock(side_effect=AssertionError('Saved calibration must not require another star solve'))
+    monkeypatch.setattr(moon_sky.IndiAllSkyLensSolver, 'solve', solve)
+    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: SimpleNamespace(
+        alt=math.pi / 2, az=0,
+        size=math.degrees(4 * math.asin(math.sqrt(2) * 12 / 700)) * 3600,
+    ))
+    guide = moon_sky.MoonSkyGuide(cfg)
+    assert guide.is_aligned(ref)
+    persist = mock.Mock()
+    guide.align_first_image(numpy.zeros((600, 800), numpy.uint8), ref, 40.1, -75.4, persist)
+    solve.assert_not_called()
+    persist.assert_not_called()
+    bounds = guide.search_region(
+        {'exposure': 0.001, 'exp_time': 1770000000}, ref, {}, 40.1, -75.4, 0,
+    )
+    sensor = numpy.full((600, 800), 3, numpy.uint8)
+    cv2.circle(sensor, (400, 300), 12, 150, -1)
+    cv2.circle(sensor, (100, 100), 25, 255, -1)
+    roi = moon.find_moon(sensor, search=bounds, expected=guide.expected_position,
+                         expected_radius=guide.expected_radius)
+    assert roi is not None
+    assert roi[0] < 400 < roi[2] and roi[1] < 300 < roi[3]
+    x1, y1, x2, y2 = roi
+    sky = numpy.full_like(sensor, 25)
+    assert moon.blend(sky, sensor[y1:y2, x1:x2], roi)
+    assert sky[300, 400] == 150
+    assert sky[100, 100] == 25
+    assert not guide.is_aligned(SimpleNamespace(
+        camera_uuid='other-camera', binning=1, hdulist=ref.hdulist,
+    ))
+    assert guide.is_aligned(SimpleNamespace(
+        camera_uuid='camera-1', binning=2,
+        hdulist=[SimpleNamespace(data=numpy.zeros((300, 400), numpy.uint8))],
+    ))
+    cfg['IMAGE_FLIP_H'] = True
+    assert not guide.is_aligned(ref)
+
+
+@pytest.mark.parametrize('key', ['camera_id', 'timestamp'])
+@pytest.mark.parametrize('value', [None, True, [], {}, float('inf'), 10**100, 'bad'])
+def test_invalid_save_reference_does_not_modify_calibration(endpoint, saved_reference, key, value):
+    app, view, _, saved = endpoint
+    before = deepcopy(view.indi_allsky_config)
+    payload = dict(VALUES, action='save', camera_id=7, timestamp=1770000000)
+    payload[key] = value
+    with app.test_request_context(json=payload):
+        assert view.dispatch_request()[1] == 400
+    assert saved == []
+    assert view.indi_allsky_config == before
+
+
+@pytest.mark.parametrize('binning', [None, 1, 2, 4])
+@pytest.mark.parametrize('dimensions', [False, True])
+def test_manual_save_records_reference_binning_and_geometry(
+    endpoint, saved_reference, binning, dimensions, caplog,
+):
+    app, view, _, saved = endpoint
+    camera, image = saved_reference
+    image.binmode = binning
+    view.indi_allsky_config.update(IMAGE_ROTATE='ROTATE_90_CLOCKWISE', IMAGE_SCALE=73)
+    if not dimensions:
+        camera.width = camera.height = None
+    with app.test_request_context(json=dict(VALUES, action='save', camera_id=7, timestamp=1770000000)):
+        assert view.dispatch_request().get_json()['success']
+    record = saved[0]['VIRTUALSKY']['ALIGNMENT']
+    effective_binning = binning or 1
+    assert record['binning'] == effective_binning
+    assert record['camera_uuid'] == camera.uuid
+    if dimensions:
+        sensor_shape = (600 // effective_binning, 800 // effective_binning)
+        _, shape = image_geometry(saved[0], sensor_shape, effective_binning)
+        assert record['sensor_shape'] == list(sensor_shape)
+        assert record['image_size'] == list(shape[1::-1])
+    else:
+        assert 'sensor_shape' not in record
+        assert 'image_size' not in record
+        assert 'no camera sensor dimensions' in caplog.text
+
+
+@pytest.mark.parametrize('missing', ['camera', 'image'])
+def test_unknown_save_reference_never_saves(endpoint, saved_reference, missing):
+    app, view, namespace, saved = endpoint
+    name = 'IndiAllSkyDbCameraTable' if missing == 'camera' else 'IndiAllSkyDbImageTable'
+    namespace[name].query.row = None
+    with app.test_request_context(json=dict(VALUES, action='save', camera_id=7, timestamp=1770000000)):
+        assert view.dispatch_request()[1] == 400
+    assert saved == []
 
 
 def test_old_save_payload_preserves_pointing(endpoint):

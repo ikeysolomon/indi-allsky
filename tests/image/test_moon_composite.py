@@ -48,6 +48,90 @@ def lunar_patch(color=False):
     return cv2.cvtColor(patch, cv2.COLOR_GRAY2BGR) if color else patch
 
 
+@pytest.mark.parametrize('color', [False, True])
+@pytest.mark.parametrize('phase', ['full', 'half', 'crescent'])
+@pytest.mark.parametrize('long_peak', [235, 255])
+def test_larger_long_footprint_does_not_resize_short_moon(color, phase, long_peak):
+    radius = 60 if phase == 'crescent' else 12
+    side = 8 * radius + 80
+    center = side // 2
+    yy, xx = numpy.ogrid[:side, :side]
+    illuminated = (xx - center) ** 2 + (yy - center) ** 2 <= radius ** 2
+    if phase == 'half':
+        illuminated &= xx >= center
+    elif phase == 'crescent':
+        illuminated &= (xx - (center - radius * 0.25)) ** 2 + (yy - center) ** 2 > radius ** 2
+    short = numpy.full((side, side), 3, numpy.uint8)
+    short[illuminated] = 180
+    short[illuminated & (xx % 9 < 4)] = 90
+    long = numpy.full_like(short, 25)
+    cv2.circle(long, (center, center), int(radius * 2.5), long_peak, -1)
+    cv2.circle(long, (20, 20), 4, 255, -1)
+    roi = moon.find_moon(short, expected=(center, center), expected_radius=radius)
+    assert roi is not None
+    larger, mask = moon.replacement_region(long, short, roi, bounded=True)
+    assert mask is not None
+    assert larger[2] - larger[0] > roi[2] - roi[0]
+    if color:
+        short = cv2.cvtColor(short, cv2.COLOR_GRAY2BGR)
+        long = cv2.cvtColor(long, cv2.COLOR_GRAY2BGR)
+        short[:, :, 0] //= 2
+        long[:, :, 0] //= 2
+    before = long.copy()
+    x1, y1, x2, y2 = larger
+    patch = short[y1:y2, x1:x2].copy()
+    assert moon.blend(
+        long, patch, larger, expected=(center, center), expected_radius=radius,
+        replacement_mask=mask,
+    )
+    numpy.testing.assert_array_equal(long[illuminated], short[illuminated])
+    sample = center + int(radius * 1.75)
+    numpy.testing.assert_array_equal(long[center, sample], before[0, 0])
+    numpy.testing.assert_array_equal(long[:y1], before[:y1])
+    numpy.testing.assert_array_equal(long[y2:], before[y2:])
+    numpy.testing.assert_array_equal(long[:, :x1], before[:, :x1])
+    numpy.testing.assert_array_equal(long[:, x2:], before[:, x2:])
+    numpy.testing.assert_array_equal(patch, short[y1:y2, x1:x2])
+    numpy.testing.assert_array_equal(long[20, 20], before[20, 20])
+
+
+def test_unbounded_bloom_fails_instead_of_replacing_the_sky():
+    short = lunar_patch()
+    roi = moon.find_moon(short)
+    with pytest.raises(moon.MoonFootprintEdge, match='bounded search edge'):
+        moon.replacement_region(numpy.full_like(short, 255), short, roi, bounded=True)
+
+
+def test_expanded_mask_does_not_hide_short_exposure_clipping():
+    short = lunar_patch()
+    long = numpy.full_like(short, 25)
+    cv2.circle(long, (40, 40), 22, 255, -1)
+    roi, mask = moon.replacement_region(long, short, moon.find_moon(short), bounded=True)
+    cv2.circle(short, (40, 40), 12, 255, -1)
+    before = long.copy()
+    x1, y1, x2, y2 = roi
+    assert not moon.blend(long, short[y1:y2, x1:x2], roi, replacement_mask=mask)
+    numpy.testing.assert_array_equal(long, before)
+
+
+@pytest.mark.parametrize('invalid', ['shape', 'dtype', 'range', 'edge'])
+def test_invalid_replacement_mask_does_not_change_image(invalid):
+    mask = numpy.zeros((80, 80), numpy.uint8)
+    if invalid == 'shape':
+        mask = mask[:-1]
+    elif invalid == 'dtype':
+        mask = mask.astype(numpy.float32)
+    elif invalid == 'range':
+        mask[40, 40] = 255
+    else:
+        mask[0, 0] = 1
+    image = numpy.full((80, 80), 25, numpy.uint8)
+    before = image.copy()
+    with pytest.raises(ValueError, match='mask|footprint'):
+        moon.blend(image, lunar_patch(), (0, 0, 80, 80), replacement_mask=mask)
+    numpy.testing.assert_array_equal(image, before)
+
+
 @pytest.mark.parametrize('margin', [0, 0.009, 0.101, True, '0.05', float('nan'), float('inf')])
 def test_search_margin_is_validated(margin):
     with pytest.raises(ValueError, match='SEARCH_MARGIN'):

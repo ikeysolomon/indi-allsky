@@ -1869,7 +1869,7 @@ class ImageProcessor(object):
         ):
             self._moon_clahe_source = None
             return
-        from .moon import blend, find_moon, reported_exposure, exposure_matches
+        from .moon import blend, find_moon, replacement_region, MoonFootprintEdge, reported_exposure, exposure_matches
         from astropy.io import fits
         from types import SimpleNamespace
 
@@ -1925,6 +1925,20 @@ class ImageProcessor(object):
                         expected=local_expected, expected_radius=expected_radius,
                     )
                     if roi is not None:
+                        long_sensor = i_ref.hdulist[0].data
+                        if guide is not None:
+                            long_sensor = long_sensor[..., offset_y:bottom, offset_x:right]
+                        if int(long_header['BITPIX']) != 8:
+                            long_sensor = numpy.right_shift(long_sensor, self.max_bit_depth - 8).astype(numpy.uint8)
+                        try:
+                            roi, replacement_mask = replacement_region(
+                                long_sensor, detection, roi, bounded=guide is not None,
+                            )
+                        except MoonFootprintEdge:
+                            if guide is not None and not attempt:
+                                logger.info('Bright Moon footprint exceeds prediction window; expanding search once (2x margin)')
+                                continue
+                            raise
                         break
                     if guide is not None and not attempt:
                         logger.info('Moon not identified near prediction; expanding search once (2x margin)')
@@ -1970,9 +1984,12 @@ class ImageProcessor(object):
                 patch = numpy.right_shift(patch, self.max_bit_depth - 8).astype(numpy.uint8)
             if display_patch is not None and not clahe_active:
                 self._moon_split_patch(display_patch, patch, roi)
+            if numpy.shares_memory(self.image, i_ref.hdulist[0].data):
+                self.image = self.image.copy()
             applied = blend(
                 self.image, patch, roi,
                 display_patch=display_patch, expected=expected, expected_radius=expected_radius,
+                replacement_mask=replacement_mask,
             )
         except (OSError, ValueError) as e:
             logger.warning('Moon composite skipped: %s', e)

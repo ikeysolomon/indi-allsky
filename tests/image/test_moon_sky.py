@@ -296,7 +296,7 @@ def test_bad_predictions_are_explicit_and_never_fall_back_to_whole_frame(monkeyp
 
 
 @pytest.mark.parametrize('margin', [0.01, 0.05, 0.1])
-def test_search_margin_and_single_expansion_are_in_sensor_coordinates(monkeypatch, margin):
+def test_search_margin_is_a_hard_limit_in_sensor_coordinates(monkeypatch, margin):
     cfg, ref = config(), reference((1200, 1600))
     cfg['MOON_COMPOSITE']['SEARCH_MARGIN'] = margin
     cfg['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 1000
@@ -307,10 +307,27 @@ def test_search_margin_and_single_expansion_are_in_sensor_coordinates(monkeypatc
     first = guide.search_region(frame, ref, {}, 40.1, -75.4, 0)
     expanded = guide.search_region(frame, ref, {}, 40.1, -75.4, 0, expanded=True)
     tolerance = max(24, 1000 * margin)
-    assert first[2] - first[0] == pytest.approx(2 * tolerance, abs=2)
-    assert expanded[2] - expanded[0] == pytest.approx(4 * tolerance, abs=2)
+    initial_tolerance = max(24, 1000 * margin / 2)
+    assert first[2] - first[0] == pytest.approx(2 * initial_tolerance, abs=2)
+    assert expanded[2] - expanded[0] == pytest.approx(2 * tolerance, abs=2)
     numpy.testing.assert_allclose(guide.expected_position, (800, 600), atol=0.01)
     assert guide.expected_radius == pytest.approx(12, abs=0.01)
+
+
+def test_default_search_limit_is_ten_percent_not_twenty(monkeypatch):
+    cfg, ref = config(), reference((1200, 1600))
+    cfg['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 1000
+    manual(cfg)
+    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: projected_moon(diameter=1000))
+    guide = MoonSkyGuide(cfg)
+    frame = {'exposure': 0.001, 'exp_time': ref.exp_date.timestamp()}
+    bounds = guide.search_region(frame, ref, {}, 40.1, -75.4, 0, expanded=True)
+    assert bounds == (700, 500, 900, 700)
+    sensor = numpy.full((1200, 1600), 3, numpy.uint8)
+    cv2.circle(sensor, (940, 600), 12, 180, -1)
+    assert moon.find_moon(
+        sensor, search=bounds, expected=guide.expected_position, expected_radius=guide.expected_radius,
+    ) is None
 
 
 def test_real_apparent_moon_size_rejects_unresolved_prediction(monkeypatch):

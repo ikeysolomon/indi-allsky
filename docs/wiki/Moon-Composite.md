@@ -35,11 +35,14 @@ Add this object to the configuration:
   limits; it is independent of the normal sky exposure minimum. Start at 1 ms,
   then tune for your camera/lens and moon-mode gain. If the moon is still clipped,
   reduce it. The short frame uses the **same gain and binning** as the sky frame.
-- Optional advanced `SEARCH_MARGIN`: prediction safety margin as a fraction of
-  the aligned image-circle diameter, default `0.05`, allowed range `0.01`-`0.1`.
+- Optional advanced `SEARCH_MARGIN`: maximum search half-width around the rough
+  prediction, as a fraction of the aligned image-circle diameter, default `0.1`
+  (10% in each direction), allowed range `0.01`-`0.1`.
   It is available through configuration export/edit/import, not another UI control,
   and is retained when saving the camera settings. Sensor transforms and binning
-  scale this margin; the minimum is 24 sensor pixels.
+  scale this margin; the minimum is 24 sensor pixels. Explicit saved values are
+  retained; set this to `0.1` if an older configuration specifies `0.05` and the
+  full 10% search allowance is wanted.
 
 Old `ROI` and `THRESHOLD` values are ignored and removed on the next configuration
 save/import. No manual migration or coordinate updates are needed.
@@ -55,26 +58,32 @@ map that direction into image pixels. The image pipeline's rotation, flips,
 crop, scale and borders are inverted to recover sensor coordinates. A saved
 reference binning is converted to the current binning.
 
-Only a neighbourhood around that predicted position is searched. Its margin
-scales with the reference image-circle diameter, with a 24-sensor-pixel minimum.
-If no reliable candidate is found, the margin doubles **once**. There are at most
-two search windows, never an indefinite expansion or an unguided fallback.
+Only a neighbourhood around that predicted position is searched. The first
+window uses half the configured maximum margin; if necessary, one retry uses
+the full margin. Both have a 24-sensor-pixel minimum. The default is therefore
+roughly +/-5% initially and +/-10% at most, not +/-10% growing to +/-20%.
+There are at most two search windows, never an indefinite expansion or an
+unguided fallback. The whole detected footprint must fit inside the window;
+a source cut off by its boundary is not accepted as the whole Moon.
 The detector never falls back to unrelated full-frame lights if prediction or
 alignment fails. Within this neighbourhood, a max-pooled brightness preview
 (at most 768 pixels per dimension) preserves bright seeds without full-frame debayering.
-Bayer previews pool complete CFA cells. Starting with the brightest remaining
-pixel, the detector grows a local window until the connected bright region is
-enclosed, deriving its threshold with Otsu's method and a brightness floor.
-It examines at most three bright seeds per window (six total with expansion),
-rejecting tiny sources, image-edge
-targets, and shapes without a sufficiently circular limb. A partial illuminated
-disk can pass; narrow crescents and poorly resolved disks may be skipped.
+Bayer previews pool complete CFA cells. Guided detection starts at the rough
+predicted position and visits seeds in an outward clockwise square spiral,
+rather than choosing the three brightest objects. Each connected seed is grown
+to its complete thresholded footprint. A size-scaled morphological closing
+bridges small interruptions from cloud; the silhouette follows the observed
+outline, not a fitted circle. Distorted disks, short flare extensions, partial
+phases and small cloud gaps do not need a circular limb to pass. Wide cloud
+gaps, unresolved detail and footprints extending outside the window may still
+be skipped. The brightness floor remains adaptive to the measured background.
 The apparent lunar diameter from ephemeris is projected through the same lens,
 distortion and sensor transforms. Unresolved predictions and candidates with
 inconsistent radii are rejected, rather than accepting a point source when the
-Moon is absent. Shape- and brightness-valid candidates are preferred by distance
-from the prediction. Similarly plausible nearby candidates cause a logged skip
-rather than a guess. Unguided utility calls retain integrated-brightness ranking.
+Moon is absent. The spiral's first size- and area-valid footprint is preferred;
+similarly plausible nearby candidates cause a logged skip rather than a guess.
+Unguided utility calls retain their existing circular-limb checks and
+integrated-brightness ranking.
 
 The chosen region gets proportional padding and even sensor-coordinate origins
 to preserve Bayer phase. The long frame is then checked for a connected bright
@@ -82,11 +91,11 @@ footprint overlapping that detected Moon. A larger footprint expands the crop
 and replacement mask, **not the apparent size of the short-exposure Moon**.
 Its plateau threshold is estimated locally, including after dark subtraction.
 Unrelated bright sources are not added to the mask. If the footprint reaches the
-prediction window edge, the existing single 2x search expansion is used; a
-footprint that still cannot be enclosed safely causes an explicit skip.
+prediction window edge, the single retry at the configured maximum margin is
+used; a footprint that still cannot be enclosed safely causes an explicit skip.
 
 Only this final crop is debayered. Its lunar silhouette is refined at
-native resolution with the same automatic shape checks, then clipping checks
+native resolution with the same guided footprint search, then clipping checks
 and feathering are applied. A robust spatial sky-illumination fit from the
 long-frame boundary ring matches the replacement background without flattening
 its gradient. Lunar intensities are matched coherently to that background.
@@ -99,12 +108,13 @@ Diagnostic split previews deliberately retain their original transfer, linear
 side and divider rather than applying this display recovery.
 The linear short Moon still controls shape, size and clipping checks;
 the oversized long footprint never defines the Moon's physical diameter.
-`INFO` logging reports expanded footprint dimensions and that the Moon was not
+`INFO` logging reports predicted sensor position and radius, search bounds,
+measured peak/background/threshold and candidate count, expanded footprint dimensions and that the Moon was not
 resized, the measured lunar radius, native/display detail ranges when recovery
 is needed, and the footprint/limb feather widths. `DEBUG` logging records the
 initially detected sensor ROI.
-Guided detection permits resolved crescents with a circular outer limb and a
-matching predicted radius; it does not require a full illuminated disk.
+Guided detection permits resolved crescents with a matching predicted extent;
+it does not require a full illuminated disk or a circular outer limb.
 Mask dilation scales at 2% of detected radius, clamped to 1-3 pixels. Gaussian
 feather radius scales at 4%, clamped to 1-4 pixels (3x3 to 9x9 kernels).
 Edge padding accounts for both. Interior detail is preserved, while the limb
@@ -132,7 +142,7 @@ then press **Save**. Both paths record the current geometry and image-pipeline
 signature in `VIRTUALSKY.ALIGNMENT`; saving the displayed frame also records
 camera identity, binning and reference dimensions when available. The saved
 mapping provides a rough starting region, not an unconditional Moon detection:
-brightness, apparent size, shape and bounded-search checks still apply.
+contrast, observed area, apparent extent and bounded-search checks still apply.
 
 Select **Reload on Save** to apply the calibration to the running capture worker,
 or reload it later. Existing manual calibrations saved before alignment records

@@ -3436,7 +3436,7 @@ class AjaxConfigView(BaseView):
             self.indi_allsky_config['MOON_COMPOSITE'] = {
                 'ENABLE': form_config.MOON_COMPOSITE__ENABLE.data,
                 'EXPOSURE': form_config.MOON_COMPOSITE__EXPOSURE.data,
-                'SEARCH_MARGIN': self.indi_allsky_config.get('MOON_COMPOSITE', {}).get('SEARCH_MARGIN', 0.05),
+                'SEARCH_MARGIN': self.indi_allsky_config.get('MOON_COMPOSITE', {}).get('SEARCH_MARGIN', 0.1),
             }
         self.indi_allsky_config['CCD_CONFIG']['DAY']['GAIN']            = float(round(float(request.json['CCD_CONFIG__DAY__GAIN']), 3))  # limit to 3 decimals
         self.indi_allsky_config['CCD_CONFIG']['DAY']['BINNING']         = int(request.json['CCD_CONFIG__DAY__BINNING'])

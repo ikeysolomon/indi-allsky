@@ -1937,12 +1937,12 @@ class ImageProcessor(object):
                             )
                         except MoonFootprintEdge:
                             if guide is not None and not attempt:
-                                logger.info('Bright Moon footprint exceeds prediction window; expanding search once (2x margin)')
+                                logger.info('Bright Moon footprint exceeds prediction window; expanding search once to configured maximum margin')
                                 continue
                             raise
                         break
                     if guide is not None and not attempt:
-                        logger.info('Moon not identified near prediction; expanding search once (2x margin)')
+                        logger.info('Moon not identified near prediction; expanding search once to configured maximum margin')
                 else:
                     logger.warning('Moon composite skipped: bounded search found no reliable lunar candidate')
                     return

@@ -606,16 +606,24 @@ def ingest_long(runtime, job):
 
 
 @pytest.mark.parametrize('exposure_keyword', ['EXPTIME', 'EXPOSURE'])
-@pytest.mark.parametrize('scene', ['center', 'expanded', 'far-away', 'point-source'])
+@pytest.mark.parametrize('scene', ['center', 'expanded', 'distorted', 'cloud', 'flare', 'far-away', 'point-source'])
 def test_capture_to_saved_image_uses_bounded_lunar_prediction(runtime, monkeypatch, tmp_path, scene, exposure_keyword):
     import cv2
     from indi_allsky import moon, moon_sky
     from indi_allsky.lens_solver.calibration import pipelineSignature
 
-    center_x = {'center': 200, 'expanded': 230, 'far-away': 290, 'point-source': 290}[scene]
+    center_x = {'center': 200, 'expanded': 230, 'distorted': 230, 'cloud': 230,
+                'flare': 230, 'far-away': 290, 'point-source': 290}[scene]
     short = numpy.full((300, 400), 3 * 256, numpy.uint16)
     cv2.circle(short, (50, 50), 20, 255 * 256, -1)
     cv2.circle(short, (center_x, 150), 12, 180 * 256, -1)
+    if scene in ('distorted', 'cloud', 'flare'):
+        short[135:165, center_x - 15:center_x + 16] = 3 * 256
+        cv2.ellipse(short, (center_x, 150), (13, 8), 0, 0, 360, 180 * 256, -1)
+        if scene == 'cloud':
+            short[149:152, center_x - 15:center_x + 16] = 3 * 256
+        elif scene == 'flare':
+            cv2.line(short, (center_x - 10, 146), (center_x + 12, 154), 150 * 256, 2)
     cv2.circle(short, (center_x - 3, 150), 4, 90 * 256, -1)
     if scene == 'point-source':
         cv2.circle(short, (200, 150), 3, 240 * 256, -1)
@@ -646,11 +654,11 @@ def test_capture_to_saved_image_uses_bounded_lunar_prediction(runtime, monkeypat
     processor.max_bit_depth = 16
     original = processor.image.copy()
     processor.config['VIRTUALSKY'] = {
-        'IMAGE_CIRCLE_DIAMETER': 300,
+        'IMAGE_CIRCLE_DIAMETER': 600,
         'ALIGNMENT': {'source': 'manual', 'pipeline': pipelineSignature(processor.config)},
     }
     guide = moon_sky.MoonSkyGuide(processor.config)
-    angular_size = numpy.degrees(4 * numpy.arcsin(numpy.sqrt(2) * 12 / 300)) * 3600
+    angular_size = numpy.degrees(4 * numpy.arcsin(numpy.sqrt(2) * 12 / 600)) * 3600
     monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: SimpleNamespace(
         alt=numpy.pi / 2, az=0, size=angular_size,
     ))
@@ -663,9 +671,14 @@ def test_capture_to_saved_image_uses_bounded_lunar_prediction(runtime, monkeypat
         )
         numpy.testing.assert_allclose(guide.expected_position, (200, 150), atol=0.01)
         assert guide.expected_radius == pytest.approx(12, abs=0.01)
-        if scene in ('center', 'expanded'):
-            assert processor.image[150, center_x - 3] == 90
-            assert processor.image[150, center_x + 6] == 180
+        if scene in ('center', 'expanded', 'distorted', 'cloud', 'flare'):
+            display_white = 250 if scene == 'cloud' else 180
+            dark_detail = (
+                round(25 + (90 - 3) / (180 - 3) * (display_white - 25))
+                if scene in ('distorted', 'cloud', 'flare') else 90
+            )
+            assert processor.image[150, center_x - 3] == dark_detail
+            assert processor.image[145, center_x + 4] == display_white
             x1, y1, x2, y2 = blend.call_args.args[2]
             assert x1 < center_x < x2 and y1 < 150 < y2
         else:

@@ -235,10 +235,11 @@ class MoonSkyGuide:
         self.expected_radius = float(numpy.linalg.norm(points[1:, :2] - point[:2], axis=1).max())
         if self.expected_radius < 2.5:
             raise ValueError('Predicted Moon is too small to resolve surface detail at this sensor scale')
-        margin = self.config.get('MOON_COMPOSITE', {}).get('SEARCH_MARGIN', 0.05)
-        tolerance = max(24, params[3] * margin * numpy.linalg.norm(numpy.linalg.inv(matrix[:2, :2]), ord=2) * scale)
-        if expanded:
-            tolerance *= 2
+        margin = self.config.get('MOON_COMPOSITE', {}).get('SEARCH_MARGIN', 0.1)
+        tolerance = max(
+            24, params[3] * margin * numpy.linalg.norm(numpy.linalg.inv(matrix[:2, :2]), ord=2)
+            * scale * (1 if expanded else 0.5),
+        )
         sensor_height, sensor_width = i_ref.hdulist[0].data.shape[-2:]
         if not numpy.isfinite(point).all() or not 0 <= point[0] < sensor_width or not 0 <= point[1] < sensor_height:
             raise ValueError('Predicted Moon is outside the sensor image')
@@ -248,5 +249,8 @@ class MoonSkyGuide:
             min(sensor_width, math.ceil((point[0] + tolerance) / 2) * 2),
             min(sensor_height, math.ceil((point[1] + tolerance) / 2) * 2),
         )
-        logger.debug('Predicted Moon sensor position=(%.1f, %.1f), search=%s', *point[:2], bounds)
+        logger.info(
+            'Predicted Moon sensor position=(%.1f, %.1f), radius=%.1f, search=%s, maximum margin=%.0f%%',
+            *point[:2], self.expected_radius, bounds, margin * 100,
+        )
         return bounds

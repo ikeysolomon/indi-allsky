@@ -35,7 +35,7 @@ def validate_config(config):
     exposure = settings.get('EXPOSURE', 0.001)
     if type(exposure) not in (int, float) or not math.isfinite(exposure) or exposure <= 0:
         raise ValueError('MOON_COMPOSITE EXPOSURE must be finite and positive')
-    margin = settings.get('SEARCH_MARGIN', 0.05)
+    margin = settings.get('SEARCH_MARGIN', 0.1)
     if type(margin) not in (int, float) or not math.isfinite(margin) or not 0.01 <= margin <= 0.1:
         raise ValueError('MOON_COMPOSITE SEARCH_MARGIN must be a fraction from 0.01 to 0.1')
 
@@ -123,13 +123,98 @@ def _bright_regions(gray, expected_radius=None):
     return regions
 
 
+def _spiral_labels(labels, expected):
+    """Visit connected seeds in a clockwise square spiral from the prediction."""
+    height, width = labels.shape
+    cx = min(width - 1, max(0, round(expected[0])))
+    cy = min(height - 1, max(0, round(expected[1])))
+    seen = {0}
+    center = int(labels[cy, cx])
+    if center:
+        seen.add(center)
+        yield center
+    for radius in range(1, max(cx, cy, width - 1 - cx, height - 1 - cy) + 1):
+        forward = numpy.arange(-radius + 1, radius + 1)
+        backward = numpy.arange(radius - 1, -radius - 1, -1)
+        xs = cx + numpy.concatenate((
+            numpy.full(2 * radius, radius), backward,
+            numpy.full(2 * radius, -radius), forward,
+        ))
+        ys = cy + numpy.concatenate((
+            forward, numpy.full(2 * radius, radius),
+            backward, numpy.full(2 * radius, -radius),
+        ))
+        inside = (xs >= 0) & (xs < width) & (ys >= 0) & (ys < height)
+        values, first = numpy.unique(labels[ys[inside], xs[inside]], return_index=True)
+        for index in numpy.argsort(first):
+            label = int(values[index])
+            if label not in seen:
+                seen.add(label)
+                yield label
+
+
+def _guided_regions(gray, expected, expected_radius):
+    """Grow spiral seeds to their complete bounded, not necessarily round footprint."""
+    background = float(numpy.median(gray))
+    peak = int(cv2.medianBlur(gray, 3).max())
+    contrast = peak - background
+    if contrast < 4:
+        logger.warning(
+            'Moon search has insufficient contrast: peak=%d background=%.1f contrast=%.1f; '
+            'check predicted position, clouds and short exposure',
+            peak, background, contrast,
+        )
+        return []
+    threshold = background + max(3, contrast * 0.1)
+    bright = (gray > threshold).astype(numpy.uint8)
+    # Bridge small cloud interruptions, not a predicted circular disk.
+    gap = max(1, math.ceil(expected_radius * 0.15))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * gap + 1, 2 * gap + 1))
+    connected = cv2.morphologyEx(
+        numpy.pad(bright, gap), cv2.MORPH_CLOSE, kernel,
+        borderType=cv2.BORDER_CONSTANT, borderValue=0,
+    )[gap:-gap, gap:-gap]
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(connected)
+    regions = []
+    for label in _spiral_labels(labels, expected):
+        x, y, width, height, _ = (int(value) for value in stats[label])
+        if x == 0 or y == 0 or x + width == gray.shape[1] or y + height == gray.shape[0]:
+            continue
+        if max(width, height) > expected_radius * 3.6 + 2:
+            continue
+        component = (labels[y:y + height, x:x + width] == label).astype(numpy.uint8)
+        observed = (component != 0) & (bright[y:y + height, x:x + width] != 0)
+        area = int(numpy.count_nonzero(observed))
+        if area < max(6, math.pi * expected_radius ** 2 * 0.08):
+            continue
+        if cv2.distanceTransform(observed.astype(numpy.uint8), cv2.DIST_L2, 5).max() <= 2:
+            continue
+        contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        contour = max(contours, key=cv2.contourArea)
+        (cx, cy), radius = cv2.minEnclosingCircle(contour)
+        if not 0.55 * expected_radius <= radius <= 1.8 * expected_radius:
+            continue
+        silhouette = numpy.zeros_like(component)
+        cv2.drawContours(silhouette, [contour], -1, 1, cv2.FILLED)
+        brightness = float(gray[y:y + height, x:x + width][observed].mean())
+        regions.append(((x, y, x + width, y + height), silhouette, area, brightness, (x + cx, y + cy), radius))
+    logger.info(
+        'Moon spiral search: prediction=(%.1f, %.1f) radius=%.1f window=%dx%d '
+        'peak=%d background=%.1f threshold=%.1f candidates=%d',
+        *expected, expected_radius, gray.shape[1], gray.shape[0], peak, background, threshold, len(regions),
+    )
+    return regions
+
+
 def _select_region(gray, expected=None, expected_radius=None):
-    regions = _bright_regions(gray, expected_radius)
+    guided = expected is not None and expected_radius is not None
+    regions = _guided_regions(gray, expected, expected_radius) if guided else _bright_regions(gray, expected_radius)
     if not regions:
         if int(gray.max()) - float(numpy.median(gray)) < 4:
             logger.warning('Moon may be too faint or prediction misaligned; check alignment before increasing manual EXPOSURE')
         else:
-            logger.warning('Moon composite skipped: no resolved circular lunar candidate (small source or non-lunar shape)')
+            logger.warning('Moon composite skipped: no complete resolved lunar footprint within the search bounds'
+                           if guided else 'Moon composite skipped: no resolved circular lunar candidate (small source or non-lunar shape)')
         return None
     if expected_radius is not None:
         regions = [region for region in regions if 0.55 * expected_radius <= region[5] <= 1.8 * expected_radius]
@@ -140,14 +225,15 @@ def _select_region(gray, expected=None, expected_radius=None):
         def distance(region):
             return math.hypot(region[4][0] - expected[0], region[4][1] - expected[1])
 
-        regions.sort(key=lambda region: (distance(region), -region[2] * region[3]))
+        if not guided:
+            regions.sort(key=lambda region: (distance(region), -region[2] * region[3]))
         best = regions[0]
         if any(
             abs(distance(region) - distance(best)) <= max(2, best[5] * 0.5)
             and region[2] >= best[2] * 0.1 and region[3] >= best[3] * 0.5
             for region in regions[1:]
         ):
-            logger.warning('Moon composite skipped: ambiguous nearby circular targets')
+            logger.warning('Moon composite skipped: ambiguous nearby lunar candidates')
             return None
         return best
     # Integrated brightness favors a resolved lunar disk over isolated hot pixels.

@@ -564,6 +564,77 @@ def test_hot_pixel_field_and_bright_crater_do_not_hide_lunar_extent():
     assert image[440, 640] == 230
 
 
+def test_spiral_visits_prediction_then_each_outward_ring_in_order():
+    labels = numpy.arange(1, 26, dtype=numpy.int32).reshape(5, 5)
+    order = list(moon._spiral_labels(labels, (2, 2)))
+    assert order[:9] == [13, 14, 19, 18, 17, 12, 7, 8, 9]
+    assert sorted(order) == list(range(1, 26))
+
+
+@pytest.mark.parametrize('layout', ['mono', 'rgb', 'bayer'])
+@pytest.mark.parametrize('shape', ['distorted', 'cloud', 'flare'])
+def test_guided_spiral_grows_displaced_irregular_moon_and_blends_whole_footprint(layout, shape):
+    sensor = numpy.full((240, 320), 3, numpy.uint8)
+    cv2.ellipse(sensor, (195, 135), (27, 15), 20, 0, 360, 150, -1)
+    if shape == 'cloud':
+        sensor[133:138] = 3
+    elif shape == 'flare':
+        cv2.line(sensor, (176, 128), (225, 142), 120, 3)
+    cv2.circle(sensor, (190, 130), 3, 80, -1)
+    # More than three brighter seeds must not exhaust a brightest-first budget.
+    for x in (130, 140, 150, 160):
+        cv2.circle(sensor, (x, 95), 2, 240, -1)
+    if layout == 'rgb':
+        sensor = numpy.stack((sensor, sensor // 2, sensor // 3))
+    original = sensor.copy()
+    roi = moon.find_moon(
+        sensor, bayer=layout == 'bayer', search=(110, 70, 240, 190),
+        expected=(160, 120), expected_radius=24,
+    )
+    assert roi is not None
+    x1, y1, x2, y2 = roi
+    assert 110 <= x1 < 168 and 70 <= y1 < 120
+    assert 223 < x2 <= 240 and 152 < y2 <= 190
+    assert all(value % 2 == 0 for value in roi)
+    patch = sensor[..., y1:y2, x1:x2]
+    if layout == 'rgb':
+        patch = patch.transpose(1, 2, 0)
+        image = numpy.full((240, 320, 3), 25, numpy.uint8)
+    else:
+        image = numpy.full((240, 320), 25, numpy.uint8)
+    assert moon.blend(image, patch, roi, expected=(160, 120), expected_radius=24)
+    gray = sensor.max(axis=0) if layout == 'rgb' else sensor
+    lunar = gray[110:157, 167:227] > 50
+    expected = sensor.transpose(1, 2, 0) if layout == 'rgb' else sensor
+    numpy.testing.assert_array_equal(image[110:157, 167:227][lunar], expected[110:157, 167:227][lunar])
+    numpy.testing.assert_array_equal(sensor, original)
+    assert numpy.all(image[95, 130] == 25)
+
+
+def test_guided_spiral_prefers_nearby_disc_over_brighter_distant_disc():
+    sensor = numpy.full((240, 320), 3, numpy.uint8)
+    cv2.circle(sensor, (155, 120), 12, 90, -1)
+    cv2.circle(sensor, (230, 120), 12, 220, -1)
+    roi = moon.find_moon(sensor, expected=(150, 120), expected_radius=12)
+    assert roi is not None
+    assert roi[0] < 155 < roi[2] < 230
+
+
+@pytest.mark.parametrize('scene', ['missing', 'point', 'edge', 'cloud', 'ambiguous'])
+def test_guided_spiral_rejects_unreliable_or_incomplete_footprints(scene):
+    sensor = numpy.full((160, 160), 3, numpy.uint8)
+    if scene == 'point':
+        cv2.circle(sensor, (80, 80), 2, 200, -1)
+    elif scene == 'edge':
+        cv2.circle(sensor, (2, 80), 15, 180, -1)
+    elif scene == 'cloud':
+        sensor[40:120, 20:140] = 100
+    elif scene == 'ambiguous':
+        cv2.circle(sensor, (60, 80), 12, 180, -1)
+        cv2.circle(sensor, (100, 80), 12, 170, -1)
+    assert moon.find_moon(sensor, expected=(80, 80), expected_radius=15) is None
+
+
 @pytest.mark.parametrize('layout', ['mono', 'rgb', 'bayer'])
 def test_large_sensor_preview_and_decoder_roi_remain_bounded(layout):
     sensor = numpy.full((3010, 4010), 2, numpy.uint8)

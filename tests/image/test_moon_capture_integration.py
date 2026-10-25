@@ -707,6 +707,8 @@ def test_failed_prediction_keeps_paired_image_without_unguided_fallback(runtime,
 @pytest.mark.parametrize('bits', [8, 12, 16])
 @pytest.mark.parametrize('color', [False, True])
 def test_moon_roi_reuses_current_sky_transfer_before_8bit_conversion(runtime, monkeypatch, mode, bits, color):
+    from indi_allsky import moon
+
     run_capture(runtime, monkeypatch, short_dtype=numpy.uint8 if bits == 8 else numpy.uint16)
     job = runtime.image_q.get(timeout=2)
     short_filename = Path(job['moon_composite']['filename'])
@@ -745,8 +747,11 @@ def test_moon_roi_reuses_current_sky_transfer_before_8bit_conversion(runtime, mo
         processor.convert_16bit_to_8bit()
         before = processor.image.copy()
         monkeypatch.setattr(operator, 'stretch', mock.Mock(side_effect=AssertionError('ROI must not refit stretch')))
-        processor.composite_moon(job['moon_composite'], i_ref)
-        numpy.testing.assert_array_equal(processor.image[40, 40], expected[40, 40])
+        with mock.patch.object(moon, 'blend', wraps=moon.blend) as blend:
+            processor.composite_moon(job['moon_composite'], i_ref)
+        x1, y1, x2, y2 = blend.call_args.args[2]
+        numpy.testing.assert_array_equal(blend.call_args.kwargs['display_patch'], expected[y1:y2, x1:x2])
+        assert numpy.all(processor.image[40, 40] > numpy.median(before[5:15, 5:15], axis=(0, 1)) + 4)
         assert numpy.any(expected[40, 40] != 180)
         numpy.testing.assert_array_equal(processor.image[:20], before[:20])
         numpy.testing.assert_array_equal(i_ref.hdulist[0].data, original_fits)
@@ -1019,9 +1024,9 @@ def test_capture_replaces_larger_footprint_with_same_scale_short_pixels(
         native_short = numpy.moveaxis(short, 0, -1) if color else short
         expected_patch = (native_short[y1:y2, x1:x2] // scale).astype(numpy.uint8)
         numpy.testing.assert_array_equal(call.args[1], expected_patch)
-        display = call.kwargs['display_patch']
-        expected_detail = expected_patch[40 - y1, 37 - x1] if display is None else display[40 - y1, 37 - x1]
-        numpy.testing.assert_array_equal(processor.image[40, 37], expected_detail)
+        numpy.testing.assert_array_equal(call.kwargs['detail_patch'], native_short[y1:y2, x1:x2])
+        assert numpy.all(processor.image[40, 45].astype(int) > processor.image[40, 37].astype(int) + 10)
+        assert numpy.all(processor.image[40, 37].astype(int) > processor.image[40, 57].astype(int) + 10)
         numpy.testing.assert_array_equal(processor.image[:y1], before[:y1])
         numpy.testing.assert_array_equal(processor.image[y2:], before[y2:])
         numpy.testing.assert_array_equal(processor.image[:, :x1], before[:, :x1])
@@ -1034,6 +1039,70 @@ def test_capture_replaces_larger_footprint_with_same_scale_short_pixels(
         i_ref.hdulist.close()
         Path(job['filename']).unlink(missing_ok=True)
         Path(job['moon_composite']['filename']).unlink()
+
+
+@pytest.mark.parametrize('clahe', [False, True])
+@pytest.mark.parametrize('color', [False, True])
+@pytest.mark.parametrize('bloom', [False, True])
+def test_native_lunar_detail_survives_real_shadow_cutoff_and_8bit_quantization(
+    runtime, monkeypatch, caplog, clahe, color, bloom,
+):
+    import cv2
+    from indi_allsky import moon
+
+    caplog.set_level('INFO', logger='indi_allsky')
+    short = numpy.full((80, 80), 64, numpy.uint16)
+    cv2.circle(short, (40, 40), 12, 4351, -1)
+    cv2.circle(short, (37, 40), 4, 4097, -1)
+    long = numpy.broadcast_to((80 + numpy.arange(80) // 4) * 256, (80, 80)).astype(numpy.uint16).copy()
+    cv2.circle(long, (40, 40), 22 if bloom else 12, 65500, -1)
+    if color:
+        short, long = numpy.stack([short] * 3), numpy.stack([long] * 3)
+    run_capture(runtime, monkeypatch, frame_data={'short': short, 'long': long})
+    job = runtime.image_q.get(timeout=2)
+    short_file, long_file = Path(job['moon_composite']['filename']), Path(job['filename'])
+    original_files = short_file.read_bytes(), long_file.read_bytes()
+    with fits.conf.set_temp('use_memmap', False):
+        i_ref = ingest_long(runtime, job)
+    processor = runtime.processor
+    try:
+        processor.config.update(CONTRAST_ENHANCE_16BIT=clahe, NIGHT_CONTRAST_ENHANCE=clahe)
+        processor.config['IMAGE_STRETCH'] = {'MOONMODE': True, 'MODE2_SHADOWS': 0.2}
+        processor._stretch_o = stretch_classes.mode2_mtf(processor.config, mask={1: None})
+        processor.max_bit_depth = 16
+        processor.image = processor._debayer(i_ref)
+        original = i_ref.hdulist[0].data.copy()
+        processor.stretch(moon_composite=True)
+        lut = processor._moon_native_lut if clahe else processor._moon_display_lut
+        assert lut[4351] == lut[4097] == 0
+        if clahe:
+            processor.contrast_clahe_16bit(moon_composite=True)
+        processor.convert_16bit_to_8bit()
+        before = processor.image.copy()
+        with mock.patch.object(moon, 'blend', wraps=moon.blend) as blend:
+            processor.composite_moon(job['moon_composite'], i_ref)
+        assert blend.call_count == 1
+        call = blend.call_args
+        x1, y1, x2, y2 = call.args[2]
+        assert numpy.all(call.args[1][40 - y1, 45 - x1] == 16)
+        assert numpy.all(call.args[1][40 - y1, 37 - x1] == 16)
+        assert numpy.all(call.kwargs['detail_patch'][40 - y1, 45 - x1] == 4351)
+        assert numpy.all(call.kwargs['detail_patch'][40 - y1, 37 - x1] == 4097)
+        assert numpy.all(processor.image[40, 45].astype(int) >= processor.image[40, 37].astype(int) + 8)
+        assert numpy.all(processor.image[40, 37].astype(int) >= processor.image[40, 57].astype(int) + 20)
+        assert numpy.all(processor.image[40, 55] < 180)
+        numpy.testing.assert_array_equal(processor.image[:y1], before[:y1])
+        numpy.testing.assert_array_equal(processor.image[y2:], before[y2:])
+        numpy.testing.assert_array_equal(processor.image[:, :x1], before[:, :x1])
+        numpy.testing.assert_array_equal(processor.image[:, x2:], before[:, x2:])
+        numpy.testing.assert_array_equal(i_ref.hdulist[0].data, original)
+        assert (short_file.read_bytes(), long_file.read_bytes()) == original_files
+        assert 'using native short-frame detail' in caplog.text
+        assert 'applied=True' in caplog.text
+    finally:
+        i_ref.hdulist.close()
+        short_file.unlink()
+        long_file.unlink()
 
 
 @pytest.mark.parametrize('radius,applied', [(22, True), (40, False)])
@@ -1069,7 +1138,7 @@ def test_long_footprint_expands_search_only_once(runtime, monkeypatch, caplog, r
         if applied:
             assert 'applied=True' in caplog.text
             assert processor.image[40, 40] == 180
-            assert processor.image[40, 59] == 25
+            assert processor.image[40, 57] == 25
         else:
             assert 'bounded search edge' in caplog.text
             numpy.testing.assert_array_equal(processor.image, before)
@@ -1137,7 +1206,10 @@ def test_capture_stretch_clahe_and_moon_transfer_agree(runtime, monkeypatch, mod
         actual_patch = blend.call_args.kwargs['display_patch']
         assert numpy.abs(actual_patch.astype(int) - expected.astype(int)).max() <= 1
         expected_image = sky.copy()
-        assert moon.blend(expected_image, blend.call_args.args[1], roi, display_patch=expected)
+        assert moon.blend(
+            expected_image, blend.call_args.args[1], roi, display_patch=expected,
+            detail_patch=linear_patch, preserve_transfer=split,
+        )
         assert numpy.abs(processor.image.astype(int) - expected_image.astype(int)).max() <= 1
         numpy.testing.assert_array_equal(processor.image[:, :20], sky[:, :20])
         numpy.testing.assert_array_equal(i_ref.hdulist[0].data, original_fits)

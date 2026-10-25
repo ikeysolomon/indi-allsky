@@ -84,7 +84,10 @@ def test_larger_long_footprint_does_not_resize_short_moon(color, phase, long_pea
         long, patch, larger, expected=(center, center), expected_radius=radius,
         replacement_mask=mask,
     )
-    numpy.testing.assert_array_equal(long[illuminated], short[illuminated])
+    sky = before[0, 0].astype(numpy.float32)
+    short_sky = short[0, 0].astype(numpy.float32)
+    expected = sky + (short[illuminated].astype(numpy.float32) - short_sky) / 177 * (180 - sky)
+    numpy.testing.assert_array_equal(long[illuminated], numpy.rint(expected).astype(numpy.uint8))
     sample = center + int(radius * 1.75)
     numpy.testing.assert_array_equal(long[center, sample], before[0, 0])
     numpy.testing.assert_array_equal(long[:y1], before[:y1])
@@ -102,6 +105,32 @@ def test_unbounded_bloom_fails_instead_of_replacing_the_sky():
         moon.replacement_region(numpy.full_like(short, 255), short, roi, bounded=True)
 
 
+@pytest.mark.parametrize('display_value', [0, 255])
+@pytest.mark.parametrize('color', [False, True])
+def test_bloom_background_match_recovers_crushed_detail_without_a_flat_plateau(display_value, color):
+    yy, xx = numpy.indices((128, 128))
+    background = (100 + xx * 0.5 + yy * 0.2).astype(numpy.uint8)
+    long = background.copy()
+    cv2.circle(long, (64, 64), 30, 255, -1)
+    short = numpy.full_like(long, 3)
+    cv2.circle(short, (64, 64), 10, 180, -1)
+    cv2.circle(short, (60, 64), 3, 90, -1)
+    roi, mask = moon.replacement_region(long, short, moon.find_moon(short), bounded=True)
+    x1, y1, x2, y2 = roi
+    if color:
+        short = cv2.cvtColor(short, cv2.COLOR_GRAY2BGR)
+        long = cv2.cvtColor(long, cv2.COLOR_GRAY2BGR)
+    patch = short[y1:y2, x1:x2]
+    assert moon.blend(
+        long, patch, roi, display_patch=numpy.full_like(patch, display_value), replacement_mask=mask,
+    )
+    assert numpy.all(long[64, 68].astype(int) > long[64, 60].astype(int) + 10)
+    assert numpy.all(long[64, 60].astype(int) > long[64, 46].astype(int) + 10)
+    numpy.testing.assert_allclose(long[64, 46], background[64, 46], atol=1)
+    numpy.testing.assert_allclose(long[64, 82], background[64, 82], atol=1)
+    assert numpy.all(long[64, 82].astype(int) - long[64, 46] >= 16)
+
+
 def test_expanded_mask_does_not_hide_short_exposure_clipping():
     short = lunar_patch()
     long = numpy.full_like(short, 25)
@@ -112,6 +141,77 @@ def test_expanded_mask_does_not_hide_short_exposure_clipping():
     x1, y1, x2, y2 = roi
     assert not moon.blend(long, short[y1:y2, x1:x2], roi, replacement_mask=mask)
     numpy.testing.assert_array_equal(long, before)
+
+
+def test_usable_sky_transfer_is_preserved_without_bloom():
+    patch = lunar_patch()
+    display = numpy.where(patch > 100, 210, numpy.where(patch > 50, 160, 25)).astype(numpy.uint8)
+    image = numpy.full_like(patch, 25)
+    detail = patch.astype(numpy.uint16) * 256
+    assert moon.blend(image, patch, (0, 0, 80, 80), display_patch=display, detail_patch=detail)
+    assert image[40, 45] == 210
+    assert image[40, 37] == 160
+    numpy.testing.assert_array_equal(detail, patch.astype(numpy.uint16) * 256)
+
+
+def test_bloom_feather_never_reintroduces_the_saturated_footprint(monkeypatch):
+    side, center, radius = 512, 256, 180
+    short = numpy.full((side, side), 3, numpy.uint8)
+    cv2.circle(short, (center, center), 12, 180, -1)
+    image = numpy.full_like(short, 25)
+    cv2.circle(image, (center, center), radius, 255, -1)
+    roi, mask = moon.replacement_region(image, short, moon.find_moon(short), bounded=True)
+    x1, y1, x2, y2 = roi
+    alphas = []
+    blur = cv2.GaussianBlur
+
+    def record_blur(*args, **kwargs):
+        result = blur(*args, **kwargs)
+        alphas.append(result.copy())
+        return result
+
+    monkeypatch.setattr(cv2, 'GaussianBlur', record_blur)
+    assert moon.blend(image, short[y1:y2, x1:x2], roi, replacement_mask=mask)
+    numpy.testing.assert_allclose(alphas[-1][mask != 0], 1, atol=1e-6)
+    assert numpy.any((alphas[-1] > 0) & (alphas[-1] < 1) & (mask == 0))
+    assert alphas[-1][center - y1, center + radius + 8 - x1] > 0
+    assert image[center, center + radius] == 25
+    assert image[center, center + radius - 8] == 25
+    assert image[center, center] == 180
+
+
+@pytest.mark.parametrize('color', [False, True])
+def test_spatial_sky_fit_rejects_bright_boundary_outliers(color):
+    yy, xx = numpy.indices((80, 80), dtype=numpy.float32)
+    expected = 30 + xx * 0.2 + yy * 0.1
+    if color:
+        expected = numpy.stack((expected, 60 + xx * 0.1 - yy * 0.1, 90 - xx * 0.2 + yy * 0.05), axis=2)
+    target = expected.astype(numpy.uint8)
+    mask = numpy.zeros((80, 80), numpy.uint8)
+    cv2.circle(mask, (40, 40), 22, 1, -1)
+    ring = cv2.dilate(mask, numpy.ones((7, 7), numpy.uint8)) != mask
+    rows, columns = numpy.nonzero(ring)
+    target[rows[::17], columns[::17]] = 255
+    numpy.testing.assert_allclose(moon._sky_background(target, ring), expected, atol=1)
+
+
+@pytest.mark.parametrize('fault', ['shape', 'dtype', 'no-contrast', 'white-sky'])
+def test_invalid_detail_recovery_is_explicit_and_does_not_change_image(fault):
+    patch = lunar_patch()
+    detail = patch.astype(numpy.uint16) * 256
+    image = numpy.full_like(patch, 25)
+    if fault == 'shape':
+        detail = detail[:-1]
+    elif fault == 'dtype':
+        detail = detail.astype(numpy.float32)
+    elif fault == 'no-contrast':
+        detail[:] = 0
+    else:
+        image[:] = 255
+    before = image.copy()
+    with pytest.raises(ValueError, match='Native Moon detail|no usable contrast|too bright'):
+        moon.blend(image, patch, (0, 0, 80, 80), display_patch=numpy.zeros_like(patch), detail_patch=detail)
+    numpy.testing.assert_array_equal(image, before)
 
 
 @pytest.mark.parametrize('invalid', ['shape', 'dtype', 'range', 'edge'])
@@ -703,6 +803,7 @@ def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits, sensor_s
     color = mode in ('rgb', 'bayer')
     shape = (sensor_size, sensor_size, 3) if color else (sensor_size, sensor_size)
     processor.image = numpy.full(shape, 255, numpy.uint8)
+    processor.image[20:100, 20:100] = 25
     open_fits = fits.open
     opened = []
     read_sizes = []

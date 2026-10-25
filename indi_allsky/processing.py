@@ -1957,6 +1957,7 @@ class ImageProcessor(object):
                     image_bayerpat=i_ref.image_bayerpat,
                 )
                 patch = self._debayer(patch_ref)
+                detail_patch = patch
             display_patch = None
             clahe_active = (
                 self.config.get('CONTRAST_ENHANCE_16BIT')
@@ -1991,6 +1992,8 @@ class ImageProcessor(object):
                 self.image, patch, roi,
                 display_patch=display_patch, expected=expected, expected_radius=expected_radius,
                 replacement_mask=replacement_mask,
+                detail_patch=detail_patch,
+                preserve_transfer=bool(self.config.get('IMAGE_STRETCH', {}).get('SPLIT')),
             )
         except (OSError, ValueError) as e:
             logger.warning('Moon composite skipped: %s', e)

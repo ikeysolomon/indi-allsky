@@ -87,18 +87,34 @@ footprint that still cannot be enclosed safely causes an explicit skip.
 
 Only this final crop is debayered. Its lunar silhouette is refined at
 native resolution with the same automatic shape checks, then clipping checks
-and feathering are applied. Surrounding short-frame background is offset to match
-the long-frame boundary ring, leaving pixels inside the measured lunar disk
-unchanged. The linear short Moon still controls shape, size and clipping checks;
+and feathering are applied. A robust spatial sky-illumination fit from the
+long-frame boundary ring matches the replacement background without flattening
+its gradient. Lunar intensities are matched coherently to that background.
+If the sky's display transfer crushes or clips otherwise valid lunar contrast,
+the compositor instead maps the native short-frame detail into the available
+display headroom, before losing it to 8-bit quantization. This changes display
+brightness, not physical size or surface coordinates, and cannot reconstruct
+clipped native detail or the actual clouds hidden by the blown-out footprint.
+Diagnostic split previews deliberately retain their original transfer, linear
+side and divider rather than applying this display recovery.
+The linear short Moon still controls shape, size and clipping checks;
 the oversized long footprint never defines the Moon's physical diameter.
 `INFO` logging reports expanded footprint dimensions and that the Moon was not
-resized; `DEBUG` logging records the initially detected sensor ROI.
+resized, the measured lunar radius, native/display detail ranges when recovery
+is needed, and the footprint/limb feather widths. `DEBUG` logging records the
+initially detected sensor ROI.
 Guided detection permits resolved crescents with a circular outer limb and a
 matching predicted radius; it does not require a full illuminated disk.
 Mask dilation scales at 2% of detected radius, clamped to 1-3 pixels. Gaussian
 feather radius scales at 4%, clamped to 1-4 pixels (3x3 to 9x9 kernels).
 Edge padding accounts for both. Interior detail is preserved, while the limb
 transition stays bounded rather than softening with an arbitrary fixed kernel.
+The larger long-exposure footprint has its own outer dilation and feather, each
+at 7.5% of its equivalent radius, clamped to 2-16 pixels. The detected footprint
+is fully replaced; the fade is outside it so saturated pixels are not blended
+back into its edge. This does not soften or enlarge the
+short Moon's limb. Insufficient sky samples or a nearly white surrounding sky
+cause a logged skip rather than an untrustworthy replacement.
 The enable switch remains opt-in; there are no location, size, threshold, or
 opacity controls.
 
@@ -244,12 +260,14 @@ With stretching disabled, the input to any configured CLAHE remains linear.
 Split-screen preview uses the matching transfer on each side and preserves the
 central divider.
 
-Using the same transfer fixes the linear-versus-stretched processing mismatch;
-it does **not** guarantee equal brightness from two different exposures or a
-natural boundary. CLAHE uses the surrounding sky tiles, not an independent fit
-to the short ROI. Denoising and dark calibration are not replayed on the short
-ROI. Real pairs must still be inspected for residual discontinuities;
-no independent auto-stretch or automatic brightness matching is assumed.
+Using the same transfer avoids a linear-versus-stretched mismatch when that
+transfer preserves usable lunar contrast. It is not forced onto the final Moon
+when it crushes valid short-frame detail: the display recovery described above
+uses the native short pixels and local sky headroom instead. Larger footprints
+also receive spatial background matching. CLAHE still uses surrounding sky tiles,
+not independently fitted CLAHE parameters for the short ROI. Denoising and dark
+calibration are not replayed on the short ROI. Real pairs must still be inspected
+for residual discontinuities and cloud-related artifacts.
 
 ## Capture logs
 
@@ -343,7 +361,8 @@ path needs additional ROI processing. Earlier blend-only benchmarks do not
 measure this path. There is no
 inter-frame registration or lunar-motion compensation; long exposures, vibration,
 cloud motion, and a low-resolution lunar disk can make the result imperfect.
-The short exposure is not dark-calibrated or independently auto-stretched. It cannot
+The short exposure is not dark-calibrated; local display recovery can remap its
+brightness when the sky transfer loses contrast, but cannot
 invent surface detail that the lens/sensor does not resolve. A cloud or terrestrial
 light with a circular outline can still resemble the moon: brightness and shape
 are not astronomical identification. Inspect real results before enabling
@@ -396,7 +415,7 @@ Invalid/nonfinite/nonpositive metadata for either bracket phase is also exercise
 through timeout, file cleanup, reconnection and two consecutive ordinary captures.
 These cases do not run the full ImageWorker rendering/output orchestration.
 Transfer tests cover all four stretch variants, mono/RGB and 8/12/16-bit data,
-verify exact agreement with the sky transfer, preserve the linear mask/clipping
+verify exact agreement before local display recovery, preserve the linear mask/clipping
 checks, and ensure skipped stretches cannot reuse a previous frame's transfer.
 CLAHE integration tests verify short/long capture requests, all stretch variants
 and split previews, mono/RGB and 8/12/16-bit data, applied replacement, cleanup,
@@ -404,7 +423,12 @@ and unchanged sky/original FITS. Aligned tile replay is compared with a full-sen
 reference, including image edges, reflected short pixels, non-divisible image
 sizes and different tile grids. Small native colour-conversion rounding
 differences are tolerated; full-pipeline comparisons allow at most one display
-pixel value. These tests do not establish real-camera lunar detail or Pi cadence.
+pixel value. Additional regressions cover black/white collapsed transfers,
+spatial sky gradients, bright boundary outliers, fully replaced footprint edges,
+and native lunar texture within a single 8-bit quantization bin. The latter passes
+through actual capture, Mode 2 shadow clipping and optional native CLAHE, with
+mono/RGB and larger/no-larger footprints; original FITS bytes and external sky
+remain unchanged. These tests do not establish real-camera lunar detail or Pi cadence.
 A timestamp characterization test replays the same old short BLOB into a later
 bracket: without `DATE-OBS` it is accepted, while an accurately reported old
 timestamp is rejected. This intentionally demonstrates the identification limit,

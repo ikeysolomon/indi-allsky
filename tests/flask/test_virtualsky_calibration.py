@@ -125,9 +125,12 @@ def config_store(endpoint):
     app, view, namespace, saved = endpoint
     path = Path(__file__).resolve().parents[2] / 'indi_allsky/config.py'
     tree = ast.parse(path.read_text(encoding='utf-8'))
-    tree.body = [n for n in tree.body if isinstance(n, ast.ClassDef)
-                 and n.name in ('IndiAllSkyConfigBase', 'IndiAllSkyConfig')]
-    scope = dict(OrderedDict=OrderedDict, Path=Path, app=app, datetime=datetime,
+    tree.body = [n for n in tree.body if (
+        isinstance(n, ast.ClassDef) and n.name in ('IndiAllSkyConfigBase', 'IndiAllSkyConfig')
+    ) or (
+        isinstance(n, ast.ImportFrom) and n.level == 1 and n.module == 'sensor_slots'
+    )]
+    scope = dict(__package__='indi_allsky', OrderedDict=OrderedDict, Path=Path, app=app, datetime=datetime,
                  timezone=timezone, ConfigSaveException=ConfigSaveException,
                  IndiAllSkyDbUserTable=MagicMock())
     exec(compile(tree, str(path), 'exec'), scope)

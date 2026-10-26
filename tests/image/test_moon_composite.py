@@ -195,6 +195,46 @@ def test_spatial_sky_fit_rejects_bright_boundary_outliers(color):
     numpy.testing.assert_allclose(moon._sky_background(target, ring), expected, atol=1)
 
 
+@pytest.mark.parametrize('color', [False, True])
+def test_damage_background_ignores_short_frame_sky_noise_and_gradient(color):
+    yy, xx = numpy.indices((160, 160))
+    sky = (50 + xx * 0.25 + yy * 0.15).astype(numpy.uint8)
+    image = sky.copy()
+    cv2.circle(image, (80, 80), 36, 255, -1)
+    short = (3 + xx // 16 + numpy.random.default_rng(8).integers(0, 4, sky.shape)).astype(numpy.uint8)
+    cv2.circle(short, (80, 80), 12, 180, -1)
+    cv2.circle(short, (77, 80), 4, 90, -1)
+    mask = numpy.zeros_like(short)
+    cv2.circle(mask, (80, 80), 36, 1, -1)
+    if color:
+        short = numpy.stack((short, short // 2, short // 3), axis=2)
+        sky = numpy.stack((sky, sky + 10, sky + 20), axis=2)
+        image = sky.copy()
+        image[mask != 0] = 255
+    before = image.copy()
+    assert moon.blend(
+        image, short, (0, 0, 160, 160), replacement_mask=mask,
+        expected=(80, 80), expected_radius=12,
+    )
+    annulus = (mask != 0) & ((xx - 80) ** 2 + (yy - 80) ** 2 > 20 ** 2)
+    numpy.testing.assert_allclose(image[annulus], sky[annulus], atol=1)
+    numpy.testing.assert_array_equal(image[:20], before[:20])
+    assert numpy.all(image[80, 86] > image[80, 77])
+
+
+def test_textured_cloud_boundary_is_rejected_without_changing_image():
+    image = numpy.random.default_rng(17).integers(30, 160, (160, 160), dtype=numpy.uint8)
+    mask = numpy.zeros_like(image)
+    cv2.circle(mask, (80, 80), 32, 1, -1)
+    image[mask != 0] = 255
+    short = numpy.full_like(image, 3)
+    cv2.circle(short, (80, 80), 12, 180, -1)
+    before = image.copy()
+    with pytest.raises(ValueError, match='sky.*match|sky.*fit|sky.*samples'):
+        moon.blend(image, short, (0, 0, 160, 160), replacement_mask=mask)
+    numpy.testing.assert_array_equal(image, before)
+
+
 @pytest.mark.parametrize('fault', ['shape', 'dtype', 'no-contrast', 'white-sky'])
 def test_invalid_detail_recovery_is_explicit_and_does_not_change_image(fault):
     patch = lunar_patch()
@@ -690,12 +730,12 @@ def capture_worker():
     return worker
 
 
-def test_capture_requests_short_frame_at_same_gain_and_binning():
+def test_capture_requests_long_frame_before_short_at_same_gain_and_binning():
     worker = capture_worker()
     worker.shoot(15.0, 75, 1, sync=False)
     worker.indiclient.beginMoonComposite.assert_called_once_with(15.0, 75, 1)
     worker.indiclient.setCcdExposure.assert_called_once_with(
-        0.001, 75, 1, sync=False, timeout=None, sqm_exposure=False,
+        15.0, 75, 1, sync=False, timeout=None, sqm_exposure=False,
     )
 
     tree = ast.parse((ROOT / 'indi_allsky' / 'capture.py').read_text(encoding='utf-8'))
@@ -713,10 +753,10 @@ def test_capture_requests_short_frame_at_same_gain_and_binning():
         ),
     ], type_ignores=[])
     worker._shutdown = False
-    scope = {'self': worker, 'now_time': 123.0}
+    scope = {'self': worker, 'now_time': 123.0, 'frame_start_time': 100.0}
     exec(compile(ast.fix_missing_locations(continuation), 'capture.py', 'exec'), scope)
     worker.indiclient.continueMoonComposite.assert_called_once_with()
-    assert scope['frame_start_time'] == 123.0
+    assert scope['frame_start_time'] == 100.0
     assert scope['camera_ready'] is False
 
 
@@ -747,11 +787,12 @@ def indi_client():
         '__package__': 'indi_allsky.camera',
     })
     client = cls()
-    client._moon_capture = moon.MoonCapture(1, (15.0, 75, 1), phase='short', status='waiting')
+    client._moon_capture = moon.MoonCapture(1, (15.0, 75, 1), phase='long', status='waiting')
     client._moon_composite_lock = RLock()
     client.config = {'MOON_COMPOSITE': {'ENABLE': True}}
     client.exposureStartTime = time.time()
-    client.exposure = 0.001
+    client.exposure = 15.0
+    client._expUtils = SimpleNamespace(EXPOSURE_CURRENT=15.0)
     client.gain = 75
     client.binning = 1
     client.sqm_exposure = False
@@ -767,25 +808,25 @@ def indi_client():
 def test_pairing_waits_for_blobs_and_queues_one_job():
     client = indi_client()
     stream = io.BytesIO()
-    fits.PrimaryHDU(lunar_patch(), header=fits.Header({'EXPTIME': 0.001})).writeto(stream)
+    fits.PrimaryHDU(lunar_patch(), header=fits.Header({'EXPTIME': 15.0})).writeto(stream)
     blob = SimpleNamespace(getblobdata=stream.getvalue)
     assert client.getCcdExposureStatus()[0] is False
     client.processBlob(blob)
-    short = client._moon_capture.short_frame
+    long = client._moon_capture.long_frame
     try:
         assert client.image_q.empty()
         assert client.getCcdExposureStatus()[0] is True
-        client._moon_capture.phase = 'long'
-        client.exposure = 15.0
+        client._moon_capture.phase = 'short'
+        client.exposure = 0.001
         client._moon_capture.status = 'waiting'
         assert client.getCcdExposureStatus()[0] is False
         stream = io.BytesIO()
-        fits.PrimaryHDU(lunar_patch(), header=fits.Header({'EXPTIME': 15.0})).writeto(stream)
+        fits.PrimaryHDU(lunar_patch(), header=fits.Header({'EXPTIME': 0.001})).writeto(stream)
         blob = SimpleNamespace(getblobdata=stream.getvalue)
         client.processBlob(blob)
         job = client.image_q.get_nowait()
         try:
-            assert job['moon_composite'] == short
+            assert job['filename'] == long['filename']
             assert job['exposure'] == 15.0
             assert job['moon_composite']['exposure'] == 0.001
             assert client.getCcdExposureStatus()[0] is True
@@ -793,8 +834,9 @@ def test_pairing_waits_for_blobs_and_queues_one_job():
             assert client._moon_capture.status == 'complete'
         finally:
             Path(job['filename']).unlink()
+            Path(job['moon_composite']['filename']).unlink()
     finally:
-        Path(short['filename']).unlink()
+        Path(long['filename']).unlink(missing_ok=True)
 
 
 def test_first_bracket_cannot_overtake_a_previous_normal_blob():
@@ -868,8 +910,9 @@ def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits, sensor_s
     long_header['EXPTIME'] = 15.0
     i_ref = SimpleNamespace(
         gain=75, binning=1, camera_id=7, exposure=15.0,
-        hdulist=[SimpleNamespace(data=numpy.zeros_like(short), header=long_header)],
+        hdulist=[SimpleNamespace(data=short.copy(), header=long_header)],
         image_bayerpat=header.get('BAYERPAT'),
+        exp_date=datetime.now(), exp_elapsed=15.0,
     )
     color = mode in ('rgb', 'bayer')
     shape = (sensor_size, sensor_size, 3) if color else (sensor_size, sensor_size)
@@ -911,7 +954,7 @@ def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits, sensor_s
         }, i_ref, guide=guide)
     assert numpy.all(processor.image[60, 57] == 90)
     assert numpy.all(processor.image[0, 0] == 255)
-    assert not numpy.any(i_ref.hdulist[0].data)
+    numpy.testing.assert_array_equal(i_ref.hdulist[0].data, short)
     expected_bytes = 80 * 80 * numpy.dtype(dtype).itemsize * (3 if mode == 'rgb' else 1) if guided else short.nbytes
     assert sum(read_sizes) == expected_bytes
     assert len(decoded_shapes) == 1

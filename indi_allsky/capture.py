@@ -655,7 +655,6 @@ class CaptureWorker(Process):
                             not self._shutdown and self.config.get('CAMERA_INTERFACE') == 'indi'
                             and self.indiclient.continueMoonComposite()
                         ):
-                            frame_start_time = now_time
                             camera_ready = False
                             continue
 
@@ -2351,7 +2350,6 @@ class CaptureWorker(Process):
             and exposure > moon.get('EXPOSURE', 0.001)
         ):
             self.indiclient.beginMoonComposite(exposure, gain, binning)
-            exposure = moon.get('EXPOSURE', 0.001)
 
         self.indiclient.setCcdExposure(exposure, gain, binning, sync=sync, timeout=timeout, sqm_exposure=sqm_exposure)
 

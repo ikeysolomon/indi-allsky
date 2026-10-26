@@ -1869,7 +1869,7 @@ class ImageProcessor(object):
         ):
             self._moon_clahe_source = None
             return
-        from .moon import blend, find_moon, replacement_region, MoonFootprintEdge, reported_exposure, exposure_matches
+        from .moon import blend, find_moon, find_footprint, reported_exposure, exposure_matches
         from astropy.io import fits
         from types import SimpleNamespace
 
@@ -1898,17 +1898,49 @@ class ImageProcessor(object):
                 if not exposure_matches(reported_exposure(hdu.header), frame['exposure']):
                     raise ValueError('short FITS EXPTIME/EXPOSURE is missing or differs from the request; check driver metadata')
                 expected = expected_radius = None
+                motion = numpy.zeros(2)
                 for attempt in range(2 if guide is not None else 1):
                     offset_x = offset_y = 0
                     if guide is not None:
+                        long_frame = {
+                            'exposure': i_ref.exposure, 'exp_time': i_ref.exp_date.timestamp(),
+                            'exp_elapsed': i_ref.exp_elapsed,
+                        }
                         offset_x, offset_y, right, bottom = guide.search_region(
-                            frame, i_ref, hdu.header,
+                            long_frame, i_ref, long_header,
                             self.position_av[constants.POSITION_LATITUDE],
                             self.position_av[constants.POSITION_LONGITUDE],
                             self.position_av[constants.POSITION_ELEVATION],
                             expanded=bool(attempt),
                         )
                         expected, expected_radius = guide.expected_position, guide.expected_radius
+                    long_sensor = i_ref.hdulist[0].data
+                    if guide is not None:
+                        long_sensor = long_sensor[..., offset_y:bottom, offset_x:right]
+                    if int(long_header['BITPIX']) != 8:
+                        long_sensor = numpy.right_shift(long_sensor, self.max_bit_depth - 8).astype(numpy.uint8)
+                    local_expected = None if expected is None else (expected[0] - offset_x, expected[1] - offset_y)
+                    try:
+                        roi, replacement_mask = find_footprint(long_sensor, local_expected, expected_radius)
+                    except ValueError as e:
+                        if guide is None or attempt:
+                            raise
+                        logger.info('Long Moon footprint not enclosed (%s); expanding search once to configured maximum margin', e)
+                        continue
+                    if guide is not None:
+                        long_prediction = numpy.array(expected)
+                        guide.search_region(
+                            frame, i_ref, hdu.header,
+                            self.position_av[constants.POSITION_LATITUDE],
+                            self.position_av[constants.POSITION_LONGITUDE],
+                            self.position_av[constants.POSITION_ELEVATION],
+                            expanded=bool(attempt),
+                        )
+                        motion = numpy.array(guide.expected_position) - long_prediction
+                        if numpy.linalg.norm(motion) > expected_radius:
+                            raise ValueError('Moon moved too far between exposures for a reliable local replacement')
+                        my, mx = numpy.nonzero(replacement_mask)
+                        expected = (offset_x + roi[0] + float(mx.mean()), offset_y + roi[1] + float(my.mean()))
                         if len(hdu.shape) == 2:
                             sensor = hdu.section[offset_y:bottom, offset_x:right]
                         else:
@@ -1919,29 +1951,18 @@ class ImageProcessor(object):
                         detection = sensor
                     else:
                         detection = numpy.right_shift(sensor, self.max_bit_depth - 8).astype(numpy.uint8)
-                    local_expected = None if expected is None else (expected[0] - offset_x, expected[1] - offset_y)
-                    roi = find_moon(
+                    local_expected = None if expected is None else (
+                        expected[0] - offset_x + motion[0], expected[1] - offset_y + motion[1],
+                    )
+                    lunar_roi = find_moon(
                         detection, bayer=bool(i_ref.image_bayerpat),
+                        search=roi,
                         expected=local_expected, expected_radius=expected_radius,
                     )
-                    if roi is not None:
-                        long_sensor = i_ref.hdulist[0].data
-                        if guide is not None:
-                            long_sensor = long_sensor[..., offset_y:bottom, offset_x:right]
-                        if int(long_header['BITPIX']) != 8:
-                            long_sensor = numpy.right_shift(long_sensor, self.max_bit_depth - 8).astype(numpy.uint8)
-                        try:
-                            roi, replacement_mask = replacement_region(
-                                long_sensor, detection, roi, bounded=guide is not None,
-                            )
-                        except MoonFootprintEdge:
-                            if guide is not None and not attempt:
-                                logger.info('Bright Moon footprint exceeds prediction window; expanding search once to configured maximum margin')
-                                continue
-                            raise
-                        break
-                    if guide is not None and not attempt:
-                        logger.info('Moon not identified near prediction; expanding search once to configured maximum margin')
+                    if lunar_roi is None:
+                        logger.warning('Moon composite skipped: no usable short-frame lunar detail inside the long footprint')
+                        return
+                    break
                 else:
                     logger.warning('Moon composite skipped: bounded search found no reliable lunar candidate')
                     return
@@ -1956,6 +1977,22 @@ class ImageProcessor(object):
                     image_bayerpat=i_ref.image_bayerpat,
                 )
                 patch = self._debayer(patch_ref)
+                clipping_mask = None
+                if numpy.any(numpy.abs(motion) > 0.000001):
+                    transform = numpy.array([[1, 0, -motion[0]], [0, 1, -motion[1]]], dtype=numpy.float32)
+                    native_peak = patch.max(axis=2) if patch.ndim == 3 else patch
+                    clip_level = 250 if patch_ref.image_bitpix == 8 else 250 * 2 ** (self.max_bit_depth - 8)
+                    clipping_mask = cv2.warpAffine(
+                        (native_peak >= clip_level).astype(numpy.uint8), transform,
+                        (patch.shape[1], patch.shape[0]), flags=cv2.INTER_NEAREST,
+                        borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+                    )
+                    patch = cv2.warpAffine(
+                        patch, transform,
+                        (patch.shape[1], patch.shape[0]), flags=cv2.INTER_LINEAR,
+                        borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+                    )
+                    logger.info('Moon short detail registered to long midpoint: shift=(%.2f, %.2f)px', -motion[0], -motion[1])
                 detail_patch = patch
             display_patch = None
             clahe_active = (
@@ -1993,6 +2030,7 @@ class ImageProcessor(object):
                 replacement_mask=replacement_mask,
                 detail_patch=detail_patch,
                 preserve_transfer=bool(self.config.get('IMAGE_STRETCH', {}).get('SPLIT')),
+                clipping_mask=clipping_mask,
             )
         except (OSError, ValueError) as e:
             logger.warning('Moon composite skipped: %s', e)

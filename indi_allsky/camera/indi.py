@@ -504,19 +504,23 @@ class IndiClient(PyIndi.BaseClient):
             jobdata['moon_composite_id'] = capture.id
             jobdata['moon_composite_verified'] = True
 
-        if bracket and capture.phase == 'short':
-            capture.short_frame = jobdata
+        if bracket and capture.phase == 'long':
+            capture.long_frame = jobdata
             logger.info(
-                'Moon bracket %d short received: exposure=%0.6fs elapsed=%0.4fs gain=%0.3f binning=%d',
+                'Moon bracket %d long received: exposure=%0.6fs elapsed=%0.4fs gain=%0.3f binning=%d',
                 capture.id, self.exposure, exposure_elapsed_s, self.gain, self.binning,
             )
             capture.status = 'received'
             return
-        if bracket and capture.short_frame is not None:
-            jobdata['moon_composite'] = capture.short_frame
+        if bracket:
+            if capture.long_frame is None:
+                f_tmpfile_p.unlink(missing_ok=True)
+                raise CameraException('Moon short frame has no owned long exposure')
+            capture.short_frame = jobdata
+            jobdata = dict(capture.long_frame, moon_composite=capture.short_frame)
             logger.info(
                 'Moon bracket %d queued: short=%0.6fs long=%0.6fs long_elapsed=%0.4fs',
-                capture.id, capture.short_frame['exposure'], self.exposure, exposure_elapsed_s,
+                capture.id, capture.short_frame['exposure'], jobdata['exposure'], jobdata['exp_elapsed'],
             )
 
 
@@ -538,11 +542,16 @@ class IndiClient(PyIndi.BaseClient):
             self.image_q.put(jobdata)
         except (OSError, ValueError) as e:
             f_tmpfile_p.unlink(missing_ok=True)
+            if bracket:
+                capture.short_frame = None
             logger.error('Unable to queue camera frame: %s; retaining bracket ownership until cleanup or timeout', e)
             return
         if capture is not None:
             capture.short_frame = None
+            capture.long_frame = None
             capture.status = 'complete'
+            if bracket:
+                self._expUtils.EXPOSURE_CURRENT = jobdata['exposure']
 
     def beginMoonComposite(self, exposure, gain, binning):
         with self._moon_composite_lock:
@@ -551,7 +560,8 @@ class IndiClient(PyIndi.BaseClient):
             self.clearMoonComposite()
             self._moon_capture_id += 1
             self._moon_capture = MoonCapture(
-                self._moon_capture_id, long_request=(exposure, gain, binning), phase='short',
+                self._moon_capture_id, long_request=(exposure, gain, binning), phase='long',
+                short_exposure=self.config.get('MOON_COMPOSITE', {}).get('EXPOSURE', 0.001),
             )
 
 
@@ -560,11 +570,12 @@ class IndiClient(PyIndi.BaseClient):
             capture = self._moon_capture
             if (
                 capture is None or capture.long_request is None
-                or capture.phase != 'short' or capture.status != 'received'
+                or capture.phase != 'long' or capture.status != 'received'
             ):
                 return False
-            exposure, gain, binning = capture.long_request
-            capture.phase = 'long'
+            _, gain, binning = capture.long_request
+            exposure = capture.short_exposure
+            capture.phase = 'short'
             capture.status = 'prepared'
         self.setCcdExposure(exposure, gain, binning, sync=False)
         return True
@@ -595,6 +606,15 @@ class IndiClient(PyIndi.BaseClient):
             if capture.short_frame is not None:
                 Path(capture.short_frame['filename']).unlink(missing_ok=True)
                 capture.short_frame = None
+            if capture.long_frame is not None:
+                try:
+                    self.image_q.put(capture.long_frame)
+                except (OSError, ValueError) as e:
+                    Path(capture.long_frame['filename']).unlink(missing_ok=True)
+                    logger.error('Unable to preserve uncomposited Moon sky frame: %s', e)
+                else:
+                    logger.info('Moon bracket %d: preserving completed long exposure without lunar replacement', capture.id)
+                capture.long_frame = None
             return capture.long_request
 
 

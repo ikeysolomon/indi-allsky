@@ -185,13 +185,13 @@ def blob(exposure, value=180, headers=None, dtype=numpy.uint16, data=None):
     return SimpleNamespace(getblobdata=stream.getvalue)
 
 
-def test_duplicate_short_blob_is_not_cached_twice(runtime, caplog):
+def test_duplicate_long_blob_is_not_cached_twice(runtime, caplog):
     client = runtime.client
     runtime.worker.shoot(0.1, 75, 1, sync=False)
-    client.newBLOB(blob(0.001))
-    first = client._moon_capture.short_frame
-    client.newBLOB(blob(0.001, value=100))
-    assert client._moon_capture.short_frame is first
+    client.newBLOB(blob(0.1))
+    first = client._moon_capture.long_frame
+    client.newBLOB(blob(0.1, value=100))
+    assert client._moon_capture.long_frame is first
     assert Path(first['filename']).exists()
     assert 'duplicate' in caplog.text.lower()
 
@@ -202,20 +202,22 @@ def test_one_operation_owns_short_long_request_and_completion(runtime):
     operation = client._moon_capture
     assert operation.id == 1
     assert operation.long_request == (0.1, 75, 1)
-    assert (operation.phase, operation.status) == ('short', 'waiting')
-    client.newBLOB(blob(0.001))
-    short = operation.short_frame
+    assert (operation.phase, operation.status) == ('long', 'waiting')
+    client.newBLOB(blob(0.1))
+    long = operation.long_frame
     assert operation.status == 'received'
     assert client.continueMoonComposite()
     assert client._moon_capture is operation
-    assert (operation.phase, operation.status) == ('long', 'waiting')
-    client.newBLOB(blob(0.1))
+    assert (operation.phase, operation.status) == ('short', 'waiting')
+    client.newBLOB(blob(0.001))
     job = runtime.image_q.get(timeout=2)
     try:
-        assert job['moon_composite'] == short
+        short = job['moon_composite']
+        assert job['filename'] == long['filename']
         assert job['moon_composite_id'] == job['moon_composite']['moon_composite_id'] == operation.id
         assert operation.status == 'complete'
         assert operation.short_frame is None
+        assert operation.long_frame is None
         client.clearMoonComposite()
         assert operation.status == 'complete'
         client.beginMoonComposite(0.2, 75, 1)
@@ -227,16 +229,16 @@ def test_one_operation_owns_short_long_request_and_completion(runtime):
         Path(short['filename']).unlink()
 
 
-def test_delayed_short_blob_cannot_become_the_long_exposure(runtime, caplog):
+def test_delayed_long_blob_cannot_become_the_short_exposure(runtime, caplog):
     client = runtime.client
     runtime.worker.shoot(0.1, 75, 1, sync=False)
-    client.newBLOB(blob(0.001))
+    client.newBLOB(blob(0.1))
     assert client.continueMoonComposite()
-    client.newBLOB(blob(0.001))
+    client.newBLOB(blob(0.1))
     assert client._moon_capture.status == 'waiting'
-    assert client._moon_capture.short_frame is not None
+    assert client._moon_capture.long_frame is not None
     assert 'exposure' in caplog.text.lower()
-    client.newBLOB(blob(0.1, value=255))
+    client.newBLOB(blob(0.001, value=180))
     job = runtime.image_q.get(timeout=2)
     try:
         assert job['exposure'] == 0.1
@@ -250,12 +252,12 @@ def test_simultaneous_duplicate_callbacks_accept_only_one_file(runtime):
     client = runtime.client
     runtime.worker.shoot(0.1, 75, 1, sync=False)
     with ThreadPoolExecutor(max_workers=2) as executor:
-        list(executor.map(client.newBLOB, [blob(0.001), blob(0.001)]))
+        list(executor.map(client.newBLOB, [blob(0.1), blob(0.1)]))
     assert len(list(runtime.directory.glob('*.fit'))) == 1
-    assert client._moon_capture.short_frame is not None
+    assert client._moon_capture.long_frame is not None
 
 
-@pytest.mark.parametrize('phase', ['prepared', 'short-waiting', 'short-received', 'long-waiting', 'normal'])
+@pytest.mark.parametrize('phase', ['prepared', 'long-waiting', 'long-received', 'short-waiting', 'normal'])
 def test_new_capture_cannot_replace_an_unfinished_operation(runtime, phase):
     client = runtime.client
     if phase == 'prepared':
@@ -264,9 +266,9 @@ def test_new_capture_cannot_replace_an_unfinished_operation(runtime, phase):
         client.setCcdExposure(0.0005, 75, 1, sync=False)
     else:
         runtime.worker.shoot(0.1, 75, 1, sync=False)
-        if phase != 'short-waiting':
-            client.newBLOB(blob(0.001))
-        if phase == 'long-waiting':
+        if phase != 'long-waiting':
+            client.newBLOB(blob(0.1))
+        if phase == 'short-waiting':
             assert client.continueMoonComposite()
     operation = client._moon_capture
     with pytest.raises(runtime.camera.CameraException, match='in progress'):
@@ -279,19 +281,19 @@ def test_new_capture_cannot_replace_an_unfinished_operation(runtime, phase):
     assert client.binning == 1
 
 
-@pytest.mark.parametrize('operation', ['clear', 'long', 'status', 'pending'])
+@pytest.mark.parametrize('operation', ['clear', 'short', 'status', 'pending'])
 def test_bracket_transitions_and_snapshots_wait_for_callback_lock(runtime, operation):
     client = runtime.client
     runtime.worker.shoot(0.1, 75, 1, sync=False)
-    client.newBLOB(blob(0.001))
-    short_file = Path(client._moon_capture.short_frame['filename'])
+    client.newBLOB(blob(0.1))
+    long_file = Path(client._moon_capture.long_frame['filename'])
     started = Event()
 
     def transition():
         started.set()
         if operation == 'clear':
             return client.clearMoonComposite()
-        if operation == 'long':
+        if operation == 'short':
             return client.continueMoonComposite()
         if operation == 'status':
             return client.getCcdExposureStatus()
@@ -306,12 +308,15 @@ def test_bracket_transitions_and_snapshots_wait_for_callback_lock(runtime, opera
         result = pending.result(timeout=2)
     if operation == 'clear':
         assert client._moon_capture.status == 'cancelled'
-        assert client._moon_capture.short_frame is None
-        assert not short_file.exists()
-    elif operation == 'long':
-        assert client._moon_capture.phase == 'long'
-        assert client._moon_capture.short_frame is not None
-        assert short_file.exists()
+        assert client._moon_capture.long_frame is None
+        job = runtime.image_q.get(timeout=2)
+        assert job['filename'] == str(long_file)
+        assert 'moon_composite' not in job
+        assert long_file.exists()
+    elif operation == 'short':
+        assert client._moon_capture.phase == 'short'
+        assert client._moon_capture.long_frame is not None
+        assert long_file.exists()
     elif operation == 'pending':
         assert result is True
     else:
@@ -325,9 +330,9 @@ def test_stale_same_exposure_timestamp_cannot_enter_a_new_bracket(runtime, caplo
     stale = datetime.fromtimestamp(client.exposureStartTime - 60, tz=timezone.utc).isoformat()
     if invalid_timestamp:
         stale = 'not-a-timestamp'
-    client.newBLOB(blob(0.001, headers={'DATE-OBS': stale}))
+    client.newBLOB(blob(0.1, headers={'DATE-OBS': stale}))
     assert client._moon_capture.status == 'waiting'
-    assert client._moon_capture.short_frame is None
+    assert client._moon_capture.long_frame is None
     assert not list(runtime.directory.glob('*.fit'))
     assert 'DATE-OBS' in caplog.text
 
@@ -340,13 +345,15 @@ def test_replayed_same_exposure_frame_is_indistinguishable_without_date_obs(
     clock = SimpleNamespace(now=time.time())
     monkeypatch.setattr(runtime.camera, 'time', SimpleNamespace(time=lambda: clock.now))
     old_headers = {'DATE-OBS': datetime.fromtimestamp(clock.now, tz=timezone.utc).isoformat()} if has_timestamp else None
-    old_blob = blob(0.001, value=100, headers=old_headers)
+    old_blob = blob(0.1, value=100, headers=old_headers)
     runtime.worker.shoot(0.1, 75, 1, sync=False)
     first_operation = client._moon_capture
     client.newBLOB(old_blob)
-    first_filename = Path(first_operation.short_frame['filename'])
+    first_filename = Path(first_operation.long_frame['filename'])
     client.clearMoonComposite()
-    assert not first_filename.exists()
+    preserved = runtime.image_q.get(timeout=2)
+    assert preserved['filename'] == str(first_filename)
+    first_filename.unlink()
 
     clock.now += 60
     runtime.worker.shoot(0.1, 75, 1, sync=False)
@@ -355,23 +362,23 @@ def test_replayed_same_exposure_frame_is_indistinguishable_without_date_obs(
     client.newBLOB(old_blob)
     if has_timestamp:
         assert second_operation.status == 'waiting'
-        assert second_operation.short_frame is None
+        assert second_operation.long_frame is None
         assert 'Ignoring stale Moon bracket' in caplog.text
     else:
         assert second_operation.status == 'received'
-        assert second_operation.short_frame['moon_composite_id'] == second_operation.id
+        assert second_operation.long_frame['moon_composite_id'] == second_operation.id
         assert 'Ignoring stale Moon bracket' not in caplog.text
 
     current_headers = {'DATE-OBS': datetime.fromtimestamp(clock.now, tz=timezone.utc).isoformat()} if has_timestamp else None
-    client.newBLOB(blob(0.001, value=180, headers=current_headers))
+    client.newBLOB(blob(0.1, value=180, headers=current_headers))
     assert client.continueMoonComposite()
-    client.newBLOB(blob(0.1, headers=current_headers))
+    client.newBLOB(blob(0.001, headers=current_headers))
     job = runtime.image_q.get(timeout=2)
     try:
         assert job['moon_composite_id'] == job['moon_composite']['moon_composite_id'] == second_operation.id
-        with fits.open(job['moon_composite']['filename']) as hdulist:
+        with fits.open(job['filename']) as hdulist:
             assert ('DATE-OBS' in hdulist[0].header) is has_timestamp
-            assert hdulist[0].header['EXPTIME'] == 0.001
+            assert hdulist[0].header['EXPTIME'] == 0.1
             assert hdulist[0].data[40, 40] == (180 if has_timestamp else 100) * 256
     finally:
         Path(job['filename']).unlink()
@@ -389,11 +396,11 @@ def test_callback_before_exposure_command_returns_has_complete_metadata(runtime,
             return runtime.control
         monkeypatch.setattr(client, 'set_number', immediate)
         runtime.worker.shoot(0.1, 75, 1, sync=False)
-        assert client._moon_capture.short_frame['exposure'] == 0.001
+        assert client._moon_capture.long_frame['exposure'] == 0.1
         assert client.continueMoonComposite()
     job = runtime.image_q.get(timeout=2)
     try:
-        assert observed == [0.001, 0.1]
+        assert observed == [0.1, 0.001]
         assert job['exposure'] == 0.1
         assert job['moon_composite']['exposure'] == 0.001
     finally:
@@ -406,56 +413,57 @@ def test_current_utc_timestamp_is_accepted(runtime, whole_seconds):
     runtime.worker.shoot(0.1, 75, 1, sync=False)
     captured_at = datetime.fromtimestamp(runtime.client.exposureStartTime, tz=timezone.utc)
     date_obs = captured_at.strftime('%Y-%m-%dT%H:%M:%S') if whole_seconds else captured_at.isoformat()
-    runtime.client.newBLOB(blob(0.001, headers={'DATE-OBS': date_obs}))
-    assert runtime.client._moon_capture.short_frame is not None
+    runtime.client.newBLOB(blob(0.1, headers={'DATE-OBS': date_obs}))
+    assert runtime.client._moon_capture.long_frame is not None
 
 
-def test_failed_queue_transfer_keeps_short_owned_until_cleanup(runtime, caplog):
+def test_failed_queue_transfer_keeps_long_owned_until_cleanup(runtime, caplog):
     client = runtime.client
     runtime.worker.shoot(0.1, 75, 1, sync=False)
-    client.newBLOB(blob(0.001))
-    short_filename = Path(client._moon_capture.short_frame['filename'])
+    client.newBLOB(blob(0.1))
+    long_filename = Path(client._moon_capture.long_frame['filename'])
     assert client.continueMoonComposite()
     client.image_q = SimpleNamespace(put=mock.Mock(side_effect=ValueError('queue closed')))
-    client.newBLOB(blob(0.1))
-    assert client._moon_capture.short_frame is not None
+    client.newBLOB(blob(0.001))
+    assert client._moon_capture.short_frame is None
+    assert client._moon_capture.long_frame is not None
     assert client._moon_capture.status == 'waiting'
-    assert list(runtime.directory.glob('*.fit')) == [short_filename]
+    assert list(runtime.directory.glob('*.fit')) == [long_filename]
     assert 'queue' in caplog.text.lower()
     client.clearMoonComposite()
-    assert not short_filename.exists()
+    assert not long_filename.exists()
 
 
-@pytest.mark.parametrize('reported', ['not-a-number', 'NaN', -1, 0.1])
-def test_invalid_short_exptime_waits_for_correct_frame(runtime, reported, caplog):
+@pytest.mark.parametrize('reported', ['not-a-number', 'NaN', -1, 0.001])
+def test_invalid_long_exptime_waits_for_correct_frame(runtime, reported, caplog):
     runtime.worker.shoot(0.1, 75, 1, sync=False)
     runtime.client.newBLOB(blob(None, headers={'EXPTIME': reported}))
-    assert runtime.client._moon_capture.short_frame is None
+    assert runtime.client._moon_capture.long_frame is None
     assert runtime.client._moon_capture.status == 'waiting'
     assert not list(runtime.directory.glob('*.fit'))
     assert 'EXPTIME' in caplog.text
-    runtime.client.newBLOB(blob(0.0010005))
-    assert runtime.client._moon_capture.short_frame is not None
+    runtime.client.newBLOB(blob(0.1000005))
+    assert runtime.client._moon_capture.long_frame is not None
 
 
 def test_malformed_blob_and_failed_write_leave_no_partial_files(runtime, caplog):
     runtime.worker.shoot(0.1, 75, 1, sync=False)
     runtime.client.newBLOB(SimpleNamespace(getblobdata=lambda: b'not FITS'))
-    payload = blob(0.001)
+    payload = blob(0.1)
     with mock.patch.object(fits.HDUList, 'writeto', side_effect=OSError('disk full')):
         runtime.client.newBLOB(payload)
-    assert runtime.client._moon_capture.short_frame is None
+    assert runtime.client._moon_capture.long_frame is None
     assert runtime.client._moon_capture.status == 'waiting'
     assert not list(runtime.directory.glob('*.fit'))
     assert 'Invalid camera FITS BLOB' in caplog.text
     runtime.client.newBLOB(payload)
-    assert runtime.client._moon_capture.short_frame is not None
+    assert runtime.client._moon_capture.long_frame is not None
 
 
 @pytest.mark.parametrize('damage', ['card-order', 'truncated-data'])
 def test_structurally_malformed_fits_waits_for_valid_replacement(runtime, caplog, damage):
     runtime.worker.shoot(0.1, 75, 1, sync=False)
-    payload = bytearray(blob(0.001).getblobdata())
+    payload = bytearray(blob(0.1).getblobdata())
     if damage == 'card-order':
         payload[80:160], payload[160:240] = payload[160:240], payload[80:160]
         with fits.open(io.BytesIO(payload)) as hdulist:
@@ -464,17 +472,17 @@ def test_structurally_malformed_fits_waits_for_valid_replacement(runtime, caplog
     else:
         payload = payload[:2888]
     runtime.client.newBLOB(SimpleNamespace(getblobdata=lambda: bytes(payload)))
-    assert runtime.client._moon_capture.short_frame is None
+    assert runtime.client._moon_capture.long_frame is None
     assert runtime.client._moon_capture.status == 'waiting'
     assert not list(runtime.directory.glob('*.fit'))
     assert 'Invalid camera FITS BLOB' in caplog.text
-    runtime.client.newBLOB(blob(0.001))
-    assert runtime.client._moon_capture.short_frame is not None
+    runtime.client.newBLOB(blob(0.1))
+    assert runtime.client._moon_capture.long_frame is not None
 
 
 def test_unexpected_fits_programming_error_is_not_silenced(runtime):
     runtime.worker.shoot(0.1, 75, 1, sync=False)
-    payload = blob(0.001)
+    payload = blob(0.1)
     with mock.patch.object(fits.HDUList, 'writeto', side_effect=TypeError('unexpected write bug')):
         with pytest.raises(TypeError, match='unexpected write bug'):
             runtime.client.newBLOB(payload)
@@ -503,7 +511,7 @@ class Clock:
         self.now = end
 
 
-def run_capture(runtime, monkeypatch, *, legacy=False, missing=None, shutdown_after_short=False,
+def run_capture(runtime, monkeypatch, *, legacy=False, missing=None, shutdown_after_long=False,
                 missing_metadata=False, short_headers=None, short_value=180, short_dtype=numpy.uint16,
                 reported_exposures=None, normal_frames=1, recovery_busy=0,
                 exposure_keyword='EXPTIME', frame_data=None):
@@ -560,9 +568,9 @@ def run_capture(runtime, monkeypatch, *, legacy=False, missing=None, shutdown_af
                     client.updateProperty(Property([payload]))
                 deliveries.append((phase, clock.time()))
                 capture = client._moon_capture
-                if phase == 'long' and (capture is None or capture.status == 'complete'):
+                if capture is None or capture.status == 'complete':
                     completed += 1
-                if completed >= normal_frames or shutdown_after_short:
+                if completed >= normal_frames or shutdown_after_long:
                     worker._shutdown = True
             clock.later(exposure + 0.25, deliver)
         return exposure_control
@@ -634,8 +642,8 @@ def test_capture_to_saved_image_uses_bounded_lunar_prediction(runtime, monkeypat
         exposure_keyword=exposure_keyword,
         reported_exposures={'short': '0.0010004', 'long': '0.100004'},
     )
-    assert [phase for phase, _ in requests] == ['short', 'long']
-    assert [phase for phase, _ in deliveries] == ['short', 'long']
+    assert [phase for phase, _ in requests] == ['long', 'short']
+    assert [phase for phase, _ in deliveries] == ['long', 'short']
     assert requests[0][1] < deliveries[0][1] <= requests[1][1] < deliveries[1][1]
     job = runtime.image_q.get(timeout=2)
     frame = job['moon_composite']
@@ -667,7 +675,9 @@ def test_capture_to_saved_image_uses_bounded_lunar_prediction(runtime, monkeypat
                 mock.patch.object(moon, 'blend', wraps=moon.blend) as blend:
             processor.composite_moon(frame, i_ref, guide=guide)
         assert [call.kwargs['expanded'] for call in search.call_args_list] == (
-            [False] if scene == 'center' else [False, True]
+            [False, False] if scene == 'center' else (
+                [False, True] if scene in ('far-away', 'point-source') else [False, True, True]
+            )
         )
         numpy.testing.assert_allclose(guide.expected_position, (200, 150), atol=0.01)
         assert guide.expected_radius == pytest.approx(12, abs=0.01)
@@ -860,7 +870,7 @@ def test_contrast_settings_do_not_disable_moon_brackets(
     requests, _ = run_capture(runtime, monkeypatch)
     job = runtime.image_q.get(timeout=2)
     try:
-        assert [phase for phase, _ in requests] == ['short', 'long']
+        assert [phase for phase, _ in requests] == ['long', 'short']
         assert 'moon_composite' in job
         assert runtime.worker.config['MOON_COMPOSITE']['ENABLE']
         assert not runtime.worker.moon_composite_suspended
@@ -1118,6 +1128,136 @@ def test_native_lunar_detail_survives_real_shadow_cutoff_and_8bit_quantization(
         long_file.unlink()
 
 
+@pytest.mark.parametrize('motion,applied', [((3, 2), True), ((20, 0), False)])
+def test_long_footprint_precedes_short_detection_and_registers_motion(runtime, monkeypatch, caplog, motion, applied):
+    import cv2
+    from indi_allsky import moon
+
+    caplog.set_level('INFO', logger='indi_allsky')
+    short = numpy.full((120, 120), 3 * 256, numpy.uint16)
+    cv2.circle(short, (60 + motion[0], 60 + motion[1]), 12, 180 * 256, -1)
+    cv2.circle(short, (57 + motion[0], 60 + motion[1]), 4, 90 * 256, -1)
+    long = numpy.full_like(short, 25 * 256)
+    cv2.circle(long, (60, 60), 24, 255 * 256, -1)
+    run_capture(runtime, monkeypatch, frame_data={'short': short, 'long': long})
+    job = runtime.image_q.get(timeout=2)
+    with fits.conf.set_temp('use_memmap', False):
+        i_ref = ingest_long(runtime, job)
+    processor = runtime.processor
+    before = processor.image.copy()
+    events = []
+    footprint, detect = moon.find_footprint, moon.find_moon
+
+    def locate(*args, **kwargs):
+        events.append('long-footprint')
+        return footprint(*args, **kwargs)
+
+    def detail(*args, **kwargs):
+        events.append('short-detail')
+        return detect(*args, **kwargs)
+
+    class Guide:
+        expected_position = (60, 60)
+        expected_radius = 12
+
+        def search_region(self, frame, *args, **kwargs):
+            events.append(frame['exposure'])
+            self.expected_position = (
+                (60, 60) if frame['exposure'] == 0.1 else (60 + motion[0], 60 + motion[1])
+            )
+            return (10, 10, 110, 110)
+
+    try:
+        with mock.patch.object(moon, 'find_footprint', side_effect=locate), \
+                mock.patch.object(moon, 'find_moon', side_effect=detail):
+            processor.composite_moon(job['moon_composite'], i_ref, guide=Guide())
+        assert events[:3] == [0.1, 'long-footprint', 0.001]
+        if applied:
+            assert events[-1] == 'short-detail'
+            assert processor.image[60, 57] == 101
+            assert processor.image[60, 66] == 180
+            assert processor.image[60, 80] == 25
+            assert 'registered to long midpoint' in caplog.text
+        else:
+            assert 'short-detail' not in events
+            assert 'moved too far' in caplog.text
+            numpy.testing.assert_array_equal(processor.image, before)
+        numpy.testing.assert_array_equal(i_ref.hdulist[0].data, long)
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink()
+        Path(job['moon_composite']['filename']).unlink()
+
+
+def test_motion_interpolation_cannot_hide_native_clipping(runtime, monkeypatch, caplog):
+    import cv2
+
+    short = numpy.full((120, 120), 3 * 256, numpy.uint16)
+    cv2.circle(short, (60, 60), 12, 180 * 256, -1)
+    short[59:61, 59:62] = 255 * 256
+    long = numpy.full_like(short, 25 * 256)
+    cv2.circle(long, (60, 60), 24, 255 * 256, -1)
+    run_capture(runtime, monkeypatch, frame_data={'short': short, 'long': long})
+    job = runtime.image_q.get(timeout=2)
+    with fits.conf.set_temp('use_memmap', False):
+        i_ref = ingest_long(runtime, job)
+    before = runtime.processor.image.copy()
+
+    class Guide:
+        expected_position = (60, 60)
+        expected_radius = 12
+
+        def search_region(self, frame, *args, **kwargs):
+            self.expected_position = (60, 60) if frame['exposure'] == 0.1 else (60.4, 60.6)
+            return (10, 10, 110, 110)
+
+    try:
+        runtime.processor.composite_moon(job['moon_composite'], i_ref, guide=Guide())
+        assert 'short exposure is clipped' in caplog.text
+        numpy.testing.assert_array_equal(runtime.processor.image, before)
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink()
+        Path(job['moon_composite']['filename']).unlink()
+
+
+def test_missing_long_footprint_never_reads_short_frame_pixels(runtime, monkeypatch, caplog):
+    long = numpy.full((80, 80), 25 * 256, numpy.uint16)
+    run_capture(runtime, monkeypatch, frame_data={'long': long})
+    job = runtime.image_q.get(timeout=2)
+    with fits.conf.set_temp('use_memmap', False):
+        i_ref = ingest_long(runtime, job)
+    before = runtime.processor.image.copy()
+    open_fits = fits.open
+    reads = []
+
+    def metadata_only(*args, **kwargs):
+        hdulist = open_fits(*args, **kwargs)
+        readarray = hdulist._file.readarray
+
+        def record(*args, **kwargs):
+            reads.append(True)
+            return readarray(*args, **kwargs)
+
+        hdulist._file.readarray = record
+        return hdulist
+
+    guide = SimpleNamespace(
+        search_region=lambda *args, **kwargs: (4, 4, 76, 76),
+        expected_position=(40, 40), expected_radius=12,
+    )
+    try:
+        with mock.patch('astropy.io.fits.open', side_effect=metadata_only):
+            runtime.processor.composite_moon(job['moon_composite'], i_ref, guide=guide)
+        assert not reads
+        assert 'Long Moon search has insufficient contrast' in caplog.text
+        numpy.testing.assert_array_equal(runtime.processor.image, before)
+    finally:
+        i_ref.hdulist.close()
+        Path(job['filename']).unlink()
+        Path(job['moon_composite']['filename']).unlink()
+
+
 @pytest.mark.parametrize('radius,applied', [(22, True), (40, False)])
 def test_long_footprint_expands_search_only_once(runtime, monkeypatch, caplog, radius, applied):
     import cv2
@@ -1146,7 +1286,7 @@ def test_long_footprint_expands_search_only_once(runtime, monkeypatch, caplog, r
     before = processor.image.copy()
     try:
         processor.composite_moon(job['moon_composite'], i_ref, guide=Guide())
-        assert windows == [False, True]
+        assert windows == ([False, True, True] if applied else [False, True])
         assert 'expanding search once' in caplog.text
         if applied:
             assert 'applied=True' in caplog.text
@@ -1184,7 +1324,7 @@ def test_capture_stretch_clahe_and_moon_transfer_agree(runtime, monkeypatch, mod
     processor.config.update(CONTRAST_ENHANCE_16BIT=True, NIGHT_CONTRAST_ENHANCE=True)
     processor.config['IMAGE_STRETCH'] = {'MOONMODE': True, 'SPLIT': split}
     requests, _ = run_capture(runtime, monkeypatch, frame_data={'short': short, 'long': long})
-    assert [phase for phase, _ in requests] == ['short', 'long']
+    assert [phase for phase, _ in requests] == ['long', 'short']
     job = runtime.image_q.get(timeout=2)
     with fits.conf.set_temp('use_memmap', False):
         i_ref = ingest_long(runtime, job)
@@ -1219,15 +1359,25 @@ def test_capture_stretch_clahe_and_moon_transfer_agree(runtime, monkeypatch, mod
         actual_patch = blend.call_args.kwargs['display_patch']
         assert numpy.abs(actual_patch.astype(int) - expected.astype(int)).max() <= 1
         expected_image = sky.copy()
-        assert moon.blend(
-            expected_image, blend.call_args.args[1], roi, display_patch=expected,
-            detail_patch=linear_patch, preserve_transfer=split,
-        )
+        if not split and not color and bits == 12:
+            # This CLAHE fixture has a non-smooth boundary, not a trustworthy sky gradient.
+            with pytest.raises(ValueError, match='too structured for a reliable lunar sky match'):
+                moon.blend(
+                    expected_image, blend.call_args.args[1], roi, display_patch=expected,
+                    detail_patch=linear_patch, replacement_mask=blend.call_args.kwargs['replacement_mask'],
+                )
+            assert 'Moon composite skipped:' in caplog.text
+        else:
+            assert moon.blend(
+                expected_image, blend.call_args.args[1], roi, display_patch=expected,
+                detail_patch=linear_patch, preserve_transfer=split,
+                replacement_mask=blend.call_args.kwargs['replacement_mask'],
+            )
+            assert 'applied=True' in caplog.text
         assert numpy.abs(processor.image.astype(int) - expected_image.astype(int)).max() <= 1
         numpy.testing.assert_array_equal(processor.image[:, :20], sky[:, :20])
         numpy.testing.assert_array_equal(i_ref.hdulist[0].data, original_fits)
         assert processor._moon_clahe_source is None
-        assert 'applied=True' in caplog.text
     finally:
         i_ref.hdulist.close()
         Path(job['filename']).unlink()
@@ -1237,7 +1387,7 @@ def test_capture_stretch_clahe_and_moon_transfer_agree(runtime, monkeypatch, mod
 @pytest.mark.parametrize('legacy', [False, True])
 def test_capture_loop_waits_for_blobs_then_processes_one_pair(runtime, monkeypatch, legacy):
     requests, deliveries = run_capture(runtime, monkeypatch, legacy=legacy)
-    assert [phase for phase, _ in requests] == ['short', 'long']
+    assert [phase for phase, _ in requests] == ['long', 'short']
     assert requests[1][1] >= deliveries[0][1]
     job = runtime.image_q.get(timeout=2)
     try:
@@ -1268,8 +1418,13 @@ def test_timed_out_bracket_resets_connection_and_resumes_normal_capture(runtime,
     assert original_client._moon_capture.short_frame is None
     assert runtime.worker.moon_composite_suspended
     assert [phase for phase, _ in requests] == (
-        ['short', 'long'] if missing == 'short' else ['short', 'long', 'long']
+        ['long', 'short', 'long'] if missing == 'short' else ['long', 'long']
     )
+    if missing == 'short':
+        preserved = runtime.image_q.get(timeout=2)
+        assert 'moon_composite' not in preserved
+        assert preserved['exposure'] == 0.1
+        Path(preserved['filename']).unlink()
     job = runtime.image_q.get(timeout=2)
     try:
         assert 'moon_composite' not in job
@@ -1301,6 +1456,10 @@ def test_recovery_cannot_claim_success_if_camera_stays_busy(runtime, monkeypatch
     assert 'CCD_EXPOSURE' in message
     assert 'TimeOutException' in traceback
     assert runtime.worker.moon_composite_suspended
+    preserved = runtime.image_q.get(timeout=2)
+    assert 'moon_composite' not in preserved
+    assert preserved['exposure'] == 0.1
+    Path(preserved['filename']).unlink()
     assert not list(runtime.directory.glob('*.fit'))
     with pytest.raises(queue.Empty):
         runtime.image_q.get(timeout=0.05)
@@ -1333,7 +1492,7 @@ def test_driver_exptime_mismatch_suspends_until_reload_and_keeps_sky_capture(run
     original_client = runtime.client
     requests, _ = run_capture(runtime, monkeypatch, reported_exposures=reported, normal_frames=2)
     assert [name for name, _ in requests] == (
-        ['short', 'long', 'long'] if phase == 'short' else ['short', 'long', 'long', 'long']
+        ['long', 'short', 'long', 'long'] if phase == 'short' else ['long', 'long', 'long']
     )
     original_client.abortCcdExposure.assert_called_once()
     assert original_client.disconnected
@@ -1341,7 +1500,7 @@ def test_driver_exptime_mismatch_suspends_until_reload_and_keeps_sky_capture(run
     assert not original_client.moonCompositeInProgress()
     assert runtime.worker.moon_composite_suspended
     assert runtime.worker.config['MOON_COMPOSITE']['ENABLE'] is True
-    for _ in range(2):
+    for _ in range(2 + (phase == 'short')):
         job = runtime.image_q.get(timeout=2)
         assert 'moon_composite' not in job
         assert job['exposure'] == 0.1
@@ -1368,7 +1527,7 @@ def test_driver_exptime_mismatch_suspends_until_reload_and_keeps_sky_capture(run
             assert 'moon_composite' not in job
             assert 'moon_composite_id' not in job
         else:
-            assert [name for name, _ in requests] == ['short', 'long']
+            assert [name for name, _ in requests] == ['long', 'short']
             assert job['exposure'] == 0.1
             assert job['moon_composite']['exposure'] == 0.001
         with pytest.raises(queue.Empty):
@@ -1389,13 +1548,13 @@ def test_invalid_exposure_metadata_recovers_and_cleans_pair(runtime, monkeypatch
         reported_exposures={phase: reported}, normal_frames=2,
     )
     assert [name for name, _ in requests] == (
-        ['short', 'long', 'long'] if phase == 'short' else ['short', 'long', 'long', 'long']
+        ['long', 'short', 'long', 'long'] if phase == 'short' else ['long', 'long', 'long']
     )
     original_client.abortCcdExposure.assert_called_once()
     assert original_client.disconnected and runtime.client is not original_client
     assert original_client._moon_capture.short_frame is None
     assert runtime.worker.moon_composite_suspended
-    for _ in range(2):
+    for _ in range(2 + (phase == 'short')):
         job = runtime.image_q.get(timeout=2)
         assert 'moon_composite' not in job
         assert (job['exposure'], job['gain'], job['binning']) == (0.1, 75, 1)
@@ -1405,9 +1564,14 @@ def test_invalid_exposure_metadata_recovers_and_cleans_pair(runtime, monkeypatch
         runtime.image_q.get(timeout=0.05)
 
 
-def test_orderly_shutdown_after_short_removes_short_without_starting_long(runtime, monkeypatch):
-    requests, _ = run_capture(runtime, monkeypatch, shutdown_after_short=True)
-    assert [phase for phase, _ in requests] == ['short']
+def test_orderly_shutdown_after_long_preserves_sky_without_starting_short(runtime, monkeypatch):
+    requests, _ = run_capture(runtime, monkeypatch, shutdown_after_long=True)
+    assert [phase for phase, _ in requests] == ['long']
+    job = runtime.image_q.get(timeout=2)
+    assert 'moon_composite' not in job
+    assert job['exposure'] == 0.1
+    assert Path(job['filename']).exists()
+    Path(job['filename']).unlink()
     assert not list(runtime.directory.glob('*.fit'))
     assert runtime.client.disconnected
 
@@ -1415,6 +1579,10 @@ def test_orderly_shutdown_after_short_removes_short_without_starting_long(runtim
 @pytest.mark.parametrize('phase', [True, 'short', 'long'])
 def test_missing_exptime_keeps_original_sky_and_reports_driver_limitation(runtime, monkeypatch, caplog, phase):
     run_capture(runtime, monkeypatch, missing_metadata=phase)
+    if phase == 'short':
+        preserved = runtime.image_q.get(timeout=2)
+        assert 'moon_composite' not in preserved
+        Path(preserved['filename']).unlink()
     job = runtime.image_q.get(timeout=2)
     try:
         assert 'moon_composite' not in job

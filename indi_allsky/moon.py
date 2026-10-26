@@ -24,6 +24,8 @@ class MoonCapture:
     status: str = 'prepared'
     short_frame: Optional[dict] = None
     failure: Optional[str] = None
+    long_frame: Optional[dict] = None
+    short_exposure: float = 0.001
 
 
 def validate_config(config):
@@ -288,6 +290,59 @@ def find_moon(sensor, bayer=False, search=None, expected=None, expected_radius=N
     return roi
 
 
+def find_footprint(sensor, expected=None, expected_radius=None):
+    """Locate and enclose the long-frame plateau before reading lunar detail."""
+    gray = sensor.max(axis=0) if sensor.ndim == 3 else sensor
+    if gray.dtype != numpy.uint8 or gray.ndim != 2:
+        raise ValueError('Moon footprint requires linear 8-bit sensor data')
+    background = float(numpy.median(gray))
+    peak = int(cv2.medianBlur(gray, 3).max())
+    if peak - background < 4:
+        if peak >= 230:
+            raise MoonFootprintEdge('bright lunar footprint reaches the bounded search edge')
+        raise ValueError('Long Moon search has insufficient contrast; check alignment or cloud cover')
+    level = background + max(3, (peak - background) * 0.95)
+    plateau = cv2.morphologyEx(
+        (gray > level).astype(numpy.uint8), cv2.MORPH_CLOSE, numpy.ones((3, 3), numpy.uint8),
+    )
+    _, labels, stats, centers = cv2.connectedComponentsWithStats(plateau)
+    if expected is None:
+        regions = _bright_regions(gray)
+        if not regions:
+            raise ValueError('Long Moon search found no reliable lunar footprint')
+        regions.sort(key=lambda region: region[2] * region[3], reverse=True)
+        expected = regions[0][4]
+        expected_radius = regions[0][5]
+    candidates = []
+    for label in _spiral_labels(labels, expected):
+        x, y, width, height, area = (int(value) for value in stats[label])
+        if area < max(16, math.pi * expected_radius ** 2 * 0.1):
+            continue
+        if max(width, height) < expected_radius:
+            continue
+        candidates.append(label)
+    if not candidates:
+        raise ValueError('Long Moon search found no resolved bright footprint')
+    label = candidates[0]
+    distance = numpy.linalg.norm(centers[label] - expected)
+    if any(
+        abs(numpy.linalg.norm(centers[other] - expected) - distance) <= max(2, expected_radius * 0.5)
+        and stats[other, cv2.CC_STAT_AREA] >= stats[label, cv2.CC_STAT_AREA] * 0.1
+        for other in candidates[1:]
+    ):
+        raise ValueError('Long Moon search found ambiguous bright footprints')
+    x, y, width, height, _ = (int(value) for value in stats[label])
+    margin = max(8, math.ceil(max(width, height) * 0.08))
+    left, top = (x - margin) // 2 * 2, (y - margin) // 2 * 2
+    right, bottom = math.ceil((x + width + margin) / 2) * 2, math.ceil((y + height + margin) / 2) * 2
+    if left < 0 or top < 0 or right > gray.shape[1] or bottom > gray.shape[0]:
+        raise MoonFootprintEdge('bright lunar footprint reaches the bounded search edge')
+    roi = (left, top, right, bottom)
+    mask = (labels[top:bottom, left:right] == label).astype(numpy.uint8)
+    logger.info('Long Moon footprint localized first: ROI=%s threshold=%.1f; short Moon is not resized', roi, level)
+    return roi, mask
+
+
 def replacement_region(long_sensor, short_sensor, roi, bounded=False):
     """Expand a short-frame crop to the connected bright long-frame footprint."""
     long_gray = long_sensor.max(axis=0) if long_sensor.ndim == 3 else long_sensor
@@ -351,20 +406,27 @@ def _sky_background(target, ring):
         if residual.ndim == 2:
             residual = residual.max(axis=1)
         good = residual <= max(2, float(numpy.median(residual)) * 3)
-        if numpy.count_nonzero(good) < 16:
+        if numpy.count_nonzero(good) < max(16, math.ceil(len(values) * 0.6)):
             raise ValueError('Insufficient reliable sky samples around the Moon footprint')
         coefficients, _, rank, _ = numpy.linalg.lstsq(design[good], values[good], rcond=None)
     except numpy.linalg.LinAlgError as e:
         raise ValueError('Unable to fit sky illumination around the Moon footprint') from e
     if rank != 3:
         raise ValueError('Moon background samples do not constrain a spatial sky match')
+    errors = values[good] - design[good] @ coefficients
+    tolerance = max(3, float(numpy.median(values[good])) * 0.05)
+    if float(numpy.sqrt(numpy.mean(errors ** 2))) > tolerance:
+        raise ValueError('Surrounding sky is too structured for a reliable lunar sky match')
     if target.ndim == 3:
         xx, yy = xx[:, :, None], yy[:, :, None]
     return numpy.clip(coefficients[0] + coefficients[1] * xx + coefficients[2] * yy, 0, 255)
 
 
 def _moon_display(patch, display_patch, detail_patch, target, mask, selected, force_match, radius):
-    ring = cv2.dilate(mask, numpy.ones((7, 7), numpy.uint8)) != mask
+    ring = (
+        cv2.dilate(mask, numpy.ones((17, 17), numpy.uint8))
+        != cv2.dilate(mask, numpy.ones((5, 5), numpy.uint8))
+    )
     if numpy.count_nonzero(ring) < 16:
         raise ValueError('Insufficient surrounding sky to match the lunar replacement background')
     detail = patch if detail_patch is None else detail_patch
@@ -382,7 +444,7 @@ def _moon_display(patch, display_patch, detail_patch, target, mask, selected, fo
         or (native_high > native_low and numpy.mean(display_peak[selected] >= 250) > 0.5)
     )
     if not force_match and not lost_detail:
-        return display_patch
+        return display_patch, _sky_background(target, ring)
     source = detail if lost_detail else display_patch
     if lost_detail:
         logger.warning(
@@ -402,10 +464,10 @@ def _moon_display(patch, display_patch, detail_patch, target, mask, selected, fo
     normalized = numpy.clip(source / white, 0, 1)
     display_white = 250 if lost_detail else float(numpy.percentile(display_peak[selected], 99))
     logger.info('Moon display matched to spatial sky background; lunar radius=%.2fpx, native detail=%s', radius, lost_detail)
-    return numpy.clip(background + normalized * (display_white - background), 0, 255)
+    return numpy.clip(background + normalized * (display_white - background), 0, 255), background
 
 
-def blend(image, patch, roi, display_patch=None, expected=None, expected_radius=None, replacement_mask=None, detail_patch=None, preserve_transfer=False):
+def blend(image, patch, roi, display_patch=None, expected=None, expected_radius=None, replacement_mask=None, detail_patch=None, preserve_transfer=False, clipping_mask=None):
     """Blend same-scale short pixels; optionally include the blown-out long footprint."""
     x1, y1, x2, y2 = roi
     if image.dtype != numpy.uint8 or patch.dtype != numpy.uint8:
@@ -440,7 +502,13 @@ def blend(image, patch, roi, display_patch=None, expected=None, expected_radius=
     lunar_mask = mask
     selected = mask != 0
     peak = patch.max(axis=2) if patch.ndim == 3 else patch
-    if numpy.count_nonzero(peak[selected] >= 250) > area * 0.01:
+    if clipping_mask is not None:
+        if clipping_mask.shape != gray.shape or clipping_mask.dtype != numpy.uint8 or clipping_mask.max() > 1:
+            raise ValueError('Moon clipping mask must match the ROI and contain only zero or one')
+        clipped = clipping_mask != 0
+    else:
+        clipped = peak >= 250
+    if numpy.count_nonzero(clipped[selected]) > area * 0.01:
         logger.warning('Moon composite skipped: short exposure is clipped; reduce EXPOSURE')
         return False
 
@@ -455,14 +523,21 @@ def blend(image, patch, roi, display_patch=None, expected=None, expected_radius=
                 or replacement_mask[:, :padding].any() or replacement_mask[:, -padding:].any()):
             raise ValueError('Moon replacement footprint touches ROI edge')
         mask = numpy.maximum(mask, replacement_mask)
+    background = None
     if not preserve_transfer and (replacement_mask is not None or detail_patch is not None):
-        display_patch = _moon_display(
-            patch, display_patch, detail_patch, target, mask, selected, replacement_mask is not None, radius,
+        display_patch, background = _moon_display(
+            patch, display_patch, detail_patch, target, mask, selected,
+            replacement_mask is not None and numpy.any((replacement_mask != 0) & ~selected), radius,
         )
 
     lunar_mask = cv2.dilate(lunar_mask, numpy.ones((2 * dilation + 1, 2 * dilation + 1), numpy.uint8))
     alpha = cv2.GaussianBlur(lunar_mask.astype(numpy.float32), (2 * feather + 1, 2 * feather + 1), 0)
     if replacement_mask is not None:
+        if background is not None:
+            lunar_alpha = numpy.maximum(alpha, selected)
+            if patch.ndim == 3:
+                lunar_alpha = lunar_alpha[:, :, None]
+            display_patch = background + (display_patch - background) * lunar_alpha
         kernel = numpy.ones((2 * bloom_feather + 1, 2 * bloom_feather + 1), numpy.uint8)
         # Fade outside the footprint, never blend saturated pixels back into it.
         bloom_mask = cv2.dilate(replacement_mask, kernel)

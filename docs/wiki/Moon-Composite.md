@@ -1,9 +1,10 @@
 # Experimental moon composite
 
-This opt-in mode takes a short exposure immediately **before** each normal night
-exposure while indi-allsky's existing moon mode is active. It replaces the
-bright lunar silhouette and its larger blown-out long-exposure footprint using
-same-scale short-frame pixels, with a feathered edge. The Moon is not resized.
+This opt-in mode takes a short exposure immediately **after** each normal night
+exposure while indi-allsky's existing moon mode is active. It rebuilds the sky
+inside the blown-out long-exposure footprint and adds the short-frame Moon
+through a separate lunar mask. The two boundaries are feathered independently.
+The Moon is not resized.
 This is replacement/alpha compositing, not a screen blend
 (which would keep an already white moon white).
 
@@ -49,8 +50,9 @@ save/import. No manual migration or coordinate updates are needed.
 
 ### Automatic localization
 
-The Moon's topocentric altitude/azimuth is calculated for each short exposure
-using the camera location and the exposure midpoint. FITS `DATE-OBS` is preferred
+The Moon's topocentric altitude/azimuth is calculated for the long exposure
+and its following short exposure using the camera location and each exposure
+midpoint. FITS `DATE-OBS` is preferred
 (offset-free timestamps mean UTC); otherwise the capture receipt time and elapsed
 capture duration estimate that midpoint. Wall-clock processing time is not used.
 VirtualSky's lens projection, pointing, offsets and enabled distortion correction
@@ -66,12 +68,21 @@ There are at most two search windows, never an indefinite expansion or an
 unguided fallback. The whole detected footprint must fit inside the window;
 a source cut off by its boundary is not accepted as the whole Moon.
 The detector never falls back to unrelated full-frame lights if prediction or
-alignment fails. Within this neighbourhood, a max-pooled brightness preview
-(at most 768 pixels per dimension) preserves bright seeds without full-frame debayering.
-Bayer previews pool complete CFA cells. Guided detection starts at the rough
-predicted position and visits seeds in an outward clockwise square spiral,
-rather than choosing the three brightest objects. Each connected seed is grown
-to its complete thresholded footprint. A size-scaled morphological closing
+alignment fails. The bounded long-frame sensor neighbourhood is analysed first,
+before any short-frame pixels are read. Starting from the rough prediction,
+an outward clockwise square spiral visits connected bright plateau regions.
+Tiny sources and similarly plausible competing regions are rejected, but the
+plateau does not need a circular outline or the Moon's physical diameter:
+bloom can be much larger. Its threshold is relative to the local background
+and peak, so dark-subtracted clipping levels are also supported.
+The footprint coordinates and binary damage mask remain in memory for the
+following short-frame lookup. These operations run in the image worker after
+both captures arrive, not inside the INDI BLOB callback.
+
+Only the detected long-frame crop is searched for short-frame lunar detail.
+A max-pooled preview, at most 768 pixels per dimension, preserves bright seeds;
+Bayer previews pool complete CFA cells. The short-frame search also spirals
+outward rather than using a three-brightest-seed budget. A size-scaled morphological closing
 bridges small interruptions from cloud; the silhouette follows the observed
 outline, not a fitted circle. Distorted disks, short flare extensions, partial
 phases and small cloud gaps do not need a circular limb to pass. Wide cloud
@@ -86,23 +97,37 @@ Unguided utility calls retain their existing circular-limb checks and
 integrated-brightness ranking.
 
 The chosen region gets proportional padding and even sensor-coordinate origins
-to preserve Bayer phase. The long frame is then checked for a connected bright
-footprint overlapping that detected Moon. A larger footprint expands the crop
-and replacement mask, **not the apparent size of the short-exposure Moon**.
-Its plateau threshold is estimated locally, including after dark subtraction.
+to preserve Bayer phase. The long-frame footprint determines the replacement
+crop and damage mask, **not the apparent size of the short-exposure Moon**.
 Unrelated bright sources are not added to the mask. If the footprint reaches the
 prediction window edge, the single retry at the configured maximum margin is
 used; a footprint that still cannot be enclosed safely causes an explicit skip.
 
-Only this final crop is debayered. Its lunar silhouette is refined at
-native resolution with the same guided footprint search, then clipping checks
-and feathering are applied. A robust spatial sky-illumination fit from the
-long-frame boundary ring matches the replacement background without flattening
-its gradient. Lunar intensities are matched coherently to that background.
+Only this final crop is debayered. The predicted displacement between exposure
+midpoints translates the short detail into the long frame's coordinates,
+without resizing. Fractional shifts use interpolation after debayering, never
+on the Bayer mosaic. A nearest-neighbour native clipping mask prevents that
+interpolation from hiding clipped short-frame pixels. Movement greater than
+one predicted lunar radius causes a skip rather than an unreliable registration.
+The plateau centroid is only an approximate short-search seed, not proof of
+the Moon's true centre.
+
+Its lunar silhouette is refined at native resolution, then clipping checks
+and feathering are applied. A robust spatial sky-illumination fit uses a ring
+outside the combined damage/lunar masks, separated from their immediate edge.
+It rebuilds a background gradient throughout the damaged area. Only the
+background-subtracted short-frame lunar signal is added through the lunar mask:
+short-frame black sky, noise and gradients are not pasted across the damage mask.
+Valid lunar interior pixels retain their detail; feathering extends outside
+that interior. Lunar intensities are matched coherently to the reconstructed sky.
+At least 60% of the boundary samples must support the fit (and at least 16
+samples). Residual RMS must not exceed the greater of three display levels or
+5% of the boundary brightness. A structured cloud boundary that fails this
+check is skipped, not replaced with an invented smooth cloud pattern.
 If the sky's display transfer crushes or clips otherwise valid lunar contrast,
 the compositor instead maps the native short-frame detail into the available
 display headroom, before losing it to 8-bit quantization. This changes display
-brightness, not physical size or surface coordinates, and cannot reconstruct
+brightness, not physical size or feature geometry, and cannot reconstruct
 clipped native detail or the actual clouds hidden by the blown-out footprint.
 Diagnostic split previews deliberately retain their original transfer, linear
 side and divider rather than applying this display recovery.
@@ -189,7 +214,7 @@ frame is discarded and the long image is processed normally.
 
 No extra image job is queued: the short frame travels with its corresponding
 long frame. One locked capture record owns the bracket's local ID, requested
-long exposure/gain/binning, short frame, phase and completion status. The capture
+long exposure/gain/binning, completed long frame, short frame, phase and completion status. The capture
 loop asks that operation to advance; it no longer coordinates separate pending
 settings and short-frame flags. Only one operation may be outstanding.
 Each exposure request accepts at most one BLOB. Callbacks received when no image
@@ -222,8 +247,10 @@ treated as a reason to suspend compositing.
 Rejected BLOBs leave the request waiting for a valid BLOB or the existing timeout.
 A timed-out bracket, or missing both exposure keywords needed to verify the pair, suspends
 compositing until configuration reload/restart, without changing the saved
-enable setting. The incomplete pair is discarded, the capture connection is
-reset, and the camera must report ready before an ordinary long exposure is
+enable setting. Unusable short-frame files are discarded. A completed, verified long frame is
+queued for normal processing without a composite, including on cancellation
+or orderly shutdown before the short exposure. The capture connection is
+reset on bracket failure, and the camera must report ready before an ordinary long exposure is
 requested. The worker continues normal sky captures, even if that driver's
 ordinary images omit or round `EXPTIME`; it does not repeatedly retry a failing
 bracket. If reconnection/idle verification fails, the normal worker error path

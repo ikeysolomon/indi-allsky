@@ -94,6 +94,22 @@ def _config(**temp_sensor):
     return {'TEMP_SENSOR': settings}
 
 
+@pytest.mark.parametrize('display, unit', [
+    ('c', '\N{DEGREE SIGN}C'),
+    ('f', '\N{DEGREE SIGN}F'),
+    ('k', 'K'),
+    (None, '\N{DEGREE SIGN}C'),
+    ('invalid', '\N{DEGREE SIGN}C'),
+])
+def test_mlx_and_ground_sensor_labels_follow_display_temperature_units(display, unit):
+    config = _config()
+    config['TEMP_DISPLAY'] = display
+    labels = sensors_mapping.build_slot_label_map(config)
+    for slot in (0, 10, 11, 12):
+        assert labels[slot]['unit'] == unit
+    assert labels[13]['unit'] == '%'
+
+
 def _validate_cloudiness_form(form):
     validate = _source_member('flask/forms.py', 'IndiAllskyConfigForm', 'validate')
     namespace = {'self': form, 'math': math, 'sensors_mapping': sensors_mapping, 'result': True}
@@ -257,7 +273,7 @@ def test_image_cloudiness_calculation_uses_snapshot_after_releasing_lock(monkeyp
     import time
     from threading import Lock
 
-    method = _source_member('image.py', 'ImageWorker', 'processImage')
+    method = _source_member('image.py', 'ImageWorker', '_processImage')
     start = method.body.index(_source_assignment(method.body, 'i_ref.cloudiness_index'))
 
     sensor_lock = Lock()

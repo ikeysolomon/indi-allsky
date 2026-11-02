@@ -139,7 +139,8 @@ def test_i2c_sensor_validation_without_pin(flask_app):
         assert not form.TEMP_SENSOR__A_CLASSNAME.errors
 
 
-def test_spi_and_dht_sensor_validation_requires_pin(flask_app):
+def test_spi_and_dht_sensor_validation_requires_pin(flask_app, monkeypatch):
+    monkeypatch.setitem(sys.modules, 'board', types.SimpleNamespace(D5=5, D6=6))
     with flask_app.test_request_context():
         data = _get_dummy_form_data()
         data['TEMP_SENSOR__A_CLASSNAME'] = 'blinka_temp_sensor_bme280_spi'
@@ -148,6 +149,32 @@ def test_spi_and_dht_sensor_validation_requires_pin(flask_app):
         form = IndiAllskyConfigForm(data=data)
         form.validate()
         assert 'PIN must be defined' in form.TEMP_SENSOR__A_PIN_1.errors
+
+
+@pytest.mark.parametrize('letter, index', [('A', 10), ('F', 55), ('Z', 58)])
+def test_mlx_cloud_and_ambient_choices_initialize_and_render(flask_app, letter, index):
+    with flask_app.test_request_context():
+        data = _get_dummy_form_data()
+        slot = f'sensor_user_{index}'
+        data[f'TEMP_SENSOR__{letter}_CLASSNAME'] = 'blinka_temp_sensor_mlx90614_i2c'
+        data[f'TEMP_SENSOR__{letter}_USER_VAR_SLOT'] = slot
+        data[f'TEMP_SENSOR__{letter}_LABEL'] = 'Cloud sensor'
+        data['TEMP_SENSOR__CLOUDINESS_INDEX_ENABLE'] = True
+        data['TEMP_SENSOR__CLOUDINESS_INDEX_SENSOR'] = slot
+        data['TEMP_SENSOR__CLOUDINESS_INDEX_GROUND_SENSOR'] = slot
+
+        form = IndiAllskyConfigForm(data=data)
+        cloud_field = form.TEMP_SENSOR__CLOUDINESS_INDEX_SENSOR
+        ground_field = form.TEMP_SENSOR__CLOUDINESS_INDEX_GROUND_SENSOR
+
+        assert slot in dict(cloud_field.choices['MLX Cloudiness Sensors'])
+        assert slot in dict(ground_field.choices['Temperature Sensors'])
+        assert f'sensor_user_{index + 1}' not in dict(ground_field.choices['Temperature Sensors'])
+        assert 'Cloud sensor' in form.SENSOR_SLOT_choices['User Sensors'][index][1]
+        for field in (cloud_field, ground_field, form.FAN__TEMP_USER_VAR_SLOT):
+            assert field.validate(form)
+            assert all(isinstance(choice, tuple) for group in field.choices.values() for choice in group)
+            assert f'value="{slot}"' in field()
 
 
 def test_slot_choices_instance_isolation(flask_app):
@@ -180,7 +207,8 @@ def test_slot_choices_instance_isolation(flask_app):
         assert IndiAllskyConfigForm.SENSOR_SLOT_choices['User Sensors'][20][1] == 'User Slot 20'
 
 
-def test_slot_bounds_and_overlap_validation(flask_app):
+def test_slot_bounds_and_overlap_validation(flask_app, monkeypatch):
+    monkeypatch.setitem(sys.modules, 'board', types.SimpleNamespace(D5=5, D6=6))
     with flask_app.test_request_context():
         # Valid non-overlapping slots
         data = _get_dummy_form_data()

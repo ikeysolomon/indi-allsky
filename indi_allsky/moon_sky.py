@@ -85,6 +85,18 @@ class MoonSkyGuide:
         self._validated_model = None
         self.expected_position = None
         self.expected_radius = None
+        self._lock = None
+        self._lock_key = None
+        self._prediction = None
+
+    def record_lock(self, position):
+        if self._prediction is None:
+            raise ValueError('Moon lock requires a current ephemeris prediction')
+        offset = numpy.asarray(position, dtype=float) - self._prediction
+        if offset.shape != (2,) or not numpy.isfinite(offset).all():
+            raise ValueError('Moon lock position is invalid')
+        self._lock = (offset, time.monotonic())
+        logger.info('Moon position locked: sensor correction=(%.1f, %.1f)', *offset)
 
     def is_aligned(self, i_ref, latitude=None, longitude=None):
         if not has_saved_alignment(self.config):
@@ -231,23 +243,39 @@ class MoonSkyGuide:
         scale = binning / i_ref.binning
         points[:, :2] = (points[:, :2] + 0.5) * scale - 0.5
         point = points[0]
-        self.expected_position = tuple(float(value) for value in point[:2])
+        self._prediction = point[:2].copy()
         self.expected_radius = float(numpy.linalg.norm(points[1:, :2] - point[:2], axis=1).max())
         if self.expected_radius < 2.5:
             raise ValueError('Predicted Moon is too small to resolve surface detail at this sensor scale')
-        margin = self.config.get('MOON_COMPOSITE', {}).get('SEARCH_MARGIN', 0.1)
-        tolerance = max(
+        margin = self.config.get('MOON_COMPOSITE', {}).get('SEARCH_MARGIN', 0.2)
+        maximum_tolerance = max(
             24, params[3] * margin * numpy.linalg.norm(numpy.linalg.inv(matrix[:2, :2]), ord=2)
-            * scale * (1 if expanded else 0.5),
+            * scale,
         )
+        tolerance = max(24, maximum_tolerance * (1 if expanded else 0.5))
         sensor_height, sensor_width = i_ref.hdulist[0].data.shape[-2:]
+        lock_key = (
+            i_ref.camera_uuid, key, i_ref.binning, sensor_height, sensor_width,
+            tuple(values.values()), latitude, longitude, elevation, margin,
+            id(self._validated_model),
+        )
+        if lock_key != self._lock_key:
+            self._lock = None
+            self._lock_key = lock_key
+        if self._lock is not None and time.monotonic() - self._lock[1] >= self.retry_seconds:
+            self._lock = None
+        if self._lock is not None and not expanded:
+            point = point.copy()
+            point[:2] += self._lock[0]
+            tolerance = min(tolerance, max(24, self.expected_radius * 4))
+        self.expected_position = tuple(float(value) for value in point[:2])
         if not numpy.isfinite(point).all() or not 0 <= point[0] < sensor_width or not 0 <= point[1] < sensor_height:
             raise ValueError('Predicted Moon is outside the sensor image')
         bounds = (
-            max(0, int(point[0] - tolerance) // 2 * 2),
-            max(0, int(point[1] - tolerance) // 2 * 2),
-            min(sensor_width, math.ceil((point[0] + tolerance) / 2) * 2),
-            min(sensor_height, math.ceil((point[1] + tolerance) / 2) * 2),
+            max(0, math.floor(max(point[0] - tolerance, self._prediction[0] - maximum_tolerance) / 2) * 2),
+            max(0, math.floor(max(point[1] - tolerance, self._prediction[1] - maximum_tolerance) / 2) * 2),
+            min(sensor_width, math.ceil(min(point[0] + tolerance, self._prediction[0] + maximum_tolerance) / 2) * 2),
+            min(sensor_height, math.ceil(min(point[1] + tolerance, self._prediction[1] + maximum_tolerance) / 2) * 2),
         )
         logger.info(
             'Predicted Moon sensor position=(%.1f, %.1f), radius=%.1f, search=%s, maximum margin=%.0f%%',

@@ -295,7 +295,7 @@ def test_bad_predictions_are_explicit_and_never_fall_back_to_whole_frame(monkeyp
         MoonSkyGuide(cfg).search_region(frame, ref, {}, 40.1, -75.4, 0)
 
 
-@pytest.mark.parametrize('margin', [0.01, 0.05, 0.1])
+@pytest.mark.parametrize('margin', [0.01, 0.05, 0.1, 0.2])
 def test_search_margin_is_a_hard_limit_in_sensor_coordinates(monkeypatch, margin):
     cfg, ref = config(), reference((1200, 1600))
     cfg['MOON_COMPOSITE']['SEARCH_MARGIN'] = margin
@@ -314,7 +314,7 @@ def test_search_margin_is_a_hard_limit_in_sensor_coordinates(monkeypatch, margin
     assert guide.expected_radius == pytest.approx(12, abs=0.01)
 
 
-def test_default_search_limit_is_ten_percent_not_twenty(monkeypatch):
+def test_default_search_acquires_moon_within_twenty_percent_position_error(monkeypatch):
     cfg, ref = config(), reference((1200, 1600))
     cfg['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 1000
     manual(cfg)
@@ -322,12 +322,76 @@ def test_default_search_limit_is_ten_percent_not_twenty(monkeypatch):
     guide = MoonSkyGuide(cfg)
     frame = {'exposure': 0.001, 'exp_time': ref.exp_date.timestamp()}
     bounds = guide.search_region(frame, ref, {}, 40.1, -75.4, 0, expanded=True)
-    assert bounds == (700, 500, 900, 700)
+    assert bounds == (600, 400, 1000, 800)
     sensor = numpy.full((1200, 1600), 3, numpy.uint8)
-    cv2.circle(sensor, (940, 600), 12, 180, -1)
+    cv2.circle(sensor, (980, 600), 12, 180, -1)
+    assert moon.find_moon(
+        sensor, search=bounds, expected=guide.expected_position, expected_radius=guide.expected_radius,
+    ) is not None
+    sensor[:] = 3
+    cv2.circle(sensor, (1040, 600), 12, 180, -1)
     assert moon.find_moon(
         sensor, search=bounds, expected=guide.expected_position, expected_radius=guide.expected_radius,
     ) is None
+
+
+@pytest.mark.parametrize('invalidate', ['timeout', 'geometry', 'camera', 'binning'])
+def test_lock_refines_manual_prediction_and_reacquires_within_original_bounds(monkeypatch, invalidate):
+    cfg, ref = config(), reference((1200, 1600))
+    cfg['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 1000
+    manual(cfg)
+    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: projected_moon(diameter=1000))
+    clock = mock.Mock(return_value=1000)
+    monkeypatch.setattr(moon_sky.time, 'monotonic', clock)
+    guide = MoonSkyGuide(cfg)
+    frame = {'exposure': 0.001, 'exp_time': ref.exp_date.timestamp()}
+    guide.search_region(frame, ref, {}, 40.1, -75.4, 0)
+    guide.record_lock((940, 620))
+    locked = guide.search_region(frame, ref, {}, 40.1, -75.4, 0)
+    numpy.testing.assert_allclose(guide.expected_position, (940, 620), atol=0.01)
+    assert locked[2] - locked[0] == pytest.approx(8 * guide.expected_radius, abs=4)
+    expanded = guide.search_region(frame, ref, {}, 40.1, -75.4, 0, expanded=True)
+    assert expanded == (600, 400, 1000, 800)
+    # A refined lock is an absolute correction, not accumulated frame to frame.
+    guide.record_lock((942, 621))
+    guide.search_region(frame, ref, {}, 40.1, -75.4, 0)
+    numpy.testing.assert_allclose(guide.expected_position, (942, 621), atol=0.01)
+    if invalidate == 'timeout':
+        clock.return_value += guide.retry_seconds
+    elif invalidate == 'geometry':
+        cfg['VIRTUALSKY']['OFFSET_X'] = 10
+    elif invalidate == 'camera':
+        ref.camera_uuid = 'camera-2'
+    else:
+        ref = reference((600, 800), binning=2)
+    guide.search_region(frame, ref, {}, 40.1, -75.4, 0)
+    assert guide._lock is None
+
+
+def test_lock_requires_a_finite_current_prediction():
+    guide = MoonSkyGuide(config())
+    with pytest.raises(ValueError, match='current ephemeris'):
+        guide.record_lock((10, 20))
+    guide._prediction = numpy.array([10, 20])
+    with pytest.raises(ValueError, match='invalid'):
+        guide.record_lock((float('nan'), 20))
+
+
+@pytest.mark.parametrize('margin,position', [(0.01, (820, 600)), (0.2, (990, 600))])
+def test_refined_lock_never_expands_beyond_configured_prediction_window(monkeypatch, margin, position):
+    cfg, ref = config(), reference((1200, 1600))
+    cfg['VIRTUALSKY']['IMAGE_CIRCLE_DIAMETER'] = 1000
+    cfg['MOON_COMPOSITE']['SEARCH_MARGIN'] = margin
+    manual(cfg)
+    monkeypatch.setattr(moon_sky.ephem, 'Moon', lambda obs: projected_moon(diameter=1000))
+    guide = MoonSkyGuide(cfg)
+    frame = {'exposure': 0.001, 'exp_time': ref.exp_date.timestamp()}
+    broad = guide.search_region(frame, ref, {}, 40.1, -75.4, 0, expanded=True)
+    guide.record_lock(position)
+    locked = guide.search_region(frame, ref, {}, 40.1, -75.4, 0)
+    assert broad[0] <= locked[0] < locked[2] <= broad[2]
+    assert broad[1] <= locked[1] < locked[3] <= broad[3]
+    assert all(value % 2 == 0 for value in locked)
 
 
 def test_real_apparent_moon_size_rejects_unresolved_prediction(monkeypatch):

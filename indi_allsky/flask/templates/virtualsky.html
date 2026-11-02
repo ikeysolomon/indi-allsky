@@ -532,6 +532,9 @@ function loadJS(url, data, onDone, onError) {
                         <p id="lens_save_help"><strong>Save</strong> writes all nine calibration values to the camera configuration,
                            including manually entered values, and records the alignment for the Moon's bounded search.
                            A successful star solve is not required; the saved overlay can be a rough guide.
+                           Moon recovery searches up to +/-20% of the image-circle diameter around the
+                           prediction (unless a smaller search margin is configured), then refines its
+                           position after locking onto usable lunar detail.
                            Display controls are not saved. Azimuth also repositions
                            the cardinal-direction labels burned into future captured images.</p>
                         <p><strong>Additional overlay correction</strong> is optional and can reduce residual mismatches

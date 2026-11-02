@@ -1961,6 +1961,9 @@ class ImageProcessor(object):
                         expected=local_expected, expected_radius=expected_radius,
                     )
                     if lunar_roi is None:
+                        if guide is not None and not attempt:
+                            logger.info('No short-frame Moon detail at the initial position; retrying the full bounded search')
+                            continue
                         logger.warning('Moon composite skipped: no usable short-frame lunar detail inside the long footprint')
                         return
                     break
@@ -2033,6 +2036,11 @@ class ImageProcessor(object):
                 preserve_transfer=bool(self.config.get('IMAGE_STRETCH', {}).get('SPLIT')),
                 clipping_mask=clipping_mask,
             )
+            if applied and guide is not None:
+                guide.record_lock((
+                    offset_x + (lunar_roi[0] + lunar_roi[2]) / 2,
+                    offset_y + (lunar_roi[1] + lunar_roi[3]) / 2,
+                ))
         except (OSError, ValueError) as e:
             logger.warning('Moon composite skipped: %s', e)
             return

@@ -272,7 +272,7 @@ def test_invalid_replacement_mask_does_not_change_image(invalid):
     numpy.testing.assert_array_equal(image, before)
 
 
-@pytest.mark.parametrize('margin', [0, 0.009, 0.101, True, '0.05', float('nan'), float('inf')])
+@pytest.mark.parametrize('margin', [0, 0.009, 0.201, True, '0.05', float('nan'), float('inf')])
 def test_search_margin_is_validated(margin):
     with pytest.raises(ValueError, match='SEARCH_MARGIN'):
         moon.validate_config({
@@ -947,6 +947,7 @@ def test_fits_roi_composite_reuses_normal_decoder(tmp_path, mode, bits, sensor_s
         guide = SimpleNamespace(
             search_region=mock.Mock(return_value=(20, 20, 100, 100)),
             expected_position=(60, 60), expected_radius=12,
+            record_lock=mock.Mock(),
         ) if guided else None
         processor.composite_moon({
             'filename': str(filename), 'gain': 75, 'binning': 1,

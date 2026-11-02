@@ -37,13 +37,14 @@ Add this object to the configuration:
   then tune for your camera/lens and moon-mode gain. If the moon is still clipped,
   reduce it. The short frame uses the **same gain and binning** as the sky frame.
 - Optional advanced `SEARCH_MARGIN`: maximum search half-width around the rough
-  prediction, as a fraction of the aligned image-circle diameter, default `0.1`
-  (10% in each direction), allowed range `0.01`-`0.1`.
+  prediction, as a fraction of the aligned image-circle diameter, default `0.2`
+  (20% in each direction), allowed range `0.01`-`0.2`.
   It is available through configuration export/edit/import, not another UI control,
   and is retained when saving the camera settings. Sensor transforms and binning
   scale this margin; the minimum is 24 sensor pixels. Explicit saved values are
-  retained; set this to `0.1` if an older configuration specifies `0.05` and the
-  full 10% search allowance is wanted.
+  retained; set this to `0.2` if an older configuration specifies `0.05` or `0.1`
+  and the full 20% search allowance is wanted. This percentage refers to the
+  image-circle diameter, not the much smaller detected lunar disk.
 
 Old `ROI` and `THRESHOLD` values are ignored and removed on the next configuration
 save/import. No manual migration or coordinate updates are needed.
@@ -63,7 +64,7 @@ reference binning is converted to the current binning.
 Only a neighbourhood around that predicted position is searched. The first
 window uses half the configured maximum margin; if necessary, one retry uses
 the full margin. Both have a 24-sensor-pixel minimum. The default is therefore
-roughly +/-5% initially and +/-10% at most, not +/-10% growing to +/-20%.
+roughly +/-10% initially and +/-20% at most.
 There are at most two search windows, never an indefinite expansion or an
 unguided fallback. The whole detected footprint must fit inside the window;
 a source cut off by its boundary is not accepted as the whole Moon.
@@ -78,6 +79,17 @@ and peak, so dark-subtracted clipping levels are also supported.
 The footprint coordinates and binary damage mask remain in memory for the
 following short-frame lookup. These operations run in the image worker after
 both captures arrive, not inside the INDI BLOB callback.
+
+After a successful composite, the observed short-frame Moon position refines
+the ephemeris prediction with a sensor-coordinate correction. Following pairs
+try a smaller window around that corrected position while continuing to follow
+the Moon's predicted motion. The correction is replaced, not accumulated, after
+each successful composite. A failed local acquisition retries the original full
+bounded window, never a drifting window outside the configured allowance.
+Locks expire after five minutes without a successful composite and are discarded
+when the camera, binning, geometry or observer context changes. Failed or clipped
+detail does not establish a lock. This refinement stays in memory; it does not
+silently rewrite the user's saved VirtualSky alignment.
 
 Only the detected long-frame crop is searched for short-frame lunar detail.
 A max-pooled preview, at most 768 pixels per dimension, preserves bright seeds;
@@ -185,7 +197,9 @@ same database transaction so VirtualSky can use the result. Following frames use
 the saved alignment, including after a restart.
 
 Manual calibration does not require visible stars or a successful automatic
-solve. Once either calibration is saved and loaded, it is reused across captures
+solve. A roughly positioned overlay saved with **Save** is sufficient to start
+the bounded search; precise star alignment is not a prerequisite. Once either
+calibration is saved and loaded, it is reused across captures
 and restarts; only the Moon's time-dependent ephemeris position is recalculated.
 A changed camera, image pipeline or saved geometry invalidates the recorded
 mapping; an automatic solution also checks location. The automatic save checks for concurrent geometry edits

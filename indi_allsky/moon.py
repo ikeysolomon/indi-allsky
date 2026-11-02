@@ -37,9 +37,9 @@ def validate_config(config):
     exposure = settings.get('EXPOSURE', 0.001)
     if type(exposure) not in (int, float) or not math.isfinite(exposure) or exposure <= 0:
         raise ValueError('MOON_COMPOSITE EXPOSURE must be finite and positive')
-    margin = settings.get('SEARCH_MARGIN', 0.1)
-    if type(margin) not in (int, float) or not math.isfinite(margin) or not 0.01 <= margin <= 0.1:
-        raise ValueError('MOON_COMPOSITE SEARCH_MARGIN must be a fraction from 0.01 to 0.1')
+    margin = settings.get('SEARCH_MARGIN', 0.2)
+    if type(margin) not in (int, float) or not math.isfinite(margin) or not 0.01 <= margin <= 0.2:
+        raise ValueError('MOON_COMPOSITE SEARCH_MARGIN must be a fraction from 0.01 to 0.2')
 
 
 def reported_exposure(header):

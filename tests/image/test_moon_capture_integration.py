@@ -614,14 +614,15 @@ def ingest_long(runtime, job):
 
 
 @pytest.mark.parametrize('exposure_keyword', ['EXPTIME', 'EXPOSURE'])
-@pytest.mark.parametrize('scene', ['center', 'expanded', 'distorted', 'cloud', 'flare', 'far-away', 'point-source'])
+@pytest.mark.parametrize('scene', ['center', 'expanded', 'distorted', 'cloud', 'flare', 'far-away', 'point-source', 'rough-manual'])
 def test_capture_to_saved_image_uses_bounded_lunar_prediction(runtime, monkeypatch, tmp_path, scene, exposure_keyword):
     import cv2
     from indi_allsky import moon, moon_sky
     from indi_allsky.lens_solver.calibration import pipelineSignature
 
     center_x = {'center': 200, 'expanded': 230, 'distorted': 230, 'cloud': 230,
-                'flare': 230, 'far-away': 290, 'point-source': 290}[scene]
+                'flare': 230, 'far-away': 290, 'point-source': 290, 'rough-manual': 290}[scene]
+    runtime.processor.config['MOON_COMPOSITE']['SEARCH_MARGIN'] = 0.2 if scene == 'rough-manual' else 0.1
     short = numpy.full((300, 400), 3 * 256, numpy.uint16)
     cv2.circle(short, (50, 50), 20, 255 * 256, -1)
     cv2.circle(short, (center_x, 150), 12, 180 * 256, -1)
@@ -681,7 +682,7 @@ def test_capture_to_saved_image_uses_bounded_lunar_prediction(runtime, monkeypat
         )
         numpy.testing.assert_allclose(guide.expected_position, (200, 150), atol=0.01)
         assert guide.expected_radius == pytest.approx(12, abs=0.01)
-        if scene in ('center', 'expanded', 'distorted', 'cloud', 'flare'):
+        if scene in ('center', 'expanded', 'distorted', 'cloud', 'flare', 'rough-manual'):
             display_white = 250 if scene == 'cloud' else 180
             dark_detail = (
                 round(25 + (90 - 3) / (180 - 3) * (display_white - 25))
@@ -691,8 +692,11 @@ def test_capture_to_saved_image_uses_bounded_lunar_prediction(runtime, monkeypat
             assert processor.image[145, center_x + 4] == display_white
             x1, y1, x2, y2 = blend.call_args.args[2]
             assert x1 < center_x < x2 and y1 < 150 < y2
+            assert guide._lock is not None
+            assert guide._lock[0][0] == pytest.approx(center_x - 200, abs=2)
         else:
             blend.assert_not_called()
+            assert guide._lock is None
             numpy.testing.assert_array_equal(processor.image, original)
         assert processor.image[50, 50] == 25
         numpy.testing.assert_array_equal(i_ref.hdulist[0].data, long)
@@ -1159,6 +1163,7 @@ def test_long_footprint_precedes_short_detection_and_registers_motion(runtime, m
     class Guide:
         expected_position = (60, 60)
         expected_radius = 12
+        record_lock = mock.Mock()
 
         def search_region(self, frame, *args, **kwargs):
             events.append(frame['exposure'])
@@ -1278,6 +1283,7 @@ def test_long_footprint_expands_search_only_once(runtime, monkeypatch, caplog, r
     class Guide:
         expected_position = (40, 40)
         expected_radius = 12
+        record_lock = mock.Mock()
 
         def search_region(self, *args, expanded=False):
             windows.append(expanded)
